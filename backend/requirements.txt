@@ -1,10 +1,30 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-sqlalchemy==2.0.35
-pydantic==2.9.2
-python-dotenv==1.0.1
-python-constraint==1.4.0
-httpx==0.27.2
-alembic==1.13.2
-python-jose[cryptography]==3.3.0
+# 物理实验调课辅助系统 - 后端依赖
+# 版本为「实际验证可运行」的锁定值（本地已跑通 /load-default + CP-SAT 求解 + Excel 导出）。
+# 安装：pip install -r requirements.txt
+
+# --- Web 框架 ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+# --- 配置与数据校验 ---
+pydantic==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.2.1
+
+# --- 数据库（调课申请 SQLite 持久化） ---
+sqlalchemy==2.0.52
+
+# --- HTTP 客户端（调用外部 LLM 接口） ---
+httpx==0.28.1
+
+# --- 鉴权（管理员登录） ---
+python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
+
+# --- 排课求解（并行排课 CP-SAT 模型） ---
+ortools==9.15.6755
+
+# --- Excel / PDF 解析 ---
+openpyxl==3.1.5
+pypdf==6.19.0
+PyMuPDF==1.28.2

@@ -12,7 +12,7 @@ if %errorlevel%==0 (
     echo   [OK] Backend already running
 ) else (
     echo   [..] Starting backend (FastAPI :8000)...
-    start "backend" /min cmd /c "cd /d E:\Program\physics-scheduler-agent\backend && C:\Users\Lenovo\miniconda3\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    start "backend" /min cmd /c "cd /d E:\Program\physics-scheduler-agent\backend && D:\miniconda3_new\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
     timeout /t 4 /nobreak >nul
     echo   [OK] Backend started
 )

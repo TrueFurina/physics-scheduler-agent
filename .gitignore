@@ -9,6 +9,7 @@ venv/
 node_modules/
 dist/
 *.local
+*.tsbuildinfo
 
 # Database
 *.db
@@ -33,6 +34,10 @@ logs/
 backend/app/data/
 schedule.xlsx
 (2024-2025-2)课表.pdf
+
+# WorkBuddy 本地记忆：个人工作日志，含真实联系人 PII / 会议转写，不入库
+# （应用注册信息 .workbuddy/applications.yaml 需保留，故只忽略 memory 子目录）
+.workbuddy/memory/
 
 # Scratch
 server.log

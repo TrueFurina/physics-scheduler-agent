@@ -65,21 +65,46 @@ def load_default_schedule():
 
 
 def seed_demo_request():
-    """预置一条演示调课申请单（待审批）"""
-    r = httpx.post(f"{BASE_URL}/api/reschedule/requests", json={
-        "teacher": "吴琳",
-        "course_name": "大学物理实验C",
-        "class_name": "2024级信息安全+海洋资源与环境",
-        "original_time": "周四 13:30-15:45 · A504",
-        "target_week": 7,
-        "reason": "演示：周四下午有会议",
-    }, timeout=10)
-    if r.status_code == 200:
-        data = r.json()
-        print(f"✅ 预置演示申请单: #{data.get('request', {}).get('id')}（待审批）")
-        return True
-    print(f"⚠️ 预置申请单失败（可能已有数据）: {r.text[:100]}")
-    return False
+    """预置演示调课申请单（闽江大学真实教师场景）"""
+    demo_requests = [
+        {
+            "teacher": "吴琳",
+            "course_name": "大学物理实验C",
+            "class_name": "2024级信息安全+海洋资源与环境",
+            "original_time": "周四 13:30-15:45 · A504",
+            "target_week": 7,
+            "reason": "演示：周四下午有会议，需调课",
+        },
+        {
+            "teacher": "林珠云",
+            "course_name": "大学物理实验B",
+            "class_name": "2024级电子科学与技术",
+            "original_time": "周五 13:30-15:45 · A513",
+            "target_week": 8,
+            "reason": "演示：外出参加教学研讨会",
+        },
+        {
+            "teacher": "郑辉",
+            "course_name": "大学物理实验C",
+            "class_name": "2024级应用化学1、2班",
+            "original_time": "周三 15:45-18:00 · A410",
+            "target_week": 9,
+            "reason": "演示：实验室设备维护，需错峰",
+        },
+    ]
+
+    created = 0
+    for req in demo_requests:
+        r = httpx.post(f"{BASE_URL}/api/reschedule/requests", json=req, timeout=10)
+        if r.status_code == 200:
+            created += 1
+            data = r.json()
+            print(f"✅ 预置演示申请单: #{data.get('request', {}).get('id')} "
+                  f"{req['teacher']} {req['course_name']} → 第{req['target_week']}周（待审批）")
+
+    if created == 0:
+        print("⚠️ 预置申请单失败（可能已有数据）")
+    return created > 0
 
 
 def main():

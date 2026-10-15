@@ -197,6 +197,26 @@ class ScheduleDatabase:
         """返回数据源文件路径（兼容）"""
         return getattr(self, "_filepath", "")
 
+    def get_semester_start_date(self):
+        """从安排表解析真实学期起始日（"第1周2月17日-2月23日"）"""
+        import re
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(self.schedule_path())
+            ws = wb["大学物理实验安排表 (周) "]
+            for row in ws.iter_rows(min_row=2, max_row=3, values_only=True):
+                for cell in row:
+                    if cell and "第1周" in str(cell):
+                        m = re.search(r"第1周(\d{1,2})月(\d{1,2})日", str(cell))
+                        if m:
+                            month, day = int(m.group(1)), int(m.group(2))
+                            # 学年：24-25学年第二学期（春季），起始年在2月→2025
+                            from datetime import date
+                            return date(2025, month, day)
+        except Exception:
+            pass
+        return None  # 解析失败时回退到默认
+
     def get_teacher_courses(self, teacher_name: str) -> List[Dict]:
         """
         按教师提取课程卡片（F2）

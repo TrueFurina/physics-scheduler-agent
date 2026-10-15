@@ -7,15 +7,16 @@ from app.utils.excel_parser import ScheduleDatabase
 from app.agent.student_schedule import StudentSchedule
 from app.agent.llm_intent_parser import LLMIntentParser
 
-# 学期起始日（第1周周一）：2024-2025-2 学期约 2025-02-24
+# 学期起始日（第1周周一）默认值；实际从 schedule.xlsx 解析覆盖
 SEMESTER_START = date(2025, 2, 24)
 WEEKDAY_OFFSET = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
 
 
-def week_to_date(week: int, weekday: str) -> str:
-    """周次 + 星期 → 具体日期（YYYY-MM-DD）"""
+def week_to_date(week: int, weekday: str, start: Optional[date] = None) -> str:
+    """周次 + 星期 → 具体日期（MM月DD日），start 为学期起始日（第1周周一）"""
     try:
-        d = SEMESTER_START + timedelta(days=(week - 1) * 7 + WEEKDAY_OFFSET.get(weekday, 0))
+        base = start or SEMESTER_START
+        d = base + timedelta(days=(week - 1) * 7 + WEEKDAY_OFFSET.get(weekday, 0))
         return d.strftime("%m月%d日")
     except Exception:
         return ""
@@ -37,6 +38,17 @@ class RescheduleAgent:
         self.db = db
         self.student = student
         self.llm_parser = llm_parser or LLMIntentParser()
+        # 学期起始日：缓存一次解析结果，避免每次筛选都重新打开 Excel（慢）
+        self._semester_start_cache = None
+
+    def _get_semester_start(self):
+        """动态获取学期起始日（缓存解析结果，避免重复打开 Excel）"""
+        if self._semester_start_cache is None:
+            try:
+                self._semester_start_cache = self.db.get_semester_start_date() or SEMESTER_START
+            except Exception:
+                self._semester_start_cache = SEMESTER_START
+        return self._semester_start_cache
 
     def _cn_to_int(self, s: str) -> int:
         """中文数字转阿拉伯数字（一~二十）"""
@@ -77,21 +89,28 @@ class RescheduleAgent:
             source_week = int(num_str) if num_str.isdigit() else self._cn_to_int(num_str)
 
         # 2. 确定目标周次
+        # "下下周" 必须先判：它包含子串 "下周"，顺序反了会让 "下下周" 命中 +1 分支，
+        # 于是 +2 那条分支永远不可达（原来的顺序就是这个 bug）。
         target_week = None
-        if "下周" in text:
+        if "下下周" in text:
+            base = source_week if source_week else current_week
+            target_week = base + 2
+        elif "下周" in text:
             # 有源周 → 源周+1；无源周 → 当前周+1
             base = source_week if source_week else current_week
             target_week = base + 1
-        elif "下下周" in text:
-            base = source_week if source_week else current_week
-            target_week = base + 2
         elif "这周" in text or "本周" in text:
             target_week = source_week if source_week else current_week
         elif source_week is not None:
             # 直接指定"第N周"
             target_week = source_week
 
-        if target_week and week_range:
+        # 上界夹取：`get_week_range()` 在数据未加载时返回 `(0, 0)`（见 excel_parser.py），
+        # 而元组 `(0, 0)` 是**真值**——原来的 `min(target_week, week_range[1])`
+        # 会把目标周次夹成 0。0 是假值，下游就当成"没解析出周次"，
+        # 于是白白调用一次 LLM 并回一句"请补充信息"（实测每次约 5 秒）。
+        # 因此只在拿到有效上界时才夹。
+        if target_week and week_range and week_range[1]:
             target_week = min(target_week, week_range[1])
 
         # 提取教师/课程信息（简单规则）
@@ -225,7 +244,7 @@ class RescheduleAgent:
                     info = teacher_occupied[f"{wd}_{ts}"]
                     excluded.append({
                         "weekday": wd, "time_slot": ts, "room": "",
-                        "date": week_to_date(target_week, wd),
+                        "date": week_to_date(target_week, wd, self._get_semester_start()),
                         "reason_type": "teacher_busy",
                         "reason": f"教师该时段已有课（{info['class_name']} {info['experiment']}）",
                     })
@@ -236,7 +255,7 @@ class RescheduleAgent:
                         info = occupied_info[f"{wd}_{ts}_{rm}"]
                         excluded.append({
                             "weekday": wd, "time_slot": ts, "room": rm,
-                            "date": week_to_date(target_week, wd),
+                            "date": week_to_date(target_week, wd, self._get_semester_start()),
                             "reason_type": "classroom_busy",
                             "reason": f"教室已被占用（{info['class_name']} {info['experiment']}）",
                         })
@@ -247,7 +266,7 @@ class RescheduleAgent:
                         if check_ts in student_busy[wd]:
                             excluded.append({
                                 "weekday": wd, "time_slot": ts, "room": rm,
-                                "date": week_to_date(target_week, wd),
+                                "date": week_to_date(target_week, wd, self._get_semester_start()),
                                 "reason_type": "student_busy",
                                 "reason": f"学生该时段有课（{student_busy[wd][check_ts]}）",
                             })
@@ -256,16 +275,17 @@ class RescheduleAgent:
                         "weekday": wd,
                         "time_slot": ts,
                         "room": rm,
-                        "date": week_to_date(target_week, wd),
+                        "date": week_to_date(target_week, wd, self._get_semester_start()),
                     })
 
         return {"available": available, "excluded": excluded}
 
-    def process_request(self, text: str) -> dict:
+    def process_request(self, text: str, with_ai: bool = True) -> dict:
         """处理调课请求，返回可用时段 + 被排除时段（含原因）
 
         解析策略：规则解析优先；规则失败时降级到 LLM 解析；
         LLM 判定信息不全时返回追问问题（B2 多轮追问）。
+        with_ai=False 时跳过 LLM 候选方案生成（fast 模式，秒回）。
         """
         parsed = self.parse_request(text)
 
@@ -345,33 +365,34 @@ class RescheduleAgent:
             for ex in excluded[:6]:
                 summary_lines.append(f"  ✗ {ex['weekday']} {ex['time_slot']} {ex['room']} — {ex['reason']}")
 
-        # B3: 用 LLM 生成 AI 候选方案（可选增强，失败时降级为规则候选）
+        # B3: 生成 AI 候选方案（with_ai=True 时；fast 模式完全跳过候选生成秒回）
         ai_plans = []
-        if self.llm_parser and self.llm_parser.configured:
-            try:
-                course_hint = parsed.get("course_name") or "课程"
-                plans_result = self.llm_parser.suggest_plans(
-                    teacher=parsed.get("teacher_name") or "教师",
-                    course=course_hint,
-                    target_week=parsed["target_week"],
-                    available_slots=slots,
-                )
-                ai_plans = plans_result.get("plans", [])
-            except Exception:
-                ai_plans = []  # LLM 异常时降级
+        if with_ai:
+            if self.llm_parser and self.llm_parser.configured:
+                try:
+                    course_hint = parsed.get("course_name") or "课程"
+                    plans_result = self.llm_parser.suggest_plans(
+                        teacher=parsed.get("teacher_name") or "教师",
+                        course=course_hint,
+                        target_week=parsed["target_week"],
+                        available_slots=slots,
+                    )
+                    ai_plans = plans_result.get("plans", [])
+                except Exception:
+                    ai_plans = []  # LLM 异常时降级
 
-        # LLM 候选为空（服务不稳定）→ 规则降级：按星期去重挑 3 个候选
-        if not ai_plans:
-            seen_days = set()
-            for s in slots:
-                if s["weekday"] not in seen_days and len(ai_plans) < 3:
-                    seen_days.add(s["weekday"])
-                    ai_plans.append({
-                        "weekday": s["weekday"],
-                        "time_slot": s["time_slot"],
-                        "room": s["room"],
-                        "reason": "系统推荐：该时段教室空闲且学生无课",
-                    })
+            # LLM 候选为空（服务不稳定）→ 规则降级：按星期去重挑 3 个候选
+            if not ai_plans:
+                seen_days = set()
+                for s in slots:
+                    if s["weekday"] not in seen_days and len(ai_plans) < 3:
+                        seen_days.add(s["weekday"])
+                        ai_plans.append({
+                            "weekday": s["weekday"],
+                            "time_slot": s["time_slot"],
+                            "room": s["room"],
+                            "reason": "系统推荐：该时段教室空闲且学生无课",
+                        })
 
         if ai_plans:
             summary_lines.append(f"\n\n🤖 推荐候选方案：")

@@ -1,11 +1,36 @@
-"""律动基元（TokenRhythm）LLM 意图解析器
+"""调课意图解析器（LLM，OpenAI 兼容接口）
 
 用 LLM 解析"大白话"调课请求（B1），与规则解析互补：
 - 规则解析：处理标准话术（"第六周的课上不了，调到下周"）
 - LLM 解析：处理口语化表达（"我下周三有点事，那个课往后挪一周行不行"）
 
-接口：OpenAI 兼容（POST /v1/chat/completions）
-凭据：从环境变量 JIYUAN_LVDONG_BASE_URL / JIYUAN_LVDONG_API_KEY 读取
+渠道选择
+--------
+按 `E:\\Program\\免费Token总账.md` 的实测结论排序，**默认走智谱 `glm-4-flash`**
+——它是总账里唯一的"永久免费、不限量"，适合长期挂在公网演示上；其余渠道
+（ModelScope 2000 次/天、TokenHub 一次性体验包、DeepSeek 余额制…）按剩余额度
+作为备选。可用 `LLM_PROVIDER` 强制指定，或用 `LLM_API_KEY` + `LLM_API_BASE`
+完全自定义。
+
+为什么改掉了原来的 `JIYUAN_LVDONG_*`
+------------------------------------
+原实现读 `JIYUAN_LVDONG_API_KEY`（tokenrhythm.studio 第三方中转），而总账
+2026-10-15 实测该 key **余额不足 402**——即后端 LLM 当时根本调不通，只是
+一直用"规则解析优先"的降级路径掩盖着。现按总账改为渠道表 + 自动探测，
+并把已欠费的 jiyuan 降到最后一位兜底。
+
+配置在**实例化时**解析（不是类定义时）
+--------------------------------------
+类属性在 import 时求值，测试与运行期都改不动。改为 `__init__` 里读环境变量，
+类属性仅保留同名默认值以兼容历史引用。
+
+环境变量
+--------
+    LLM_PROVIDER      渠道名（zhipu / modelscope / tokenhub / deepseek / amd / xfyun / jiyuan）
+    LLM_API_KEY       显式密钥，优先级最高（配合 LLM_API_BASE / LLM_MODEL）
+    LLM_API_BASE      显式端点
+    LLM_MODEL         显式模型名
+    <渠道>_API_KEY    各渠道密钥，见 `_CHANNELS`
 """
 
 import json
@@ -15,19 +40,150 @@ from typing import Optional
 
 import httpx
 
+# ---------------------------------------------------------------------------
+# 渠道表：渠道名 → {env: 候选密钥变量（有序）, base: 端点, model: 默认模型, note: 状态备注}
+#
+# 端点与状态全部来自 `E:\Program\免费Token总账.md`（2026-10-15 实测），
+# 不是推测值。改动这里请同步更新总账的「项目接线位置」一节。
+# ---------------------------------------------------------------------------
+_CHANNELS = {
+    "zhipu": {
+        "env": ("ZHIPU_API_KEY", "ZHIPU_API_KEY_2"),
+        "base": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "note": "永久免费不限量（主防线）",
+    },
+    "modelscope": {
+        "env": ("MODELSCOPE_API_KEY",),
+        "base": "https://api-inference.modelscope.cn/v1",
+        "model": "ZhipuAI/GLM-4.7-Flash",
+        "note": "免费 2000 次/天，热门时段可能 429",
+    },
+    "tokenhub": {
+        "env": ("TOKENHUB_API_KEY",),
+        "base": "https://tokenhub.tencentmaas.com/v1",
+        "model": "glm-5.3-flash",
+        "note": "一次性体验包，额度用尽报 402",
+    },
+    "deepseek": {
+        "env": ("DEEPSEEK_API_KEY",),
+        "base": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "note": "余额制（要花钱），仅作后备",
+    },
+    "amd": {
+        "env": ("AMD_API_KEY",),
+        "base": "https://developer.amd.com.cn/radeon/api/v1",
+        "model": "DeepSeek-V4-Flash",
+        "note": "免费，限 30 RPM",
+    },
+    "xfyun": {
+        "env": ("XFYUN_API_KEY",),
+        "base": "https://spark-api-open.xf-yun.com/v1",
+        "model": "lite",
+        "note": "讯飞 spark lite 免费档",
+    },
+    "jiyuan": {
+        "env": ("JIYUAN_LVDONG_API_KEY",),
+        "base": "https://tokenrhythm.studio/v1",
+        "model": "deepseek-v4-flash",
+        "note": "⚠️ 已欠费 402（总账实测），仅历史兜底",
+    },
+}
+
+# 自动探测顺序：免费/不限量优先，付费与已失效垫底
+_AUTO_ORDER = ("zhipu", "modelscope", "tokenhub", "deepseek", "amd", "xfyun", "jiyuan")
+
+# 默认端点（智谱），用于"只给了 LLM_API_KEY 没给 BASE"的场景
+_DEFAULT_BASE = _CHANNELS["zhipu"]["base"]
+_DEFAULT_MODEL = _CHANNELS["zhipu"]["model"]
+
+
+def _endpoint_host(base_url: str) -> str:
+    """从端点里取主机名，用于诊断输出（不含任何密钥）。"""
+    m = re.match(r"^https?://([^/]+)", base_url or "")
+    return m.group(1) if m else (base_url or "")
+
+
+def resolve_llm_config() -> dict:
+    """解析当前生效的 LLM 渠道配置。
+
+    返回 dict：provider / base_url / api_key / model / configured / source / note。
+    `source` 是取到密钥的环境变量名，便于线上核验"到底读的哪个渠道"——
+    它**不含密钥值**，可以安全地暴露在 `/status` 里。
+
+    `LLM_DISABLED=1` 是离线开关：整体判定为"未配置"，所有 LLM 调用走规则降级。
+    给本地无网开发与 CI 用——避免测试真的打到外部 API（慢、贵、不稳定）。
+    """
+    if os.getenv("LLM_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {
+            "provider": None,
+            "base_url": "",
+            "api_key": "",
+            "model": "",
+            "configured": False,
+            "source": None,
+            "note": "LLM_DISABLED 已置位：全部走规则降级（离线开发 / CI 模式）",
+        }
+
+    forced = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+
+    # 1) 显式覆盖优先级最高
+    explicit_key = (os.getenv("LLM_API_KEY") or "").strip()
+    if explicit_key:
+        return {
+            "provider": "custom",
+            "base_url": (os.getenv("LLM_API_BASE") or "").strip() or _DEFAULT_BASE,
+            "api_key": explicit_key,
+            "model": (os.getenv("LLM_MODEL") or "").strip() or _DEFAULT_MODEL,
+            "configured": True,
+            "source": "LLM_API_KEY",
+            "note": "显式配置",
+        }
+
+    # 2) LLM_PROVIDER 指定的渠道优先，其后按自动顺序补齐
+    order = ([forced] if forced in _CHANNELS else []) + [c for c in _AUTO_ORDER if c != forced]
+
+    for name in order:
+        spec = _CHANNELS[name]
+        for env_name in spec["env"]:
+            key = (os.getenv(env_name) or "").strip()
+            if key:
+                return {
+                    "provider": name,
+                    "base_url": (os.getenv("LLM_API_BASE") or "").strip() or spec["base"],
+                    "api_key": key,
+                    "model": (os.getenv("LLM_MODEL") or "").strip() or spec["model"],
+                    "configured": True,
+                    "source": env_name,
+                    "note": spec["note"],
+                }
+
+    # 3) 一个可用的密钥都没有 → 明确报告，交由上游走规则解析降级
+    return {
+        "provider": forced or None,
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "configured": False,
+        "source": None,
+        "note": "未找到任何可用的 LLM 密钥（见 E:\\Program\\免费Token总账.md）",
+    }
+
 
 class LLMIntentParser:
-    """律动基元 LLM 意图解析器"""
+    """调课意图解析器（多渠道路由）"""
 
-    BASE_URL = os.environ.get("JIYUAN_LVDONG_BASE_URL", "https://tokenrhythm.studio/v1")
-    API_KEY = os.environ.get("JIYUAN_LVDONG_API_KEY", "")
-    MODEL = os.environ.get("JIYUAN_LVDONG_MODEL", "deepseek-v4-flash")
+    # 历史默认值，实际值在 __init__ 里按环境变量覆盖
+    BASE_URL = _DEFAULT_BASE
+    API_KEY = ""
+    MODEL = _DEFAULT_MODEL
 
     SYSTEM_PROMPT = """你是一个高校物理实验排课系统的意图解析器。
 你的任务：把教师用大白话表达的调课请求，解析为结构化的 JSON。
 
 必须提取的信息：
-- teacher: 教师姓名（若有，如"吴琳"）
+- teacher: 教师姓名（若有，如"张三"）
 - source_week: 原上课周次（数字，若提到"第六周""这周"等；无则 null）
 - target_week: 目标周次（数字，若提到"下周""第5周"等；无则 null）
 - target_weekday: 目标星期（如"周一"；无则 null）
@@ -41,7 +197,29 @@ class LLMIntentParser:
 - 输出必须是合法 JSON，不要输出其他内容"""
 
     def __init__(self):
+        self._config = resolve_llm_config()
+        self.provider = self._config["provider"]
+        self.BASE_URL = self._config["base_url"] or _DEFAULT_BASE
+        self.API_KEY = self._config["api_key"]
+        self.MODEL = self._config["model"] or _DEFAULT_MODEL
+        self.source = self._config["source"]
         self.configured = bool(self.API_KEY)
+
+    def describe(self) -> dict:
+        """渠道自述。**不含密钥**，可安全暴露给 `/status` 等诊断接口。"""
+        return {
+            "configured": self.configured,
+            "provider": self.provider or "none",
+            "model": self.MODEL,
+            "endpoint": _endpoint_host(self.BASE_URL),
+            "key_source": self.source,
+            "note": self._config.get("note", ""),
+        }
+
+    def reload_config(self) -> dict:
+        """重新按环境变量解析配置（测试 / 运行期热切换渠道用）。"""
+        self.__init__()
+        return self.describe()
 
     def _build_payload(self, text: str) -> dict:
         return {
@@ -57,10 +235,10 @@ class LLMIntentParser:
     def parse(self, text: str) -> dict:
         """调用 LLM 解析意图，返回结构化 JSON"""
         if not self.configured:
-            return {"error": "LLM 未配置（缺少 JIYUAN_LVDONG_API_KEY）", "needs_followup": False}
+            return {"error": "LLM 未配置（未找到可用的 API 密钥）", "needs_followup": False}
 
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(timeout=60) as client:
                 resp = client.post(
                     f"{self.BASE_URL}/chat/completions",
                     headers={
@@ -138,7 +316,7 @@ class LLMIntentParser:
             user_content = f"{context}\n\n问题：{question}"
 
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(timeout=60) as client:
                 resp = client.post(
                     f"{self.BASE_URL}/chat/completions",
                     headers={
@@ -198,7 +376,7 @@ class LLMIntentParser:
 }}"""
 
         try:
-            with httpx.Client(timeout=30) as client:
+            with httpx.Client(timeout=60) as client:
                 resp = client.post(
                     f"{self.BASE_URL}/chat/completions",
                     headers={

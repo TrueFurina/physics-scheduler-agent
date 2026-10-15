@@ -60,6 +60,32 @@ def test_parse_no_week(agent):
     assert r["target_week"] is None
 
 
+# ---------- 1b. 周次解析回归（2026-10-15 修的两个 bug） ----------
+
+def test_parse_direct_week_when_db_not_loaded():
+    """数据未加载时也必须能把"第N周"解析出来。
+
+    回归：`get_week_range()` 在未加载时返回 `(0, 0)`，而**元组 (0,0) 是真值**，
+    所以原来的 `min(target_week, week_range[1])` 会把目标周次夹成 0；
+    0 是假值，下游就当成"没解析出周次"→ 白调一次 LLM（实测每次约 5 秒）
+    并回一句"请补充信息"，正确答复应是"排课数据尚未加载"。
+    """
+    agent_empty = RescheduleAgent(ScheduleDatabase(), student=None)  # 刻意不 load
+    assert agent_empty.parse_request("第六周")["target_week"] == 6
+    assert agent_empty.parse_request("调到第十周")["target_week"] == 10
+
+
+def test_parse_week_after_next(agent):
+    """'下下周' 应为 +2，而不是 +1。
+
+    回归：'下下周' 包含子串 '下周'，原实现先判 '下周' → 命中 +1 分支，
+    于是 '下下周' 的 +2 分支永远不可达（死代码）。
+    """
+    r = agent.parse_request("第六周的课要下下周上")
+    assert r["source_week"] == 6
+    assert r["target_week"] == 8
+
+
 # ---------- 2. 时间归一化 ----------
 
 def test_time_normalization(agent):

@@ -130,6 +130,57 @@ python -m pytest tests/ -v
 - [ ] Multi-school data isolation
 - [ ] RAG knowledge base for lab materials
 
+## Deployment & Publishing
+
+Live app: <https://physics-scheduler.app.workbuddy.host/>
+
+Deployed as a **single-port, same-origin** service: FastAPI serves both the API and the built
+frontend, so the frontend's relative `API_BASE = '/api'` works unchanged.
+
+```bash
+# 1) Build the frontend (output MUST be frontend/webui, not dist — see the two pitfalls below)
+cd frontend && npm run build
+
+# 2) Run in production form (the process reads PORT itself; defaults to 0.0.0.0:8000)
+python run.py
+# or with an explicit port:  PORT=8080 python run.py
+```
+
+Publish parameters:
+
+| Parameter | Value |
+|---|---|
+| directory | repository root |
+| language | `python` |
+| installCmd | `python3 -m pip install -r backend/requirements.txt` |
+| startCmd | `python3 run.py` |
+| domainPrefix | `physics-scheduler` |
+
+### Two pitfalls (both found the hard way)
+
+1. **The sandbox does not expand `$PORT`.** `--port $PORT` receives an empty value and fails with
+   `Option '--port' requires an argument` (`SITES_START_FAILED`). The port must be read by the
+   process itself — that is exactly why `run.py` exists at the repo root. Do not change it back to
+   `--port $PORT`.
+2. **Uploads exclude only `node_modules` / `.git` / build output — NOT `.gitignore` entries.**
+   - Frontend output left in `dist/` is treated as build output and **excluded**, leaving no
+     `index.html` in the sandbox. Hence `build.outDir: 'webui'` in `vite.config.ts` and
+     `FRONTEND_DIST = frontend/webui` in `main.py`.
+   - The gitignored `schedule.xlsx` **is still uploaded**, so it must never be the default data
+     source: the default is always the sanitized `schedule.demo.xlsx`. Use
+     `SCHEDULE_PATH=schedule.xlsx` locally to load real data.
+
+### Data & privacy
+
+- Default dataset is the sanitized `schedule.demo.xlsx` (built by `scripts/make_demo_schedule.py`;
+  teachers appear as `教师A…`, no phone numbers).
+- Cloud capabilities (auth / database / LLM) are gated by **exact server-side Origin match**:
+  only the published domain is allowed, other origins get 403. So `localhost` can only verify the
+  public data plane — WeChat login must be verified on the live domain.
+
+> Re-publishing requires the user to explicitly ask for it ("publish / deploy"); publish consent
+> does not carry over between turns.
+
 ## Documentation
 
 - [中文 README (Chinese)](README.zh.md)

@@ -130,6 +130,46 @@ python -m pytest tests/ -v
 - [ ] 多校数据隔离
 - [ ] 实验讲义 RAG 知识库
 
+## 部署与发布
+
+线上地址：<https://physics-scheduler.app.workbuddy.host/>
+
+发布采用 **单端口同源** 形态：FastAPI 同时托管 API 与前端产物，前端 `API_BASE = '/api'` 相对路径无需改动。
+
+```bash
+# 1) 构建前端（产物必须落在 frontend/webui，不能叫 dist —— 见下方「两个坑」）
+cd frontend && npm run build
+
+# 2) 按发布态启动（进程自读 PORT，默认 0.0.0.0:8000）
+python run.py
+# 或指定端口： PORT=8080 python run.py
+```
+
+发布参数：
+
+| 参数 | 值 |
+|---|---|
+| directory | 本仓库根 |
+| language | `python` |
+| installCmd | `python3 -m pip install -r backend/requirements.txt` |
+| startCmd | `python3 run.py` |
+| domainPrefix | `physics-scheduler` |
+
+### 两个必须知道的坑（均为实测踩出）
+
+1. **沙箱不展开 `$PORT`**：`--port $PORT` 会拿到空值，报 `Option '--port' requires an argument`，发布失败（`SITES_START_FAILED`）。端口必须由进程自己读 —— 这就是仓库根 `run.py` 存在的原因，请勿改回 `--port $PORT`。
+2. **上传只排除 `node_modules` / `.git` / 构建产物，不排除 `.gitignore` 里的文件**：
+   - 前端产物若留在 `dist/` 会被当构建产物**排除**，沙箱内就没有 `index.html`。故 `vite.config.ts` 设 `build.outDir: 'webui'`，`main.py` 的 `FRONTEND_DIST` 指向 `frontend/webui`。
+   - `.gitignore` 中的 `schedule.xlsx` **仍会被上传**，因此它**不能**作为默认数据源：默认一律走脱敏表 `schedule.demo.xlsx`；本地要看真实数据须显式 `SCHEDULE_PATH=schedule.xlsx`。
+
+### 数据与隐私
+
+- 默认数据源是脱敏表 `schedule.demo.xlsx`（由 `scripts/make_demo_schedule.py` 生成，教师为 `教师A…`，无手机号）。
+- 线上核验：`GET /api/reschedule/status` 返回的教师全为化名。
+- 云端能力（登录 / 数据 / 大模型）受**服务端 Origin 精确匹配**约束：只有发布域名被放行，其他来源 403。故本地 `localhost` 只能验证公网调用，微信登录须在线上域名下验证。
+
+> 重新发布须由用户明确要求「发布 / 上线」（发布同意不跨轮次延续）。
+
 ## 文档
 
 - [English README](README.md)
