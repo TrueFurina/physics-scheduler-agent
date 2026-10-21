@@ -1,6 +1,6 @@
 /**
  * 线上主流程 UI 点测（只读，不改任何数据）
- * 覆盖：首屏 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板
+ * 覆盖：首屏 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板 → 选课咨询(懒加载)
  */
 const { chromium } = require('playwright-core');
 const path = require('path');
@@ -108,6 +108,22 @@ function rec(ok, name, detail) {
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-dashboard.png') });
   } catch (e) {
     rec(false, '📊 数据看板', String(e).slice(0, 100));
+  }
+
+  // 选课咨询（懒加载视图）：验证按需 chunk 真的能到达且正常渲染。
+  // 等待条件必须只在目标视图里出现 —— "选课咨询" 是导航按钮文案，页面一进来就有，
+  // 用它会立刻命中造成假通过；"咨询选课资格" 只出现在 ConsultView 的说明文字里。
+  try {
+    await page.getByRole('button', { name: /选课咨询/ }).first().click();
+    await page.waitForFunction(
+      () => /咨询选课资格/.test(document.body.innerText),
+      { timeout: 30000 },
+    );
+    const inputCount = await page.locator('input[placeholder*="为什么我选不了"]').count();
+    rec(inputCount > 0, '🎓 选课咨询（懒加载）', `视图已渲染，提问框 ${inputCount} 个`);
+    await page.screenshot({ path: path.join(SHOT_DIR, 'flow-consult.png') });
+  } catch (e) {
+    rec(false, '🎓 选课咨询（懒加载）', String(e).slice(0, 120));
   }
 
   rec(jsErrors.length === 0, '全程 JS 错误', `${jsErrors.length} 条${jsErrors.length ? '：' + jsErrors[0] : ''}`);

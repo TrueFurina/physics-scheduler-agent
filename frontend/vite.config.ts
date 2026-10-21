@@ -18,13 +18,19 @@ export default defineConfig({
          *    （`cloud.ts` 的 getCloud()），放在独立 chunk 里更利于定位体积。
          * 注意不要按"页面"切：本项目是单页多视图、视图共享同一份状态，
          * 按页面切只会让公共依赖重复出现在多个 chunk 里。
+         *
+         * ⚠️ axios 必须单独成块。它由 `api/client.ts` 静态引入（首屏必加载），
+         * 而 markdown 解析链只被懒加载的 ConsultView 用到。两者若同处 vendor，
+         * 首屏就会因为 axios 把整个 vendor（含 markdown ~160KB）一起拉下来——
+         * 实测过这个坑：只做视图懒加载、不动分块策略时，首屏字节数几乎没变。
          */
         manualChunks(id: string) {
           if (!id.includes('node_modules')) return undefined;
           if (id.includes('workbuddy-cloud-sdk')) return 'cloud-sdk';
           if (/[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react-vendor';
-          // 其余（markdown 解析链、lucide 等）全归 vendor：再细分会与 vendor
-          // 互相引用生成「circular chunk」告警，收益仅剩缓存粒度，不值得。
+          if (/[\\/]axios[\\/]/.test(id)) return 'http';
+          // 其余（markdown 解析链等）全归 vendor：它只被懒加载视图引用，
+          // 因此这个 chunk 不会出现在首屏关键路径上。
           return 'vendor';
         },
       },
