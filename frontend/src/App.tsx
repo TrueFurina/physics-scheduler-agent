@@ -3,7 +3,14 @@ import {
   rescheduleApi, getAdminToken, setAdminToken, Teacher, TeacherCourse, AvailableSlot, ExcludedSlot, RescheduleRequest,
 } from './api/client';
 import { describeCloudError } from './cloud';
+import {
+  dispatchAuthCallback, getCloudSession, signOutCloud, sendPhoneCode, verifyPhoneCode,
+  signInWithWechat, askCloudLlm, logConsult, listConsultLogs,
+  listCloudRequests, createCloudRequest, approveCloudRequest,
+  type PendingPhoneOtp, type CloudConsultLog, type ConsultModuleKey,
+} from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
+import ErrorBoundary from './components/ErrorBoundary';
 import type { View, ImpactResult } from './types';
 import IdentityView from './views/IdentityView';
 import CoursesView from './views/CoursesView';
@@ -25,12 +32,6 @@ function ViewFallback() {
     </div>
   );
 }
-import {
-  dispatchAuthCallback, getCloudSession, signOutCloud, sendPhoneCode, verifyPhoneCode,
-  signInWithWechat, askCloudLlm, logConsult, listConsultLogs,
-  listCloudRequests, createCloudRequest, approveCloudRequest,
-  type PendingPhoneOtp, type CloudConsultLog, type ConsultModuleKey,
-} from './cloudApi';
 
 
 
@@ -885,118 +886,121 @@ function App() {
       )}
 
       <main className="max-w-4xl mx-auto p-4">
-        {!dataLoaded && loading && (
-          <div className="flex flex-col items-center justify-center py-16">
-            <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4" />
-            <div className="text-gray-400">⏳ 数据加载中...</div>
-          </div>
-        )}
+        {/* 错误边界 key=view：某个视图崩了只影响内容区，切到别的视图自动重置（顶部导航仍可用） */}
+        <ErrorBoundary key={view} label={view}>
+          {!dataLoaded && loading && (
+            <div className="flex flex-col items-center justify-center py-16">
+              <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4" />
+              <div className="text-gray-400">⏳ 数据加载中...</div>
+            </div>
+          )}
 
-        {/* 页面1：身份选择（F1） */}
-        {view === 'identity' && (
-          <IdentityView
-            teachers={teachers}
-            autoScheduleLoading={autoScheduleLoading}
-            autoScheduleMsg={autoScheduleMsg}
-            onOpenAdmin={handleOpenAdmin}
-            onAutoSchedule={handleAutoSchedule}
-            onSelectTeacher={handleSelectTeacher}
-          />
-        )}
-
-        {/* 页面2：我的课程（F2） */}
-        {view === 'courses' && (
-          <CoursesView
-            currentTeacher={currentTeacher}
-            courses={courses}
-            loading={loading}
-            nlInput={nlInput}
-            nlMsg={nlMsg}
-            followupQ={followupQ}
-            onNlInputChange={setNlInput}
-            onNlSubmit={handleNlReschedule}
-            onReschedule={handleReschedule}
-          />
-        )}
-
-        {/* 页面3：调课结果（F3/F4） */}
-        {view === 'reschedule' && selectedCourse && (
-          <RescheduleView
-            selectedCourse={selectedCourse}
-            currentTeacher={currentTeacher}
-            targetWeek={targetWeek}
-            available={available}
-            excluded={excluded}
-            showAllAvail={showAllAvail}
-            impact={impact}
-            impactLoading={impactLoading}
-            requestStatus={requestStatus}
-            loading={loading}
-            onBack={() => setView('courses')}
-            onTargetWeekChange={handleTargetWeekChange}
-            onToggleShowAll={() => setShowAllAvail(!showAllAvail)}
-            onImpactAnalysis={handleImpactAnalysis}
-            onSubmit={handleSubmitRequest}
-          />
-        )}
-
-        {/* 页面4：管理员审批台（F6） */}
-        {view === 'admin' && (
-          <AdminView
-            requests={requests}
-            loading={loading}
-            onBack={handleBackToIdentity}
-            onApprove={handleApprove}
-          />
-        )}
-
-        {/* 页面5：⚡ 并行排课（访谈核心需求：所有实验项目一次列出，一键排定） */}
-        {view === 'parallel' && (
-          <Suspense fallback={<ViewFallback />}>
-            <ParallelView
-              weekday={parallelWeekday}
-              courses={parallelCourses}
-              selected={parallelSelected}
-              loading={parallelLoading}
-              solving={parallelSolving}
-              result={parallelResult}
-              viewWeek={parallelViewWeek}
-              onWeekdayChange={handleParallelWeekdayChange}
-              onSolve={handleParallelSolve}
-              onExport={handleParallelExport}
-              onViewWeekChange={setParallelViewWeek}
+          {/* 页面1：身份选择（F1） */}
+          {view === 'identity' && (
+            <IdentityView
+              teachers={teachers}
+              autoScheduleLoading={autoScheduleLoading}
+              autoScheduleMsg={autoScheduleMsg}
+              onOpenAdmin={handleOpenAdmin}
+              onAutoSchedule={handleAutoSchedule}
+              onSelectTeacher={handleSelectTeacher}
             />
-          </Suspense>
-        )}
+          )}
 
-        {/* 页面6：📊 数据看板（体检报告 + 统计） */}
-        {view === 'dashboard' && (
-          <Suspense fallback={<ViewFallback />}>
-            <DashboardView
-              auditLoading={auditLoading}
-              auditData={auditData}
-              statsData={statsData}
-            />
-          </Suspense>
-        )}
-
-        {/* 页面7：选课咨询 / 实验辅导（云端大模型，流式问答） */}
-        {(view === 'course_select' || view === 'tutor') && (
-          <Suspense fallback={<ViewFallback />}>
-            <ConsultView
-              mode={view === 'course_select' ? 'course_select' : 'tutor'}
-              question={consultQ}
-              answer={consultMsg}
+          {/* 页面2：我的课程（F2） */}
+          {view === 'courses' && (
+            <CoursesView
+              currentTeacher={currentTeacher}
+              courses={courses}
               loading={loading}
-              logs={consultLogs}
-              showLogs={showLogs}
-              onQuestionChange={setConsultQ}
-              onAsk={handleConsult}
-              onStop={handleStopConsult}
-              onToggleLogs={handleToggleLogs}
+              nlInput={nlInput}
+              nlMsg={nlMsg}
+              followupQ={followupQ}
+              onNlInputChange={setNlInput}
+              onNlSubmit={handleNlReschedule}
+              onReschedule={handleReschedule}
             />
-          </Suspense>
-        )}
+          )}
+
+          {/* 页面3：调课结果（F3/F4） */}
+          {view === 'reschedule' && selectedCourse && (
+            <RescheduleView
+              selectedCourse={selectedCourse}
+              currentTeacher={currentTeacher}
+              targetWeek={targetWeek}
+              available={available}
+              excluded={excluded}
+              showAllAvail={showAllAvail}
+              impact={impact}
+              impactLoading={impactLoading}
+              requestStatus={requestStatus}
+              loading={loading}
+              onBack={() => setView('courses')}
+              onTargetWeekChange={handleTargetWeekChange}
+              onToggleShowAll={() => setShowAllAvail(!showAllAvail)}
+              onImpactAnalysis={handleImpactAnalysis}
+              onSubmit={handleSubmitRequest}
+            />
+          )}
+
+          {/* 页面4：管理员审批台（F6） */}
+          {view === 'admin' && (
+            <AdminView
+              requests={requests}
+              loading={loading}
+              onBack={handleBackToIdentity}
+              onApprove={handleApprove}
+            />
+          )}
+
+          {/* 页面5：⚡ 并行排课（访谈核心需求：所有实验项目一次列出，一键排定） */}
+          {view === 'parallel' && (
+            <Suspense fallback={<ViewFallback />}>
+              <ParallelView
+                weekday={parallelWeekday}
+                courses={parallelCourses}
+                selected={parallelSelected}
+                loading={parallelLoading}
+                solving={parallelSolving}
+                result={parallelResult}
+                viewWeek={parallelViewWeek}
+                onWeekdayChange={handleParallelWeekdayChange}
+                onSolve={handleParallelSolve}
+                onExport={handleParallelExport}
+                onViewWeekChange={setParallelViewWeek}
+              />
+            </Suspense>
+          )}
+
+          {/* 页面6：📊 数据看板（体检报告 + 统计） */}
+          {view === 'dashboard' && (
+            <Suspense fallback={<ViewFallback />}>
+              <DashboardView
+                auditLoading={auditLoading}
+                auditData={auditData}
+                statsData={statsData}
+              />
+            </Suspense>
+          )}
+
+          {/* 页面7：选课咨询 / 实验辅导（云端大模型，流式问答） */}
+          {(view === 'course_select' || view === 'tutor') && (
+            <Suspense fallback={<ViewFallback />}>
+              <ConsultView
+                mode={view === 'course_select' ? 'course_select' : 'tutor'}
+                question={consultQ}
+                answer={consultMsg}
+                loading={loading}
+                logs={consultLogs}
+                showLogs={showLogs}
+                onQuestionChange={setConsultQ}
+                onAsk={handleConsult}
+                onStop={handleStopConsult}
+                onToggleLogs={handleToggleLogs}
+              />
+            </Suspense>
+          )}
+        </ErrorBoundary>
       </main>
     </div>
   );

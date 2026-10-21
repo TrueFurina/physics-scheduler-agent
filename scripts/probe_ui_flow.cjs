@@ -1,6 +1,7 @@
 /**
  * 线上主流程 UI 点测（只读，不改任何数据）
  * 覆盖：首屏 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板 → 选课咨询(懒加载)
+ *      → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
  */
 const { chromium } = require('playwright-core');
 const path = require('path');
@@ -124,6 +125,34 @@ function rec(ok, name, detail) {
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-consult.png') });
   } catch (e) {
     rec(false, '🎓 选课咨询（懒加载）', String(e).slice(0, 120));
+  }
+
+  // ⑨ 懒加载 chunk 取不到时的降级：这条是**故意制造故障**，因此单独开一个上下文，
+  // 不污染上面的"JS 错误/失败请求"计数（那两个必须反映**正常路径**）。
+  //
+  // 要证明的是：`import()` 失败不会导致整页白屏。没有错误边界时，React 18 会把整棵树
+  // 卸载 —— 连顶部导航一起消失，用户只能干瞪眼。有了边界，内容区出提示卡、导航还在，
+  // 教秘可以立刻切到别的功能继续干活。
+  try {
+    const ctx2 = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const p2 = await ctx2.newPage();
+    await p2.route('**/ParallelView-*.js', (route) => route.abort());
+    await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
+    await p2.getByRole('button', { name: /并行排课/ }).first().click();
+    await p2.waitForFunction(
+      () => /页面资源已更新|这个模块遇到了问题/.test(document.body.innerText),
+      { timeout: 30000 },
+    );
+    const txt2 = await p2.evaluate(() => document.body.innerText);
+    // 顶部导航是边界的兄弟节点，必须仍然可用 —— 这才是"降级"与"白屏"的区别
+    const navAlive = /数据看板/.test(txt2) && /选课咨询/.test(txt2);
+    const hasCard = /重新加载|重试/.test(txt2);
+    rec(navAlive && hasCard, '🛟 懒加载失败降级', `chunk 中断后显示提示卡（${hasCard ? '有' : '无'}）且顶部导航仍可用（${navAlive ? '是' : '否'}=非白屏）`);
+    await p2.screenshot({ path: path.join(SHOT_DIR, 'flow-chunk-fallback.png') });
+    await ctx2.close();
+  } catch (e) {
+    rec(false, '🛟 懒加载失败降级', `chunk 被中断后未出现降级提示（疑似白屏）：${String(e).slice(0, 100)}`);
   }
 
   rec(jsErrors.length === 0, '全程 JS 错误', `${jsErrors.length} 条${jsErrors.length ? '：' + jsErrors[0] : ''}`);
