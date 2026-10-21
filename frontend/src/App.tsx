@@ -25,6 +25,25 @@ const timeSlotLabels: Record<string, string> = {
 
 type View = 'identity' | 'courses' | 'reschedule' | 'admin' | 'course_select' | 'tutor' | 'parallel' | 'dashboard';
 
+/**
+ * 有界重试：线上由沙箱托管，进程被回收后首个请求可能因冷启动而失败。
+ * 原先首屏初始化只请求一次、无重试，一旦那一次失败就永久空白、只能手动刷新页面。
+ * 这里做 3 次、最多约 2.3s 的退避重试；仍失败则抛出最后一个错误交调用方展示。
+ */
+async function withRetry<T>(fn: () => Promise<T>, delaysMs: number[] = [0, 700, 1600]): Promise<T> {
+  let lastErr: unknown;
+  for (const delay of delaysMs) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+
 function App() {
   const [view, setView] = useState<View>('identity');
   const [module, setModule] = useState('');  // 当前咨询模块: course_select / tutor
@@ -129,10 +148,10 @@ function App() {
     setParallelResult(null);
     setParallelLoading(true);
     try {
-      const r = await rescheduleApi.parallelOverview();
+      const r = await withRetry(() => rescheduleApi.parallelOverview());
       setParallelCourses(r.data.data.courses || []);
     } catch (err: any) {
-      setMsg(`加载课程总览失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`加载课程总览失败：${err.response?.data?.detail || err.message}（可刷新页面重试）`);
     } finally {
       setParallelLoading(false);
     }
@@ -402,15 +421,19 @@ function App() {
   };
 
   // 进入时自动加载默认数据
+  // 后端在数据未加载时也会自愈（_ensure_loaded），这里重试是为了覆盖"沙箱冷启动导致
+  // 第一次请求直接超时/5xx"的情况 —— 那种情况下后端根本收不到请求，只能由前端重试。
   useEffect(() => {
     const init = async () => {
       try {
-        await rescheduleApi.loadDefault();
-        const t = await rescheduleApi.getTeachers();
+        const t = await withRetry(async () => {
+          await rescheduleApi.loadDefault();
+          return rescheduleApi.getTeachers();
+        });
         setTeachers(t.data.teachers);
         setDataLoaded(true);
       } catch (err: any) {
-        setMsg(`加载失败：${err.response?.data?.detail || err.message}`);
+        setMsg(`加载失败：${err.response?.data?.detail || err.message}（可刷新页面重试）`);
       }
     };
     init();

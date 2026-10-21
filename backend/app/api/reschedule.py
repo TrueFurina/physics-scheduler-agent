@@ -3,6 +3,7 @@
 import os
 import json
 import re
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -60,7 +61,29 @@ _agent = RescheduleAgent(_db, student=_student)
 #   - "学生所在系系办电话"整张表不在解析范围内。
 # 学生个人身份（姓名 + 学号）来自独立数据源，其接口已挂管理员门禁（见 _ADMIN_ONLY）。
 # 真实表缺失时回退脱敏表，保证任何环境都能启动。相对路径一律按仓库根解析。
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+def _find_repo_root(module_file: str) -> str:
+    """从模块文件向上定位仓库根（同时含 backend/app 的那一层）。
+
+    1) 必须先 abspath 规范化：os.path.dirname 不会消解 '..'，
+       若模块是经 ``backend/tests/../app/...`` 这类路径导入的（测试里很常见），
+       四层 dirname 连乘会把根算成 ``backend/tests``，进而静默回退到脱敏表
+       —— 表现为线上/测试里教师名变成「教师A」，极难排查。
+    2) 再以 marker（backend/app）向上探测，比写死层数更能抗目录调整。
+    3) 探测失配时退回「规范化后的四层向上」，保证任何部署布局仍能启动。
+    """
+    start = os.path.abspath(module_file)
+    cur = os.path.dirname(start)
+    for _ in range(6):
+        if os.path.isdir(os.path.join(cur, "backend", "app")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(start))))
+
+
+_REPO_ROOT = _find_repo_root(__file__)
 
 
 def _resolve_default_schedule_path() -> str:
@@ -118,7 +141,8 @@ class ChatResponse(BaseModel):
 # 直接按两种分隔符切分 + 字符白名单最省心，且 `..` 不可能构造出来。
 # ---------------------------------------------------------------------------
 
-_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.path.join(_APP_DIR, "data")
 
 _EXCEL_SUFFIXES = (".xlsx", ".xls")
 _STUDENT_SUFFIXES = (".xlsx", ".xls", ".pdf")
@@ -267,36 +291,74 @@ async def get_student_status():
     }
 
 
+_load_lock = threading.Lock()
+
+
+def _load_default_schedule() -> tuple[str, int]:
+    """把默认排课表读进内存，并重放已审批通过的调课。返回 (提示消息, 记录数)。
+
+    幂等：先整表重载，再按 applied_moves 顺序重放，故重复调用不会累积。
+    """
+    if not os.path.exists(DEFAULT_SCHEDULE_PATH):
+        # 这条一旦出现，说明服务器上连脱敏兜底表都没有 —— 不是用户能自救的情况，
+        # 所以文案要指出"服务器缺文件"，而不是原先那句会让用户去找上传入口的"请先上传"
+        # （上传接口受管理员门禁保护，且前端没有上传 UI）。
+        raise HTTPException(
+            status_code=404,
+            detail=f"默认排课表不存在：服务器上未找到 {os.path.basename(DEFAULT_SCHEDULE_PATH)}，请联系管理员处理",
+        )
+
+    _db.load_from_excel(DEFAULT_SCHEDULE_PATH)
+    # 重放已应用的调课记录（applied_moves），保证重启后调整仍然生效
+    replay_applied, replay_skipped = 0, 0
+    try:
+        conn = _get_db()
+        rows = conn.execute("SELECT request_data FROM applied_moves ORDER BY id").fetchall()
+        conn.close()
+        for r in rows:
+            try:
+                rec = json.loads(r["request_data"])
+                res = _apply_reschedule(rec, persist=False)
+                replay_applied += res["applied"]
+                replay_skipped += res["skipped"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
+    if replay_applied:
+        msg += f"（已重放 {replay_applied} 条审批通过的调课）"
+    return msg, len(_db.entries)
+
+
+def _ensure_loaded() -> None:
+    """访问排课数据前，保证内存里已有数据；没有就自动恢复。
+
+    为什么需要：线上由沙箱托管，进程会被平台回收/重启，而排课数据只存在
+    **进程内存**里（无持久化）⇒ 重启后 `_db.loaded` 变 False。原先各数据接口
+    直接抛 400「请先加载实验安排表（/load-default）」，而前端只在**页面挂载时**
+    自动 load-default 一次且无重试：只要那一次失败、或进程在页面打开后重启，
+    用户就会看到"加载课程总览失败"且界面上无从自救（必须手动刷新）。
+    本地是常驻 uvicorn 不重启，所以看不出这个问题 —— 这正是"线上和本地不一样"
+    的真实原因。
+
+    改为此处自愈：默认表存在就直接加载，/load-default 仍可用（幂等）但不再是使用前提。
+    并发请求用双检锁，保证 433 行 Excel 只解析一次。
+    """
+    if _db.loaded:
+        return
+    with _load_lock:
+        if _db.loaded:  # 双检：等锁期间可能已被别的请求加载完
+            return
+        _load_default_schedule()
+
+
 @router.post("/load-default", summary="加载默认实验安排表")
 async def load_default():
     """加载已有的 schedule.xlsx，并重放已审批通过的调课（重启不丢调整）"""
-    if os.path.exists(DEFAULT_SCHEDULE_PATH):
-        _db.load_from_excel(DEFAULT_SCHEDULE_PATH)
-        # 重放已应用的调课记录（applied_moves），保证重启后调整仍然生效
-        replay_applied, replay_skipped = 0, 0
-        try:
-            conn = _get_db()
-            rows = conn.execute("SELECT request_data FROM applied_moves ORDER BY id").fetchall()
-            conn.close()
-            for r in rows:
-                try:
-                    rec = json.loads(r["request_data"])
-                    res = _apply_reschedule(rec, persist=False)
-                    replay_applied += res["applied"]
-                    replay_skipped += res["skipped"]
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
-        if replay_applied:
-            msg += f"（已重放 {replay_applied} 条审批通过的调课）"
-        return {
-            "success": True,
-            "message": msg,
-            "total_entries": len(_db.entries),
-        }
-    raise HTTPException(status_code=404, detail="默认文件不存在，请先上传")
+    msg, total = _load_default_schedule()
+    return {"success": True, "message": msg, "total_entries": total}
 
 
 # 轻量知识源：从实验安排表提取实验项目信息（P1-3，不依赖外部文档）
@@ -405,8 +467,7 @@ class ParallelExportRequest(BaseModel):
 @router.get("/parallel/overview", summary="并行排课-课程总览（项目×分组）")
 async def parallel_overview():
     """按班级聚合：每门课的全部实验项目、学生组别（并行排课入口数据）"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
     from app.engine.parallel_scheduler import ParallelScheduler
     ps = ParallelScheduler(_db, student=_student)
     return {"success": True, "data": {"courses": ps.get_course_overview()}}
@@ -416,8 +477,7 @@ async def parallel_overview():
              dependencies=[Depends(rate_limit("parallel-solve"))])
 async def parallel_solve(req: ParallelSolveRequest):
     """并行排课：一门课全部实验项目×学生组别，CP-SAT 一键统一分配（周次/时段/场地）"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
     from app.engine.parallel_scheduler import ParallelScheduler
     ps = ParallelScheduler(_db, student=_student)
     result = ps.solve(req.class_name, weekday=req.weekday,
@@ -462,8 +522,7 @@ async def parallel_export(req: ParallelExportRequest):
 @router.get("/data-audit", summary="数据体检报告（扫描现有安排表冲突）")
 async def data_audit():
     """一键审计现有实验安排表：教室冲突 / 教师时间冲突 / 数据覆盖情况"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     from collections import defaultdict
 
@@ -519,8 +578,7 @@ async def data_audit():
 @router.get("/stats", summary="统计面板（教室利用率/教师工作量）")
 async def stats():
     """统计现有安排表：教室利用率、教师工作量均衡度"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     from collections import defaultdict, Counter
 
@@ -587,8 +645,7 @@ async def impact_analysis(req: ChatRequest):
 
     基于三重冲突筛选结果，聚合出影响范围清单。
     """
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     # 解析请求（复用调课智能体解析）
     parsed = _agent.parse_request(req.message)
@@ -649,8 +706,7 @@ async def impact_analysis(req: ChatRequest):
              dependencies=[Depends(rate_limit("auto-schedule"))])
 async def auto_schedule():
     """用约束求解器基于现有数据自动生成完整排课方案"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     from app.engine.auto_scheduler import AutoScheduler
     scheduler = AutoScheduler(_db, student=_student)
@@ -681,8 +737,7 @@ async def auto_schedule():
 @router.get("/teachers", summary="教师列表（F1 身份选择）")
 async def get_teachers():
     """返回全部教师列表（含角色/职称），供身份选择页展示（F1）"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     teachers = _db.get_all_teachers()
     roles = _db.get_teacher_roles()  # 从教师联系表提取角色备注
@@ -702,8 +757,7 @@ async def get_teachers():
 @router.get("/teachers/{teacher_name}/courses", summary="教师课程列表（F2）")
 async def get_teacher_courses(teacher_name: str):
     """按教师提取课程卡片，标注可调状态（F2）"""
-    if not _db.loaded:
-        raise HTTPException(status_code=400, detail="请先加载实验安排表（/load-default）")
+    _ensure_loaded()
 
     courses = _db.get_teacher_courses(teacher_name)
     if not courses:
@@ -739,7 +793,7 @@ class RescheduleRequestApprove(BaseModel):
 # SQLite 存储（重启不丢数据）
 import sqlite3
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "requests.db")
+_DB_PATH = os.path.join(_APP_DIR, "data", "requests.db")
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
 
 
