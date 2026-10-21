@@ -44,7 +44,12 @@ def test_unknown_route_falls_back_to_index():
 def test_health_not_swallowed():
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
+    # 深度探活：进程活着 ≠ 数据在内存（R-18 的成因），必须能被外部看到
+    assert body["data"]["loaded"] is False or body["data"]["loaded"] is True
+    assert body["data"]["total_entries"] >= 0
+    assert body["uptime_s"] >= 0
 
 
 def test_api_not_swallowed():
@@ -86,3 +91,43 @@ def test_path_traversal_is_blocked(path):
     # 反向验证：没有泄露后端依赖清单或 Excel 的二进制内容
     assert "fastapi==" not in r.text
     assert "PK" != r.text[:2]
+
+
+# ---------------------------------------------------------------------------
+# 传输层：压缩 + 缓存
+# ---------------------------------------------------------------------------
+
+def test_hashed_assets_are_gzipped():
+    """主包 ~430KB，压缩后 ~132KB。没压缩 = 每次冷加载多传 ~300KB。"""
+    js_files = list((FRONTEND_DIST / "assets").glob("*.js"))
+    if not js_files:
+        pytest.skip("未找到 JS 产物")
+    r = client.get(f"/assets/{js_files[0].name}", headers={"accept-encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers.get("content-encoding") == "gzip"
+
+
+def test_large_json_api_is_gzipped():
+    """概览接口 13.9KB → 1.6KB（-88%），对弱网首屏影响最大。"""
+    client.post("/api/reschedule/load-default")
+    r = client.get(
+        "/api/reschedule/parallel/overview", headers={"accept-encoding": "gzip"}
+    )
+    assert r.status_code == 200
+    assert r.headers.get("content-encoding") == "gzip"
+
+
+def test_hashed_assets_are_immutable_cached():
+    js_files = list((FRONTEND_DIST / "assets").glob("*.js"))
+    if not js_files:
+        pytest.skip("未找到 JS 产物")
+    r = client.get(f"/assets/{js_files[0].name}")
+    assert r.headers.get("cache-control") == "public, max-age=31536000, immutable"
+
+
+def test_index_html_must_revalidate():
+    """index.html 不能被强缓存：否则重发布后可能引用已删除的旧哈希资源 → 白屏。"""
+    for path in ("/", "/some/deep/frontend/route"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert "no-cache" in r.headers.get("cache-control", "")

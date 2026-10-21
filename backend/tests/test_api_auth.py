@@ -115,7 +115,12 @@ def test_status_is_200_without_token():
 
 
 def test_health_stays_open():
-    assert client.get("/health").json() == {"status": "ok"}
+    """探活必须免鉴权（且不因数据未加载而失败），深度字段只是附加信息。"""
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "data" in body
 
 
 # ---------------------------------------------------------------------------

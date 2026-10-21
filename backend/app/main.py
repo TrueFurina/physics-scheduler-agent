@@ -7,14 +7,18 @@
 """
 
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import reschedule
+
+_STARTED_AT = time.time()
 
 # backend/app/main.py → parents[0]=backend/app, [1]=backend, [2]=仓库根
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +43,13 @@ app = FastAPI(
     openapi_url=None if _DOCS_DISABLED else "/openapi.json",
 )
 
+# 传输压缩：注册顺序决定洋葱结构——后注册的在外层。
+# 故 GZip 先注册（内层），CORS 后注册（外层）：保证压缩失败/异常时响应头仍带 CORS。
+#
+# 为什么需要：前端主包 ~430KB，gzip 后 ~132KB（实测 31%）。
+# 首屏在弱网/跨区链路上主要成本就是这一个文件，压缩是零风险的净收益。
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # CORS 仅服务于开发态（Vite dev server）。发布态同源，不经过 CORS。
 app.add_middleware(
     CORSMiddleware,
@@ -58,7 +69,46 @@ app.include_router(reschedule.router, prefix="/api/reschedule", tags=["调课管
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    """探活。
+
+    只报状态、**不触发数据加载**（探活必须廉价，且不能让外部轮询把沙箱算力烧掉）。
+
+    `data.loaded` 用来区分两种"看起来都正常"：
+    - `loaded=true`  → 数据在内存，可正常服务
+    - `loaded=false` → 进程活着但内存被回收（正是 R-18 的成因）。
+      此时首个数据接口会走 `_ensure_loaded()` 自愈，但**外部监控应能看到**这个状态，
+      而不是被一个永远 `{"status":"ok"}` 的探活掩盖过去。
+    """
+    return {
+        "status": "ok",
+        "uptime_s": int(time.time() - _STARTED_AT),
+        "data": reschedule.data_state(),
+    }
+
+
+class _HashedAssetFiles(StaticFiles):
+    """Vite 产物文件名自带内容哈希（如 `index-DRvktcTZ.js`）⇒ 内容与名一一对应。
+
+    因此可以给一年 `immutable` 强缓存：二次访问直接命中本地缓存、零网络往返；
+    一旦重新构建，哈希变化就是新 URL，不存在"旧文件被误用"的窗口。
+    Starlette 默认只发 ETag/Last-Modified，浏览器每次仍要发一次条件请求（304）。
+    """
+
+    async def get_response(self, path, scope):  # noqa: D102 - 仅追加响应头
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+def _index_response() -> FileResponse:
+    """返回 SPA 入口，并显式要求**每次使用前重新校验**。
+
+    若 index.html 被浏览器启发式缓存，重新发布后可能出现
+    "旧 index 引用已删除的旧哈希资源" → 白屏。`no-cache` + ETag
+    让绝大多数请求以 304 结束（几十字节），代价可忽略。
+    """
+    return FileResponse(_DIST_ROOT / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +121,7 @@ if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file():
     _DIST_ROOT = FRONTEND_DIST.resolve()
     _assets_dir = FRONTEND_DIST / "assets"
     if _assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+        app.mount("/assets", _HashedAssetFiles(directory=str(_assets_dir)), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
@@ -84,10 +134,10 @@ if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file():
             try:
                 candidate.relative_to(_DIST_ROOT)
             except ValueError:
-                return FileResponse(_DIST_ROOT / "index.html")
+                return _index_response()
             if candidate.is_file():
                 return FileResponse(candidate)
-        return FileResponse(_DIST_ROOT / "index.html")
+        return _index_response()
 
 else:
 

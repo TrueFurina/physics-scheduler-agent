@@ -423,11 +423,16 @@ function App() {
   // 进入时自动加载默认数据
   // 后端在数据未加载时也会自愈（_ensure_loaded），这里重试是为了覆盖"沙箱冷启动导致
   // 第一次请求直接超时/5xx"的情况 —— 那种情况下后端根本收不到请求，只能由前端重试。
+  //
+  // 先问 /status 再决定是否 load-default：排课数据在进程内存里，
+  // 页面刷新（数据仍在）时无条件 load-default 会把 433 行 Excel **整表重解析一遍**
+  // （本地实测 0.98s CPU / 冷沙箱 3.8s），纯属白烧 —— 而且它还是限流桶里的一员。
   useEffect(() => {
     const init = async () => {
       try {
         const t = await withRetry(async () => {
-          await rescheduleApi.loadDefault();
+          const st = await rescheduleApi.getStatus();
+          if (!st.data.loaded) await rescheduleApi.loadDefault();
           return rescheduleApi.getTeachers();
         });
         setTeachers(t.data.teachers);

@@ -197,6 +197,36 @@ def test_admin_login_gets_429_after_real_threshold(monkeypatch):
     assert "Retry-After" in blocked.headers
 
 
+def test_cheap_anonymous_posts_are_throttled(monkeypatch):
+    """D-7 回归：两个**免鉴权且单请求真开销**的 POST 必须挂闸门。
+
+    背景：这两个接口不需要登录（教秘主路径不能加鉴权），但
+      `/load-default`   每次整表重解析（本地 0.98s，冷沙箱 3.8s CPU）
+      `/parallel/export` 每次生成并落盘一个 xlsx
+    原先匿名 + 无限速 = 一个脚本就能持续烧 CPU/磁盘。此测试锁定它们已受限。
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    _enable(monkeypatch)
+    client = TestClient(app)
+
+    cases = [
+        ("load-default", "/api/reschedule/load-default", None),
+        ("parallel-export", "/api/reschedule/parallel/export",
+         {"class_name": "测试班", "schedule": []}),
+    ]
+    for bucket, path, payload in cases:
+        LIMITER.reset()
+        cap = RULES[bucket][0]
+        for i in range(cap):
+            r = client.post(path, json=payload) if payload is not None else client.post(path)
+            assert r.status_code != 429, f"{bucket} 第 {i+1} 次（限额内）被误伤"
+        blocked = client.post(path, json=payload) if payload is not None else client.post(path)
+        assert blocked.status_code == 429, f"{bucket} 超限后仍未拦截"
+        assert "Retry-After" in blocked.headers
+
+
 def test_demo_pace_is_not_throttled(monkeypatch):
     """演示节奏不变量：阈值放宽后，连续 50 次**受限接口**调用必须全部 200。
 

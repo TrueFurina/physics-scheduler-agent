@@ -223,6 +223,16 @@ async def reschedule_chat(req: ChatRequest):
     )
 
 
+def data_state() -> dict:
+    """供 `/health` 深度探活：**进程活着 ≠ 数据在内存**。
+
+    排课数据只存在于进程内存，沙箱回收后接口会退回"未加载"态（R-18）。
+    原先 `/health` 恒返回 `{"status":"ok"}`，把这个状态完全掩盖了。
+    本函数只读、不触发加载，可被外部监控高频轮询。
+    """
+    return {"loaded": _db.loaded, "total_entries": len(_db.entries) if _db.loaded else 0}
+
+
 @router.get("/status", summary="查看系统状态")
 async def get_status():
     """查看系统加载状态。
@@ -354,9 +364,14 @@ def _ensure_loaded() -> None:
         _load_default_schedule()
 
 
-@router.post("/load-default", summary="加载默认实验安排表")
+@router.post("/load-default", summary="加载默认实验安排表",
+             dependencies=[Depends(rate_limit("load-default"))])
 async def load_default():
-    """加载已有的 schedule.xlsx，并重放已审批通过的调课（重启不丢调整）"""
+    """加载已有的 schedule.xlsx，并重放已审批通过的调课（重启不丢调整）
+
+    免鉴权（教秘主路径），但它会**整表重解析**，属单请求真开销接口，
+    故挂限流；`_ensure_loaded()` 的自愈是进程内直调，不经过本路由、不受影响。
+    """
     msg, total = _load_default_schedule()
     return {"success": True, "message": msg, "total_entries": total}
 
@@ -485,7 +500,8 @@ async def parallel_solve(req: ParallelSolveRequest):
     return result
 
 
-@router.post("/parallel/export", summary="并行排课方案导出 Excel")
+@router.post("/parallel/export", summary="并行排课方案导出 Excel",
+             dependencies=[Depends(rate_limit("parallel-export"))])
 async def parallel_export(req: ParallelExportRequest):
     """把并行排课方案导出为 Excel（贴合排课员真实工作流）"""
     from io import BytesIO

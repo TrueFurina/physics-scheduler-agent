@@ -86,6 +86,12 @@ RULES: Dict[str, Tuple[int, int, int]] = {
     "parallel-solve": (60, 600, 60),
     # 口令校验：防爆破为主，真人输错几次绝不该被锁
     "admin-login": (30, 300, 60),
+    # 下面两个是**免鉴权 + 单次真开销**的组合（D-7）：
+    #   load-default  重解析 433 行 Excel（~1s CPU，本地实测 0.98s；冷沙箱 3.8s）
+    #   parallel-export 每次生成并落盘一个 xlsx
+    # 前端只在首屏调用一次 load-default，阈值放到 20/分钟 仍远超正常节奏。
+    "load-default": (20, 200, 60),
+    "parallel-export": (20, 200, 60),
 }
 
 # 单 IP 桶的 key 数量上限：防止伪造大量源 IP 撑爆内存。
