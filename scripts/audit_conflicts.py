@@ -11,18 +11,28 @@
 用**真实时间区间**判定重叠，与后端的"时段标签 + 字符串相等"完全解耦。
 两边算法一致只能证明代码自洽；两边独立才叫交叉验证。
 
+⚠️ 但"独立"必须独立到底：本文件第一版把 `14:00-17:00` 也映射成 `567`，
+然后拿**标签**判重叠 —— 跟后端犯同一个错，于是 6 条跨节次记录永远"不重叠"，
+沙盘把 `678` 判为可用也照过。校验器只要在某一处跟被验对象共用同一个错误假设，
+那一处就等于没有校验。（R-40）
+
 判定口径
 --------
-时段标签 → 真实时钟区间（分钟）：
+记录的真实区间 = 原表写法能解析成 `H:MM-H:MM` 就用它，否则查标签表：
     567   13:30-15:45
     678   15:45-18:00
     78    15:50-18:05   ← 与 678 重叠 2 小时 10 分
     MORNING 09:00-11:15
-任意两条记录只要**区间有交**且同教室/同教师，就是真冲突。
+    14:00-17:00  ⇒ (840, 1020)  → 同时压住 567 和 678 的一部分
+任意两条记录只要**区间有交**且同教室/同教师，就是真冲突（首尾相接不算）。
 
 用法
 ----
-    D:/miniconda3_new/python.exe scripts/audit_conflicts.py [--site URL] [--week 7]
+    D:/miniconda3_new/python.exe scripts/audit_conflicts.py [--site URL] [--week 7,9]
+
+默认扫**全部周次**。早先只抽 1/3/5/7/9，而 R-40 的漏点在第 12/14/16 周 ——
+采样法天生看不见。全周次 ≈ 208 次 /chat，按 0.55s 节流（站内额度 120/分钟），
+一次约两分钟；`AUDIT_CHAT_INTERVAL` 可调。
 
 覆盖三条"承诺"：
     沙盘     /chat 给出的每个「可用时段」都不撞已排的课
@@ -37,7 +47,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from typing import Dict, List, Tuple
@@ -76,11 +89,40 @@ RAW_TO_SLOT = {
 
 
 def overlap(a: str, b: str) -> bool:
+    """两个**标签**的真实区间是否有交（保留给只拿得到标签的场景）。"""
     if a not in CLOCK or b not in CLOCK:
         return False
     s1, e1 = CLOCK[a]
     s2, e2 = CLOCK[b]
     return max(s1, s2) < min(e1, e2)
+
+
+_RANGE_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*[-~—－]\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*$")
+
+
+def row_interval(row: Dict) -> Tuple[int, int]:
+    """一条原始记录的**真实**时钟区间。
+
+    ⚠️ 这里刻意不读后端算好的 `slot`：校验器若跟着后端把 `14:00-17:00`
+    也当成 `567`，两边一起错就等于没校验（第一版就是这样，`overlap()`
+    拿标签比，6 条跨节次记录永远"不重叠"）。
+    """
+    m = _RANGE_RE.match(row.get("raw_ts") or "")
+    if m:
+        h1, m1, h2, m2 = (int(x) for x in m.groups())
+        s, e = h1 * 60 + m1, h2 * 60 + m2
+        if e > s:
+            return (s, e)
+    return CLOCK.get(row.get("slot"), (0, 0))
+
+
+def hits_row(label: str, row: Dict) -> bool:
+    """候选节次 `label` 是否撞上这条记录 —— 比真实区间，不比标签。"""
+    c = CLOCK.get(label)
+    if not c:
+        return False
+    iv = row.get("iv") or row_interval(row)
+    return max(c[0], iv[0]) < min(c[1], iv[1])
 
 
 def load_rows() -> Tuple[List[Dict], List[Dict]]:
@@ -104,7 +146,9 @@ def load_rows() -> Tuple[List[Dict], List[Dict]]:
         }
         slot = RAW_TO_SLOT.get(raw)
         if slot:
-            rows.append({**item, "slot": slot})
+            item["slot"] = slot
+            item["iv"] = row_interval({**item, "slot": slot})
+            rows.append(item)
         else:
             unknown.append(item)
     return rows, unknown
@@ -119,6 +163,42 @@ def http_json(url: str, payload=None, timeout=120):
     req = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
+
+
+# ---- 沙盘是"每人每周一次 /chat"，全周次扫下来会撞上站内限流 ----------------
+# 后端 /chat 的额度是 120 次 / 60 秒（见 app/ratelimit.py）。串行请求跑满
+# 16 个周次 × 13 位教师 ≈ 208 次，不节流就会有一半变成 429 —— 而 429 被
+# 记成"请求失败"后，那部分承诺等于**没被校验**（却也不会红）。（R-40 期间实测）
+_CHAT_INTERVAL = float(os.getenv("AUDIT_CHAT_INTERVAL", "0.55"))
+_last_chat = [0.0]
+
+
+def chat_json(url: str, payload=None, retries: int = 2):
+    """按限流节奏发 /chat；429 时读 Retry-After 等一等再试。
+
+    宁可慢，也不能把"被限流"当成"校验通过"。重试用尽仍 429 时抛错，
+    由调用方记成失败项（失败项会进 problems，退出码照样非 0）。
+    """
+    for attempt in range(retries + 1):
+        gap = _CHAT_INTERVAL - (time.time() - _last_chat[0])
+        if gap > 0:
+            time.sleep(gap)
+        _last_chat[0] = time.time()
+        try:
+            return http_json(url, payload)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt >= retries:
+                raise
+            wait = 0
+            try:
+                wait = int(e.headers.get("Retry-After") or 0)
+            except (TypeError, ValueError):
+                wait = 0
+            wait = max(wait, 5)
+            print(f"    … 触发限流，等 {wait}s 后重试（第 {attempt + 1} 次）")
+            time.sleep(wait + 0.5)
+            _last_chat[0] = time.time()
+    raise RuntimeError("unreachable")
 
 
 def teacher_hits(entry_teacher: str, name: str) -> bool:
@@ -141,7 +221,7 @@ def audit_sandbox(site: str, rows: List[Dict], weeks: List[int]) -> Tuple[List[s
         for week in weeks:
             stat["queries"] += 1
             try:
-                resp = http_json(
+                resp = chat_json(
                     f"{site}/api/reschedule/chat",
                     {"message": f"我是{name}，把这门课调到第{week}周", "fast": True},
                 )
@@ -158,7 +238,7 @@ def audit_sandbox(site: str, rows: List[Dict], weeks: List[int]) -> Tuple[List[s
                 for e in rows:
                     if e["week"] != week or e["weekday"] != wd or e["room"] != room:
                         continue
-                    if not overlap(slot, e["slot"]):
+                    if not hits_row(slot, e):
                         continue
                     problems.append(
                         f"[{name} 第{week}周] 推荐「{wd} {slot} {room}」可用，"
@@ -171,7 +251,7 @@ def audit_sandbox(site: str, rows: List[Dict], weeks: List[int]) -> Tuple[List[s
                         continue
                     if not teacher_hits(e["teacher"], name):
                         continue
-                    if not overlap(slot, e["slot"]):
+                    if not hits_row(slot, e):
                         continue
                     problems.append(
                         f"[{name} 第{week}周] 推荐「{wd} {slot} {room}」可用，"
@@ -217,7 +297,7 @@ def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
         for e in rows:
             if e["week"] != u["week"] or e["weekday"] != u["weekday"]:
                 continue
-            if not overlap(u["time_slot"], e["slot"]):
+            if not hits_row(u["time_slot"], e):
                 continue
             if e["room"] and e["room"] == u.get("room"):
                 problems.append(
@@ -277,7 +357,7 @@ def audit_solver(site: str, rows: List[Dict]) -> List[str]:
                     continue
                 if e["class"] == cls:  # 本人正在被重排的旧记录不算
                     continue
-                if not overlap(u["time_slot"], e["slot"]):
+                if not hits_row(u["time_slot"], e):
                     continue
                 if e["room"] and e["room"] == u["room"]:
                     problems.append(
@@ -308,7 +388,11 @@ def main() -> int:
 
     all_problems = []
     if not args.skip_sandbox:
-        weeks = [int(w) for w in args.week.split(",")] if args.week else [1, 3, 5, 7, 9]
+        # 默认扫**全表所有周次**。原先只抽 1/3/5/7/9 —— 而 R-40 的漏点正好在
+        # 第 12/14/16 周，采样法天生看不见。13 位教师 × 16 周 ≈ 208 次请求，
+        # 一次几十秒，比"上线后被教秘撞见"便宜得多。
+        weeks = ([int(w) for w in args.week.split(",")] if args.week
+                 else sorted({r["week"] for r in rows}))
         found, stat = audit_sandbox(site, rows, weeks)
         all_problems += found
         print(

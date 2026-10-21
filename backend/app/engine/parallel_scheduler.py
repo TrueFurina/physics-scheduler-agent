@@ -108,9 +108,12 @@ class ParallelScheduler:
         for e in self.db.entries:
             if e.class_name == class_name or e.weekday != wd:
                 continue
-            room_occupied.add((e.week, e.time_slot, e.room))
-            if e.teacher:
-                teacher_occupied.add((e.week, e.time_slot, e.teacher))
+            # 按 blocked 记占用：`14:00-17:00` 这类跨节次记录同时占 567/678，
+            # 只记主标签会让另一半节次被判空闲（R-40）。
+            for ts in getattr(e, "blocked", None) or [e.time_slot]:
+                room_occupied.add((e.week, ts, e.room))
+                if e.teacher:
+                    teacher_occupied.add((e.week, ts, e.teacher))
 
         # 时段无法识别的行：不知道具体节次 ⇒ 当天三个时段全按占用算。
         # 少了这一步，求解器会把这些教室当成全天空闲（实测真实表里有 1 条）。

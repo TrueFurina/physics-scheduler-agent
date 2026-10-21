@@ -4,6 +4,7 @@ import json
 from datetime import date, timedelta
 from typing import List, Dict, Optional, Tuple
 from app.utils.excel_parser import ScheduleDatabase
+from app.utils.time_model import parse_clock_range
 from app.agent.student_schedule import StudentSchedule
 from app.agent.llm_intent_parser import LLMIntentParser
 
@@ -16,6 +17,16 @@ WEEKDAY_OFFSET = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 
 # `class_name` 也在里面：同一门实验（课程名相同）会挂在不同班级下，
 # 只按课程名回找课程卡片会撞车（实测"扭摆法测物体转动惯量"就有两个班）。
 SLOT_KEYS = ("teacher_name", "course_name", "class_name", "target_week", "source_week")
+
+
+def _raw_slot_note(info: Dict) -> str:
+    """占用源头若是跨节次写法，把原表时间补进文案。
+
+    教秘看到"周四 678 不可用"时，会回表里找 678 那一格 —— 而原表那格写的是
+    `14:00-17:00`。不点明这层对应关系，他会以为系统读错了。
+    """
+    raw = (info or {}).get("time_raw") or ""
+    return f"（该课原表时段为 {raw}，跨到本时段）" if parse_clock_range(raw) else ""
 
 
 def week_to_date(week: int, weekday: str, start: Optional[date] = None) -> str:
@@ -200,9 +211,12 @@ class RescheduleAgent:
         teacher_occupied = set()
         for e in self.db.entries:
             if e.week == target_week:
-                occupied.add(f"{e.weekday}_{e.time_slot}_{e.room}")
-                if teacher_name and e.teacher and teacher_name in e.teacher:
-                    teacher_occupied.add(f"{e.weekday}_{e.time_slot}")
+                # 按 blocked（真实占住的全部节次）落占用：`14:00-17:00` 这类
+                # 跨节次写法同时占 567 和 678，只按主标签记会让 678 判成空闲。
+                for slot in getattr(e, "blocked", None) or [e.time_slot]:
+                    occupied.add(f"{e.weekday}_{slot}_{e.room}")
+                    if teacher_name and e.teacher and teacher_name in e.teacher:
+                        teacher_occupied.add(f"{e.weekday}_{slot}")
 
         # 学生忙碌时段：{weekday: {time_slot, ...}}
         student_busy = {}
@@ -253,21 +267,25 @@ class RescheduleAgent:
         teacher_occupied: Dict[str, Dict] = {}
         for e in self.db.entries:
             if e.week == target_week:
-                key = f"{e.weekday}_{e.time_slot}_{e.room}"
-                if key not in occupied_info:
-                    occupied_info[key] = {
-                        "class_name": e.class_name,
-                        "experiment": e.experiment,
-                        "teacher": e.teacher or "",
-                    }
-                if teacher_name and e.teacher and teacher_name in e.teacher:
-                    tk = f"{e.weekday}_{e.time_slot}"
-                    if tk not in teacher_occupied:
-                        teacher_occupied[tk] = {
+                # 逐 blocked 节次记占用，理由同 get_available_slots（R-40）
+                for slot in getattr(e, "blocked", None) or [e.time_slot]:
+                    key = f"{e.weekday}_{slot}_{e.room}"
+                    if key not in occupied_info:
+                        occupied_info[key] = {
                             "class_name": e.class_name,
                             "experiment": e.experiment,
-                            "teacher": e.teacher or teacher_name,
+                            "teacher": e.teacher or "",
+                            "time_raw": e.time_raw or "",
                         }
+                    if teacher_name and e.teacher and teacher_name in e.teacher:
+                        tk = f"{e.weekday}_{slot}"
+                        if tk not in teacher_occupied:
+                            teacher_occupied[tk] = {
+                                "class_name": e.class_name,
+                                "experiment": e.experiment,
+                                "teacher": e.teacher or teacher_name,
+                                "time_raw": e.time_raw or "",
+                            }
 
         # 时段看不懂、已被剔除的行：只知道"这一天这间教室/这个人在上课"，
         # 不知道具体节次 ⇒ **整天按占用处理**。宁可少推荐三个时段，
@@ -322,7 +340,8 @@ class RescheduleAgent:
                                f"无法识别，已按整日占用处理")
                     else:
                         why = (f"您（{info['teacher']}）该时段已有课："
-                               f"{info['class_name']} {info['experiment']}")
+                               f"{info['class_name']} {info['experiment']}"
+                               f"{_raw_slot_note(info)}")
                     excluded.append({
                         "weekday": wd, "time_slot": ts, "room": "",
                         "date": week_to_date(target_week, wd, self._get_semester_start()),
@@ -343,7 +362,8 @@ class RescheduleAgent:
                             why = (f"教室已被占用（{info['class_name']} {info['experiment']}），"
                                    f"该行时段填的是「{info['unparsed_ts']}」无法识别，已按整日占用处理")
                         else:
-                            why = f"教室已被占用（{info['class_name']} {info['experiment']}）"
+                            why = (f"教室已被占用（{info['class_name']} {info['experiment']}）"
+                                   f"{_raw_slot_note(info)}")
                         excluded.append({
                             "weekday": wd, "time_slot": ts, "room": rm,
                             "date": week_to_date(target_week, wd, self._get_semester_start()),

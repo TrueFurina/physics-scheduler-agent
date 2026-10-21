@@ -152,8 +152,11 @@ class AutoScheduler:
         room_busy: Set[Tuple] = set()
         teacher_busy: Set[Tuple] = set()
         for e in self.db.entries:
+            blocks = list(getattr(e, "blocked", None) or [])
             for ts in TIME_SLOTS:
-                if not _spans_overlap(e.time_slot, ts):
+                # blocked 是解析阶段算出的"真实占住的节次"（跨节次写法会有两个）；
+                # _spans_overlap 兜住历史缓存里只有主标签的条目。
+                if ts not in blocks and not _spans_overlap(e.time_slot, ts):
                     continue
                 if e.room:
                     room_busy.add((int(e.week), e.weekday, ts, e.room))

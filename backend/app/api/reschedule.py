@@ -574,7 +574,10 @@ async def data_audit():
             teachers.add(e.teacher)
         if (e.room or '').strip():
             rooms.add(e.room)
-            room_map[(e.week, e.weekday, e.time_slot, e.room)].append(e)
+            # 按 blocked 落图：一条 `14:00-17:00` 的记录同时占 567 和 678，
+            # 只按主标签落图会漏掉 678 那一半（R-40）。
+            for slot in getattr(e, "blocked", None) or [e.time_slot]:
+                room_map[(e.week, e.weekday, slot, e.room)].append(e)
         else:
             # ⚠️ 曾经无条件放进 room_map：于是一堆"空场地"被归到同一个 key
             # (week, weekday, slot, '')，凡两条以上就报"教室冲突（同室同段多班）"，
@@ -582,7 +585,8 @@ async def data_audit():
             # 没填场地不可能撞场地，这是纯假阳性；真正该说的是"这些条没场地"。
             missing_room.append(e)
         if e.teacher:
-            teacher_map[(e.week, e.weekday, e.time_slot, e.teacher)].append(e)
+            for slot in getattr(e, "blocked", None) or [e.time_slot]:
+                teacher_map[(e.week, e.weekday, slot, e.teacher)].append(e)
 
     def _find_conflicts(source):
         found = []
@@ -1052,9 +1056,14 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
 
     applied, skipped, details = 0, 0, []
     for e in src_entries:
+        # 目标周该格是否已有人：按**真实占住的节次**比，而不是主标签相等。
+        # 源记录是 `14:00-17:00`（主标签 567）时，目标周的 678 若已有课，
+        # 主标签比较会判"不冲突"，于是把两条课叠在同一间教室里（R-40）。
+        e_blocks = set(getattr(e, "blocked", None) or [e.time_slot])
         conflict = any(
             o is not e and o.week == target_week and o.weekday == e.weekday
-            and o.time_slot == e.time_slot and (o.room == e.room or (o.teacher and o.teacher == e.teacher))
+            and not e_blocks.isdisjoint(set(getattr(o, "blocked", None) or [o.time_slot]))
+            and (o.room == e.room or (o.teacher and o.teacher == e.teacher))
             for o in _db.entries
         )
         if conflict:

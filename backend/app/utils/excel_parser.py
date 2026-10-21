@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 from app.utils import parse_cache
+from app.utils.time_model import span_labels, primary_label, clock_text
 
 # 时间段映射（节次标记 → 实际时间）
 TIME_SLOTS = {
@@ -32,7 +33,7 @@ TIME_SLOT_NORMALIZE = {
     "18:30-20:45": "91011",
     "15:50-18:05": "678",  # 原映射到 "78"，与 678 重叠却互不可见
     "18:00-21:00": "91011",
-    "14:00-17:00": "567",
+    "14:00-17:00": "567",  # ⚠️ 只用于决定"这行认得出来"；真实占用见 blocked
     "9:00-11:15": "MORNING",
     "9:00-12:00": "MORNING",
     "567": "567",
@@ -40,6 +41,13 @@ TIME_SLOT_NORMALIZE = {
     "91011": "91011",
     "78": "678",  # 同上
 }
+
+# ⚠️ R-40：`14:00-17:00` 曾被上面这张表"吸附"成 567，真实结束时间 17:00 就丢了。
+# 567 是 13:30-15:45，678 是 15:45-18:00 —— 这条记录**同时占住 567 和 678 的前 1 小时 15 分**。
+# 只贴一个标签，该教室当天的 678 就成"空闲"，沙盘会把教秘推荐到正在上课的教室
+# （实测第 12 周周四 A410：原表 14:00-17:00 有"设计性实验"，沙盘仍列 678 可用）。
+# 所以解析时额外算 `blocked`（真实重叠的全部节次），下游一律按 blocked 判占用。
+
 
 WEEKDAY_MAP = {
     "周一": "monday", "周二": "tuesday", "周三": "wednesday",
@@ -89,9 +97,15 @@ def _parse_semester_start(wb):
 
 
 class ScheduleEntry:
-    """一条排课记录"""
+    """一条排课记录
+
+    `time_slot` 是**主标签**（展示/统计用，如 `567`）；
+    `blocked`   是这条记录**真实占住**的全部节次（如 `["567","678"]`）。
+    判占用必须用 `blocked`：跨节次的写法若只看主标签，另一个节次就漏了。
+    """
     def __init__(self, week: int, weekday: str, time_slot: str, class_name: str,
-                 group: str, experiment: str, room: str, teacher: str):
+                 group: str, experiment: str, room: str, teacher: str,
+                 time_raw: str = "", blocked: Optional[List[str]] = None):
         self.week = week
         self.weekday = weekday
         self.time_slot = time_slot
@@ -100,6 +114,24 @@ class ScheduleEntry:
         self.experiment = experiment
         self.room = room
         self.teacher = teacher
+        # 原表里的时段写法。跨节次时展示要用它（`14:00-17:00`），
+        # 否则教秘看到自己的课被写成 13:30-15:45，会以为系统读错了。
+        self.time_raw = time_raw or ""
+        self.blocked = list(blocked) if blocked else [time_slot]
+
+    def blocks(self, slot: str) -> bool:
+        """这条记录是否占用 `slot` 这个节次。"""
+        return slot in self.blocked
+
+    def shares_slot_with(self, other: "ScheduleEntry") -> bool:
+        """两条记录是否落在同一节次（真实重叠）。"""
+        return not set(self.blocked).isdisjoint(set(other.blocked))
+
+    def display_time(self) -> str:
+        """给人看的时间：跨节次的原样显示原表写法，其余用标准时间。"""
+        if len(self.blocked) > 1 and self.time_raw:
+            return clock_text(self.time_raw)
+        return clock_text(self.time_slot)
 
     def key(self) -> str:
         """唯一标识一次排课占用的资源"""
@@ -164,8 +196,16 @@ class ScheduleDatabase:
             room_str = str(room).strip() if room else ""
             teacher_str = str(teacher).strip() if teacher else ""
             time_raw = str(time_slot).strip() if time_slot else ""
-            # 归一化时间格式：'13:30-15:45' → '567'，'、'等脏数据 → 跳过
-            time_str = TIME_SLOT_NORMALIZE.get(time_raw, "")
+            # 时段识别分两路（R-40）：
+            #   ① 能解析成时间区间 —— 包括跨节次的 `14:00-17:00`。主标签取起始时刻
+            #      所在的节次，`blocked` 取**所有真实重叠**的节次（可能两个）。
+            #   ② 节次码 / 已知别名 —— 查表得主标签，`blocked` 只有它自己。
+            blocked = span_labels(time_raw)
+            if blocked:
+                time_str = primary_label(time_raw, blocked[0])
+            else:
+                time_str = TIME_SLOT_NORMALIZE.get(time_raw, "")
+                blocked = [time_str] if time_str else []
 
             if not time_str:
                 # 时段看不懂就整行丢掉 —— 但**不能悄悄丢**。
@@ -195,6 +235,8 @@ class ScheduleDatabase:
                 experiment=str(experiment).strip() if experiment else "",
                 room=room_str,
                 teacher=teacher_str,
+                time_raw=time_raw,
+                blocked=blocked,
             )
             self.entries.append(entry)
 
@@ -247,11 +289,12 @@ class ScheduleDatabase:
 
     def find_free_slots(self, week: int, weekdays: List[str],
                         time_slots: List[str], rooms: List[str]) -> List[Dict]:
-        """找到空闲时间段"""
+        """找到空闲时间段（按 blocked 判占用，跨节次写法两个节次都算忙）"""
         occupied = set()
         for e in self.entries:
             if e.week == week:
-                occupied.add(f"{e.weekday}_{e.time_slot}_{e.room}")
+                for slot in e.blocked:
+                    occupied.add(f"{e.weekday}_{slot}_{e.room}")
 
         free = []
         for wd in weekdays:
@@ -369,6 +412,9 @@ class ScheduleDatabase:
                 "weekday": e.weekday,
                 "time_slot": e.time_slot,
                 "room": e.room,
+                # 跨节次写法（14:00-17:00）原样回显：教秘记得自己写的是几点，
+                # 给他看"13:30-15:45"会以为系统读错了行。
+                "time_text": e.display_time() if len(e.blocked) > 1 else "",
             })
             groups[key]["weeks"].add(e.week)
 
@@ -380,8 +426,9 @@ class ScheduleDatabase:
             slots_sorted = sorted(slots, key=lambda s: (s["week"], s["weekday"], s["time_slot"]))
             first = slots_sorted[0]
             weeks_sorted = sorted(info["weeks"])
-            # 时间友好显示：周四 567 → 周四 13:30-15:45
-            time_display = TIME_DISPLAY.get(first["time_slot"], first["time_slot"])
+            # 时间友好显示：周四 567 → 周四 13:30-15:45；
+            # 跨节次记录按原表写法显示（如 14:00-17:00），见 slots[].time_text
+            time_display = first.get("time_text") or TIME_DISPLAY.get(first["time_slot"], first["time_slot"])
             courses.append({
                 "course_name": info["course_name"],
                 "class_name": info["class_name"],

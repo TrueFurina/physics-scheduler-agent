@@ -34,7 +34,10 @@ from typing import Any, Dict, List, Optional
 
 # 解析逻辑变更时 +1：旧缓存自动失效，避免"代码改了但读到旧结构"
 # v2：时段别名统一（"78"/15:50-18:05 → 678）+ 新增 skipped（时段无法识别的行）
-CACHE_VERSION = 2
+# v3：新增 time_raw / blocked —— 跨节次写法（14:00-17:00）要同时占住 567 与 678。
+#     ⚠️ 结构变了必须失效：否则旧缓存里的条目没有 blocked，判占用会退回单标签，
+#     于是"沙盘把 678 判为空闲"这个缺陷会在命中缓存时重现（且难以察觉）。
+CACHE_VERSION = 3
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
 _DEFAULT_DIR = _APP_DIR / "data" / "cache"
@@ -173,8 +176,13 @@ def reset_memo() -> None:
 
 
 def entries_to_rows(entries: List[Any]) -> List[List[Any]]:
-    """ScheduleEntry 列表 → 可 JSON 化的行列表（字段顺序即 ScheduleEntry 构造顺序）。"""
+    """ScheduleEntry 列表 → 可 JSON 化的行列表（字段顺序即 ScheduleEntry 构造顺序）。
+
+    末尾两项 `time_raw` / `blocked` 是 v3 新增：跨节次记录的"原表写法"和
+    "真实占住哪几个节次"必须一起落盘，否则缓存命中时判占用会退回单标签。
+    """
     return [
-        [e.week, e.weekday, e.time_slot, e.class_name, e.group, e.experiment, e.room, e.teacher]
+        [e.week, e.weekday, e.time_slot, e.class_name, e.group, e.experiment, e.room, e.teacher,
+         getattr(e, "time_raw", "") or "", list(getattr(e, "blocked", None) or [e.time_slot])]
         for e in entries
     ]
