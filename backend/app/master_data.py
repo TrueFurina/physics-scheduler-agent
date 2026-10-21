@@ -259,6 +259,52 @@ class MasterData:
         self.classes.pop(name, None)
 
     # -------------------------------------------------------------- 序列化
+    def to_dict(self) -> dict:
+        """完整状态 → JSON 友好 dict（集合转有序列表），用于落盘持久化。"""
+        return {
+            "courses": {n: {"experiments": sorted(v["experiments"], key=str)}
+                        for n, v in self.courses.items()},
+            "experiments": {n: {"course": v.get("course") or DEFAULT_COURSE,
+                                "teachers": sorted(v["teachers"], key=str),
+                                "rooms": sorted(v["rooms"], key=str),
+                                "classes": sorted(v["classes"], key=str)}
+                            for n, v in self.experiments.items()},
+            "teachers": {n: {"projects": sorted(v["projects"], key=str)}
+                         for n, v in self.teachers.items()},
+            "rooms": {n: {"capacity": v.get("capacity")} for n, v in self.rooms.items()},
+            "classes": {n: {"groups": sorted(v["groups"], key=str),
+                            "weekday": v.get("weekday", ""),
+                            "time_slots": sorted(v["time_slots"], key=str),
+                            "week_min": v.get("week_min"), "week_max": v.get("week_max")}
+                        for n, v in self.classes.items()},
+        }
+
+    def from_dict(self, d: dict) -> "MasterData":
+        """to_dict 的逆操作：恢复五张表并重建课程聚合。坏数据fail-closed（回退反推基线）。"""
+        try:
+            self.courses = {n: {"experiments": set(v["experiments"])}
+                            for n, v in (d.get("courses") or {}).items()}
+            self.experiments = {n: {"course": v.get("course") or DEFAULT_COURSE,
+                                    "teachers": set(v.get("teachers") or []),
+                                    "rooms": set(v.get("rooms") or []),
+                                    "classes": set(v.get("classes") or [])}
+                                for n, v in (d.get("experiments") or {}).items()}
+            self.teachers = {n: {"projects": set(v.get("projects") or [])}
+                             for n, v in (d.get("teachers") or {}).items()}
+            self.rooms = {n: {"capacity": v.get("capacity")}
+                          for n, v in (d.get("rooms") or {}).items()}
+            self.classes = {n: {"groups": set(v.get("groups") or []),
+                                "weekday": v.get("weekday") or "",
+                                "time_slots": set(v.get("time_slots") or []),
+                                "week_min": v.get("week_min"), "week_max": v.get("week_max")}
+                            for n, v in (d.get("classes") or {}).items()}
+            self._rebuild_courses()
+            self.initialized = True
+            return self
+        except (TypeError, AttributeError, KeyError) as e:
+            print(f"⚠️ 主数据落盘文件损坏（{e}），回退到安排表反推基线")
+            return self
+
     def overview(self) -> dict:
         """五张表的完整状态（JSON 友好，供前端展示 + 免鉴权只读接口）。"""
         def _sorted(x): return sorted(x, key=str)

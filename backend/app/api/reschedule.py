@@ -54,8 +54,10 @@ _student = StudentSchedule()
 # 导师座谈后换轨的核心（见 docs/战略复盘-20261022.md）。
 _master_tasks: List = []
 # 主数据实体库（课程/实验项目/教师/场地/班级）：导师一号行动项"重构数据库"的落地。
-# 与 _db.entries 同构为内存态，进程重启后从安排表反推恢复（见 _ensure_master_data）。
+# 基线反推自安排表；教秘的会话内修改（CRUD/灰箱补全）落盘到 master_store.json，
+# 重启自愈恢复 —— 落盘失效的唯一条件是安排表本身被替换（指纹变化，见 master_store）。
 _master_data = MasterData()
+_schedule_fp: Optional[str] = None  # 当前安排表指纹（路径+mtime），落盘失效判定用
 _agent = RescheduleAgent(_db, student=_student)
 
 # 默认实验安排表路径解析
@@ -201,6 +203,13 @@ async def upload_schedule(file: UploadFile = File(...)):
     try:
         _db.load_from_excel(save_path)
         rep = _db.load_report
+        # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
+        global _schedule_fp
+        from app import master_store as _ms
+        _schedule_fp = _ms.schedule_fingerprint(save_path)
+        _master_data.__init__()          # 回到未初始化态，下次访问按新表反推
+        _master_tasks.clear()
+        _ms.clear()
         msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
         if rep.get("pending"):
             msg += f"，另有 {rep['pending']} 条待排任务（没排时间，可直接进并行排课）"
@@ -243,6 +252,7 @@ async def upload_master(file: UploadFile = File(...)):
 
     _master_tasks.clear()
     _master_tasks.extend(tasks)
+    _persist_master_state()
     return {
         "success": True,
         "message": f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）",
@@ -322,6 +332,7 @@ async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
     _ensure_loaded()
     _master_data.build_from_entries(_db.entries)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -333,6 +344,7 @@ async def master_upsert_course(req: _CourseIn):
         _master_data.upsert_course(req.name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -340,6 +352,7 @@ async def master_upsert_course(req: _CourseIn):
 async def master_delete_course(name: str):
     _ensure_master_data()
     _master_data.delete_course(name)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -353,6 +366,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
             rooms=req.rooms, classes=req.classes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -360,6 +374,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
 async def master_delete_experiment(name: str):
     _ensure_master_data()
     _master_data.delete_experiment(name)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -371,6 +386,7 @@ async def master_upsert_teacher(req: _TeacherIn):
         _master_data.upsert_teacher(req.name, projects=req.projects)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -378,6 +394,7 @@ async def master_upsert_teacher(req: _TeacherIn):
 async def master_delete_teacher(name: str):
     _ensure_master_data()
     _master_data.delete_teacher(name)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -389,6 +406,7 @@ async def master_upsert_room(req: _RoomIn):
         _master_data.upsert_room(req.name, capacity=req.capacity)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -396,6 +414,7 @@ async def master_upsert_room(req: _RoomIn):
 async def master_delete_room(name: str):
     _ensure_master_data()
     _master_data.delete_room(name)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -408,6 +427,7 @@ async def master_upsert_class(req: _ClassIn):
                                   time_slots=req.time_slots, week_min=req.week_min, week_max=req.week_max)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -415,6 +435,7 @@ async def master_upsert_class(req: _ClassIn):
 async def master_delete_class(name: str):
     _ensure_master_data()
     _master_data.delete_class(name)
+    _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -546,6 +567,10 @@ def _load_default_schedule() -> tuple[str, int]:
         )
 
     _db.load_from_excel(DEFAULT_SCHEDULE_PATH)
+    # 安排表指纹：主数据落盘的失效判定依据（换表 → 旧落盘作废）
+    global _schedule_fp
+    from app import master_store as _ms
+    _schedule_fp = _ms.schedule_fingerprint(DEFAULT_SCHEDULE_PATH)
     # 重放已应用的调课记录（applied_moves），保证重启后调整仍然生效
     replay_applied, replay_skipped = 0, 0
     try:
@@ -576,15 +601,52 @@ def _load_default_schedule() -> tuple[str, int]:
 
 
 def _ensure_master_data() -> None:
-    """主数据未初始化时，从已加载的安排表反推填充（幂等，进程重启后自愈）。
+    """主数据未初始化时恢复：优先读落盘（会话内修改不丢），否则从安排表反推。
 
-    与 `_ensure_loaded` 同族：不引入第二套持久化，主数据永远从安排表派生，
-    教秘的增删改在会话内有效，重启后回到「安排表反推」的基线。
+    恢复优先级（自愈链）：
+      1. master_store.json 存在且安排表指纹一致 → 整体恢复（含教秘的 CRUD/灰箱补全）；
+      2. 落盘不存在 / 指纹变了（安排表被替换）/ 文件损坏 → 从当前安排表反推基线。
+    指纹不一致时主动清掉旧落盘 —— 安排表永远是主数据的权威来源，旧表上的会话修改
+    对新表没有意义（新表的班级/项目可能根本不存在）。
     """
+    global _schedule_fp
     if _master_data.initialized:
         return
+    from app import master_store
+
+    store = master_store.load()
+    if store and _schedule_fp and store.get("schedule_fingerprint") == _schedule_fp:
+        try:
+            _master_data.from_dict(store.get("master") or {})
+            _master_tasks.clear()
+            _master_tasks.extend(master_store.rows_to_tasks(store.get("tasks")))
+            print(f"✅ 主数据已从落盘恢复（实验项目 {len(_master_data.experiments)}"
+                  f" / 待排任务 {len(_master_tasks)}）")
+            return
+        except Exception as e:
+            print(f"⚠️ 主数据落盘恢复失败（{e}），回退安排表反推基线")
+        master_store.clear()
+    elif store and _schedule_fp and store.get("schedule_fingerprint") != _schedule_fp:
+        print("ℹ️ 安排表已更换，丢弃旧表上的主数据落盘，按新表反推基线")
+        master_store.clear()
     if _db.loaded:
         _master_data.build_from_entries(_db.entries)
+
+
+def _persist_master_state() -> None:
+    """把主数据 + 灰箱清单落盘（尽力而为：失败不阻塞排课，内存态仍是权威）。"""
+    global _schedule_fp
+    if not _master_data.initialized and not _master_tasks:
+        return
+    from app import master_store
+
+    if _schedule_fp is None and _db.loaded and getattr(_db, "_filepath", None):
+        _schedule_fp = master_store.schedule_fingerprint(_db._filepath)
+    master_store.save({
+        "schedule_fingerprint": _schedule_fp,
+        "master": _master_data.to_dict(),
+        "tasks": master_store.tasks_to_rows(_master_tasks),
+    })
 
 
 def _master_derived_tasks() -> List:
@@ -644,6 +706,7 @@ def _enrich_extra_tasks() -> Tuple[List, List[str]]:
     if not tasks:
         return tasks, assumptions
 
+    dirty = False  # 补全是否新填了字段（填了就落盘，重启后分配不重算不漂移）
     md_ready = _master_data.initialized
     teacher_load: Counter = Counter()
     for t in tasks:
@@ -661,6 +724,7 @@ def _enrich_extra_tasks() -> Tuple[List, List[str]]:
                 t.teacher = min(pool, key=lambda te: (teacher_load[te], te))
                 teacher_load[t.teacher] += 1
                 t._teacher_enriched = True
+                dirty = True
         if getattr(t, "_teacher_enriched", False):
             assumptions.append(
                 f"「{t.experiment}」{t.group or '未分组'} 未指定指导教师，"
@@ -670,10 +734,13 @@ def _enrich_extra_tasks() -> Tuple[List, List[str]]:
             if pool:
                 t.room = pool[0]
                 t._room_enriched = True
+                dirty = True
         if getattr(t, "_room_enriched", False):
             assumptions.append(
                 f"「{t.experiment}」{t.group or '未分组'} 未指定场地，"
                 f"已按主数据登记候选场地 {t.room}（求解时在全院可用场地中统一分配，以结果为准）")
+    if dirty:
+        _persist_master_state()
     return tasks, assumptions
 
 
