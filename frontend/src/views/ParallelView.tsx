@@ -128,6 +128,18 @@ export default function ParallelView({
             </button>
           </p>
 
+          {/* 灰箱补全说明：信息不全时系统替教秘做的每个默认决定，必须可见、可纠正 */}
+          {!!result.assumptions?.length && (
+            <div className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+              <div className="text-xs font-medium text-amber-700 mb-1">
+                🧩 灰箱补全（以下 {result.assumptions.length} 项信息不全，系统按主数据/默认值代填，可在「主数据」里改）：
+              </div>
+              <ul className="text-xs text-amber-700 list-disc list-inside space-y-0.5">
+                {result.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+              </ul>
+            </div>
+          )}
+
           {/* 周沙盘：按周切换，行=时段 列=学生组 */}
           {activeWeek ? (
             <div className="mb-5">

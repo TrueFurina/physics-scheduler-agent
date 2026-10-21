@@ -5,7 +5,8 @@ import json
 import re
 import threading
 from datetime import datetime
-from typing import List, Optional
+from collections import Counter
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from pydantic import BaseModel
@@ -610,10 +611,10 @@ def _master_derived_tasks() -> List:
             if (cls, exp_name) in scheduled_pairs or (cls, exp_name) in pending_pairs:
                 continue
             for g in _master_data.groups_of(cls):
+                # 教师/场地留给 _enrich_extra_tasks 统一补全（负载最轻者优先），
+                # 不在这里 prefill 第一个 —— 否则一个新项目的所有组全砸给同一位老师。
                 derived.append(PendingTask(
                     class_name=cls, experiment=exp_name, group=g,
-                    teacher=(sorted(ex["teachers"])[0] if ex["teachers"] else ""),
-                    room=(sorted(ex["rooms"])[0] if ex["rooms"] else ""),
                     course=ex.get("course") or "", source="master",
                 ))
     return derived
@@ -625,6 +626,58 @@ def _schedulable_extra_tasks() -> List:
     考试类（真实表里 3 行「大物实验B/C 考试」）仍留在 `db.pending` 里被报出来，
     只是不参与排课 —— 不静默丢弃的原则同样适用于它们。
     """
+    return _enrich_extra_tasks()[0]
+
+
+def _enrich_extra_tasks() -> Tuple[List, List[str]]:
+    """灰箱补全：清单/待排任务里**缺什么就从主数据补什么**，并把替用户做的每个
+    决定说出口（返回 assumptions）。
+
+    灰箱场景（教秘只给部分信息）：
+    - 缺指导教师 → 从主数据该项目的可授教师里挑（本批内负载最轻者优先，平局取字典序）；
+    - 缺候选场地 → 从主数据该项目的场地里补第一间；
+    - 两处都没有 → 不编造，如实报告「结果中该列为空」。
+    补全是幂等的（只填空字段，不覆盖显式给出的值）， assumptions 每次调用重算。
+    """
+    tasks = _raw_schedulable_tasks()
+    assumptions: List[str] = []
+    if not tasks:
+        return tasks, assumptions
+
+    md_ready = _master_data.initialized
+    teacher_load: Counter = Counter()
+    for t in tasks:
+        if t.teacher:
+            teacher_load[t.teacher] += 1
+
+    for t in tasks:
+        ex = _master_data.experiments.get(t.experiment, {}) if md_ready else {}
+        # 补全来源标记：任务对象在会话内共享，可能已被上一次接口调用补全过。
+        # 只看"字段是否为空"会把那次补全当成"用户显式给的"，假设就静默丢了 ——
+        # 所以补全时打标，之后每次调用都从标记还原假设（决定过程必须可持续可见）。
+        if not t.teacher:
+            pool = sorted(ex.get("teachers") or [])
+            if pool:
+                t.teacher = min(pool, key=lambda te: (teacher_load[te], te))
+                teacher_load[t.teacher] += 1
+                t._teacher_enriched = True
+        if getattr(t, "_teacher_enriched", False):
+            assumptions.append(
+                f"「{t.experiment}」{t.group or '未分组'} 未指定指导教师，"
+                f"按主数据可授教师自动分配：{t.teacher}")
+        if not t.room:
+            pool = sorted(ex.get("rooms") or [])
+            if pool:
+                t.room = pool[0]
+                t._room_enriched = True
+        if getattr(t, "_room_enriched", False):
+            assumptions.append(
+                f"「{t.experiment}」{t.group or '未分组'} 未指定场地，"
+                f"已按主数据登记候选场地 {t.room}（求解时在全院可用场地中统一分配，以结果为准）")
+    return tasks, assumptions
+
+
+def _raw_schedulable_tasks() -> List:
     from app.utils.excel_parser import looks_like_exam
 
     raw = list(getattr(_db, "pending", None) or []) + list(_master_tasks) + _master_derived_tasks()
@@ -801,7 +854,7 @@ async def parallel_solve(req: ParallelSolveRequest):
     _ensure_master_data()
     from app.engine.parallel_scheduler import ParallelScheduler
 
-    extra = _schedulable_extra_tasks()
+    extra, task_assumptions = _enrich_extra_tasks()
     ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
 
     # 教务给定的「课程总时间范围」：主数据里该班的星期 / 节次 / 周次，是求解器的可用时间空间。
@@ -824,6 +877,10 @@ async def parallel_solve(req: ParallelSolveRequest):
         time_slots=md_time_slots,
         week_max_override=week_max_override,
     )
+    # 灰箱补全假设：任务层（教师/场地自动补全）+ 求解层（星期/节次/周次默认值）。
+    # 求解失败时错误信息本身就是结论，不必再叠一层假设。
+    if task_assumptions and result.get("success"):
+        result["assumptions"] = task_assumptions + list(result.get("assumptions") or [])
     return result
 
 
@@ -1388,9 +1445,10 @@ async def auto_schedule():
     _ensure_loaded()
 
     from app.engine.auto_scheduler import AutoScheduler
+    extra_tasks, task_assumptions = _enrich_extra_tasks()
     scheduler = AutoScheduler(
         _db, student=_student,
-        extra_tasks=_schedulable_extra_tasks(),
+        extra_tasks=extra_tasks,
     )
     result = await run_in_threadpool(scheduler.solve, max_sections=30)
 
@@ -1398,6 +1456,10 @@ async def auto_schedule():
     # 原文案写"本次简化演示 12 个教学任务"，而实际 `max_sections=30` —— 文案与事实不符，
     # 同一份方案下方就列着 30 条。这里改成用真实数字拼，避免再漂。
     real_entries = len(_db.entries)
+    # 灰箱补全：替教秘做的默认决定（自动分配教师/场地）附加在定位说明之后，不静默
+    if task_assumptions and result.get("success"):
+        note += "\n\n🧩 灰箱补全（信息不全时系统自动做的决定）:\n" + \
+                "\n".join(f"  · {a}" for a in task_assumptions)
     note = (
         f"📌 定位说明：自动排课为辅助初稿生成。全表共 {result.get('total_sections_all', 0)} 个实验教学任务"
         f"（另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"

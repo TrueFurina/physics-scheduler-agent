@@ -95,6 +95,8 @@ export interface ParallelSolveResult {
   weeks_window?: number;
   by_week?: Record<string, number>;
   schedule?: ParallelSession[];
+  /** 灰箱补全：信息不全时系统替教秘做的默认决定（自动分配教师/默认星期/节次/周次） */
+  assumptions?: string[];
 }
 
 /** `/data-audit` 的单条冲突。 */

@@ -136,7 +136,10 @@ class ParallelScheduler:
             if key not in seen:
                 seen.add(key)
                 units.append({"project": e.experiment, "group": e.group})
-        # 待排任务：与已排过的单元按 (项目, 组) 去重后并入 —— 这就是"从零排课"的入口
+        # 待排任务：与已排过的单元按 (项目, 组) 去重后并入 —— 这就是"从零排课"的入口。
+        # 灰箱场景（教秘只给部分信息）下替用户做的每个默认决定都记进 graybox_notes，
+        # 随结果返回 —— 排出来的课"为什么长这样"必须可解释，不能静默。
+        graybox_notes: List[str] = []
         pending_count = 0
         for t in self._tasks_of(class_name):
             key = (t.experiment, t.group or "1组")
@@ -147,6 +150,9 @@ class ParallelScheduler:
             pending_count += 1
             if t.teacher:
                 unit_teacher.setdefault(key, t.teacher)
+            elif not t.group:
+                graybox_notes.append(f"「{t.experiment}」未指定学生组，按 1 组处理"
+                                     f"（保守策略：与 1 组互斥排课，不会让学生双抓）")
         if not units:
             return {"success": False, "error": f"未找到 {class_name} 的实验项目/分组数据"}
 
@@ -154,6 +160,14 @@ class ParallelScheduler:
         wd = weekday or (weekday_votes.most_common(1)[0][0] if weekday_votes else "周四")
         if wd not in ALL_WEEKDAYS:
             wd = "周四"
+        # 灰箱假设：星期是怎么定的，说清楚（教务没给、请求也没给时＝我们在推断）
+        if not weekday:
+            if weekday_votes:
+                graybox_notes.append(
+                    f"上课星期未显式给定，按该班历史最常用的 {wd}"
+                    f"（{weekday_votes.most_common(1)[0][1]}/{sum(weekday_votes.values())} 次）")
+            else:
+                graybox_notes.append("上课星期未给定且无历史记录可推断，默认周四")
 
         # 场地：安排表里没有（例如只上传了大纲清单）时，退回主数据里写的候选场地 ——
         # 否则"没有可用场地"会直接把从零排课这条路堵死。
@@ -162,6 +176,13 @@ class ParallelScheduler:
             rooms = sorted({t.room for t in self._tasks_of(class_name) if t.room})
         if not rooms:
             return {"success": False, "error": "没有可用场地（安排表里没有场地，主数据里也没写候选场地）"}
+
+        # 灰箱假设：哪些单元连教师都没有（补全也救不回来的），如实报告而不是留空了事
+        for u in units:
+            if not unit_teacher.get((u["project"], u["group"])):
+                graybox_notes.append(
+                    f"「{u['project']}」{u['group']} 没有教师信息（清单与主数据都没有），"
+                    f"结果中教师列为空")
 
         # 3. 其他课程已占用（同星期）：场地 / 教师
         room_occupied, teacher_occupied = set(), set()
@@ -203,6 +224,13 @@ class ParallelScheduler:
             all_weeks = list(range(1, DEFAULT_SEMESTER_WEEKS + 1))
         week_max = week_max_override if week_max_override else (all_weeks[-1] if all_weeks else start_week)
         max_avail = max(0, week_max - start_week + 1)
+        # 灰箱假设：节次 / 周次上限如果没给定（教务没给、请求也没给），如实报告
+        if time_slots is None:
+            graybox_notes.append("节次范围未给定，默认 567/678/91011 三段全部可用"
+                                 "（教务给了「课程总时间范围」后不会再出现本条）")
+        if week_max_override is None:
+            graybox_notes.append(f"周次上限未给定，按{'安排表最后一周' if all_weeks else '默认学期跨度'}"
+                                 f"（第{week_max}周）为界")
         if max_avail <= 0:
             return {"success": False,
                     "error": (f"起始周第{start_week}周已超出本表覆盖范围"
@@ -341,6 +369,8 @@ class ParallelScheduler:
                             f"固定{wd}，组/场地/教师三重互斥"
                             + (f"；其中 {pending_count} 个是待排任务（大纲新增，此前没排过时间）"
                                if pending_count else ""),
+                    # 灰箱补全：教秘只给了部分信息时，系统替他做的每个默认决定都在这里
+                    "assumptions": graybox_notes,
                 }
             if status != cp_model.INFEASIBLE and status != cp_model.UNKNOWN:
                 break  # 别的状态（如 MODEL_INVALID）加周也没用，别白试
