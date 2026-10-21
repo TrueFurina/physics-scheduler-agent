@@ -708,6 +708,19 @@ async def impact_analysis(req: ChatRequest):
     target_week = parsed["target_week"]
     teacher_name = parsed.get("teacher_name")
 
+    # 周次范围校验（R-32 的另一半）：影响分析同样按 `e.week == target_week` 过滤，
+    # 周次落在表外时"冲突数 = 0"，而 0 冲突会被读成"这周完全没影响"——
+    # 比报错更危险。这里直接 400，把"查不了"和"没影响"分开。
+    _bounds = _agent.week_bounds()
+    if _bounds and not (_bounds[0] <= target_week <= _bounds[1]):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"第{target_week}周不在实验安排表范围内"
+                f"（本表覆盖第{_bounds[0]}–{_bounds[1]}周），无法做影响分析"
+            ),
+        )
+
     # 冲突筛选（含原因）
     result = _agent.find_slots_with_reasons(target_week, teacher_name=teacher_name)
     excluded = result["excluded"]

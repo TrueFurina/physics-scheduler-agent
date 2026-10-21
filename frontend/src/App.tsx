@@ -681,6 +681,13 @@ function App() {
         if (course && ctx.target_week) scheduleAiPlans(course, ctx.target_week);
         return;
       }
+      // 后端明确拒绝（如周次不在实验安排表范围内）：必须标成失败态。
+      // 这类消息原来是灰字，和"✅ 第7周可用时段"看起来是同一种反馈，
+      // 教秘读不出"这条路走不通"。
+      if (r.data.success === false) {
+        setNlMsg(`❌ ${r.data.message}`);
+        return;
+      }
       setNlMsg(r.data.message);
     } catch (err: any) {
       setNlMsg(`❌ 请求失败：${describeApiError(err)}`);

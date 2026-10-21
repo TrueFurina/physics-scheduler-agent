@@ -274,6 +274,45 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     rec(false, '🧠 多轮追问记住上下文', `追问后没走通第二轮：${String(e).slice(0, 110)}`);
   }
 
+  // ⑨ 超出周次范围（R-32）—— 必须**拒绝并说清范围**，不许画出一份假沙盘
+  //
+  // 为什么用第99周而不是第-1周：负数走的是 LLM 解析分支（规则正则不认 "-"），
+  // 探针会因此依赖外部模型，时好时坏。第99周走确定性的规则分支，能稳定验证
+  // "越界不静默夹取"这条语义（修之前它会被悄悄夹成第16周，界面画得跟真的一样）。
+  try {
+    const p4 = await ctx.newPage();
+    p4.on('pageerror', (e) => jsErrors.push('[nl3] ' + String(e).slice(0, 150)));
+    await p4.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await p4.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
+    await p4.locator('button', { hasText: TEACHER }).first().click();
+    await p4.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+
+    await p4.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第99周`);
+    await p4.getByRole('button', { name: /^发送$/ }).click();
+    await p4.waitForFunction(
+      () => /不在实验安排表范围内/.test(document.body.innerText),
+      { timeout: 30000 },
+    );
+    await p4.waitForTimeout(400);
+    const t = await p4.evaluate(() => document.body.innerText);
+    const range = (t.match(/本表覆盖第(\d+)[–-](\d+)周/) || []);
+    const drewSandbox = /周课表沙盘（/.test(t);
+    rec(
+      range.length === 3 && !drewSandbox,
+      '🚧 超出周次范围被拦住',
+      `提示「本表覆盖第${range[1] || '?'}–${range[2] || '?'}周」，` +
+        (drewSandbox ? '但仍画出了沙盘（假结果！）' : '未画出沙盘'),
+    );
+    await p4.screenshot({ path: path.join(SHOT_DIR, 'nl-week-out-of-range.png'), fullPage: true });
+  } catch (e) {
+    const body = await ctx.pages().at(-1)?.evaluate(() => document.body.innerText).catch(() => '');
+    rec(
+      false,
+      '🚧 超出周次范围被拦住',
+      `越界周次没有被明确拒绝：${String(e).slice(0, 100)}｜当前可见：${String(body).replace(/\s+/g, ' ').slice(0, 120)}`,
+    );
+  }
+
   rec(jsErrors.length === 0, '全程 JS 错误', `${jsErrors.length} 条${jsErrors.length ? '：' + jsErrors[0] : ''}`);
   rec(failedReq.length === 0, '全程失败请求', `${failedReq.length} 条${failedReq.length ? '：' + failedReq[0] : ''}`);
 

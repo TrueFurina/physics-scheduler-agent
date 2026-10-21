@@ -2,7 +2,7 @@
 
 import json
 from datetime import date, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.student_schedule import StudentSchedule
 from app.agent.llm_intent_parser import LLMIntentParser
@@ -73,6 +73,20 @@ class RescheduleAgent:
             return cn_map.get(parts[0], 0) * 10 + cn_map.get(parts[1], 0)
         return 0
 
+    def week_bounds(self) -> Optional[Tuple[int, int]]:
+        """本次数据实际覆盖的周次区间；判定不了（未加载 / 解析不出周次）时返回 None。
+
+        为什么需要单独一个方法：`get_week_range()` 在数据未加载时返回 `(0, 0)`
+        ——而元组 `(0, 0)` 是**真值**，任何 `if week_range:` 都会误判为"有范围"。
+        这里把"有范围"的定义收敛成一处：必须已加载且上界 > 0。
+        """
+        if not self.db.loaded:
+            return None
+        lo, hi = self.db.get_week_range()
+        if not hi:
+            return None
+        return (lo or 1, hi)
+
     def parse_request(self, text: str) -> dict:
         """解析自然语言请求，提取关键信息
 
@@ -111,13 +125,18 @@ class RescheduleAgent:
             # 直接指定"第N周"
             target_week = source_week
 
-        # 上界夹取：`get_week_range()` 在数据未加载时返回 `(0, 0)`（见 excel_parser.py），
-        # 而元组 `(0, 0)` 是**真值**——原来的 `min(target_week, week_range[1])`
-        # 会把目标周次夹成 0。0 是假值，下游就当成"没解析出周次"，
-        # 于是白白调用一次 LLM 并回一句"请补充信息"（实测每次约 5 秒）。
-        # 因此只在拿到有效上界时才夹。
-        if target_week and week_range and week_range[1]:
-            target_week = min(target_week, week_range[1])
+        # 关于上界：这里**不再夹取**，改由 `process_request` 统一做范围校验并明确拒绝。
+        #
+        # 历史教训要留着：`get_week_range()` 在数据未加载时返回 `(0, 0)`，而元组
+        # `(0, 0)` 是**真值**——原来的 `min(target_week, week_range[1])` 会把目标周次
+        # 夹成 0，0 是假值，下游当成"没解析出周次"，于是白调一次 LLM 并回一句
+        # "请补充信息"（实测每次 5 秒）。现在这个坑由 `week_bounds()` 兜（必须已加载
+        # 且上界 > 0 才算有范围）。
+        #
+        # 为什么连"超上界的值"也不夹了：静默夹取等于**替教秘改口**——他说第 17 周，
+        # 沙盘却画第 16 周，他很可能没注意到就提交了。而规则路径夹取、LLM 路径不夹，
+        # 同一条输入还会因解析来源不同而行为不一致（R-32 的负数就是这么漏进来的）。
+        # 现在两条路径汇合后统一判定：范围外 → 说清范围，不出结果。
 
         # 提取教师/课程信息（简单规则）
         teacher_name = None
@@ -400,6 +419,46 @@ class RescheduleAgent:
                 if llm_result.get("needs_followup") and (
                         not parsed["target_week"] or not parsed.get("teacher_name")):
                     return self._need_info(parsed, llm_result.get("followup_questions") or [])
+
+        # 周次范围校验（R-32）
+        #
+        # 实测（真实数据，第 1–16 周）：`我是吴琳，把声速测量调到第-1周` 返回
+        # **150 个可用 / 0 个被排除**；而正常周次是 118 可用 / 32 排除（第2周）、
+        # 78 / 36（第7周）。也就是说负数周次下**三重冲突检查一条都没命中**：
+        # 教室/教师占用是按 `e.week == target_week` 过滤的，学生课表按周查，
+        # 周次落在表外就全查不到 → 冲突检查静默空转 → 满屏绿格。
+        #
+        # 成因是两条解析路径此前待遇不同：规则路径有 `min(target_week, 上界)` 夹取，
+        # **LLM 解析出来的 target_week 完全不受约束**（负数正是这样进来的）。
+        # 现在夹取也去掉了，两条路径在这里汇合后统一判定：超出范围就明说，
+        # 宁可不给结果，也不给一份"看起来全可用、其实没检查"的沙盘。
+        bounds = self.week_bounds()
+        tw = parsed["target_week"]
+        if bounds and tw is not None:
+            lo, hi = bounds
+            if not (lo <= tw <= hi):
+                ctx = self._slot_context(parsed)
+                # 非法周次不能随 context 回传：否则下一轮会把它合并回来，
+                # 教秘改口说"那调到第5周"也救不回来。
+                ctx.pop("target_week", None)
+                # 源周次同理：`第99周` 这种值既不是合法目标也不可能是合法原周，
+                # 留着它只会让下一轮「下周」算成第 100 周，被拒第二次。
+                if ctx.get("source_week") is not None and not (lo <= ctx["source_week"] <= hi):
+                    ctx.pop("source_week", None)
+                return {
+                    "success": False,
+                    "message": (
+                        f"第{tw}周不在实验安排表范围内（本表覆盖第{lo}–{hi}周）。"
+                        f"请改成第{lo}到第{hi}周之间的周次，例如「调到第{hi}周」。"
+                    ),
+                    "target_week": None,
+                    "context": ctx,
+                    "available_slots": [],
+                    "excluded_slots": [],
+                    "total": 0,
+                    "need_info": False,
+                    "followup_questions": [],
+                }
 
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
         # 靠它判断"教师本人在这个时段有没有课"。不给教师就直出时段，等于跳过
