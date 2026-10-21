@@ -258,6 +258,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
       '🧠 多轮追问记住上下文',
       `追问已记住「${remembered.slice(0, 40)}」，且不再重复问教师${reAskedTeacher ? '（又问了！）' : ''}`,
     );
+    await p3.screenshot({ path: path.join(SHOT_DIR, 'nl-followup.png'), fullPage: true });
 
     // 第二轮只补周次 —— 应当直接出沙盘，而不是再来一次追问
     const t5 = Date.now();

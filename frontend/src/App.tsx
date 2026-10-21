@@ -635,7 +635,8 @@ function App() {
       if (data.need_info && data.followup_questions?.length) {
         setNlContext(ctx);
         setFollowupQ(data.followup_questions);
-        setNlMsg(`🤔 ${r.data.message}`);
+        // 追问文案由上方琥珀色卡片承载（问题 + 已记住的槽位），这里不再复述一遍
+        setNlMsg('');
         return;
       }
       setFollowupQ([]);
