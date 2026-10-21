@@ -2,10 +2,13 @@ import type { Teacher } from '../api/client';
 
 interface Props {
   teachers: Teacher[];
+  /** 首屏加载失败的原因；非空表示"老师一个都没有"不是因为没数据，而是因为出错了 */
+  loadError: string;
   autoScheduleLoading: boolean;
   autoScheduleMsg: string;
   onOpenAdmin: () => void;
   onAutoSchedule: () => void;
+  onRetryLoad: () => void;
   onSelectTeacher: (name: string) => void;
 }
 
@@ -16,7 +19,7 @@ interface Props {
  * 教师姓名是业务主体（教秘按姓名发起调课），不做脱敏。
  */
 export default function IdentityView({
-  teachers, autoScheduleLoading, autoScheduleMsg, onOpenAdmin, onAutoSchedule, onSelectTeacher,
+  teachers, loadError, autoScheduleLoading, autoScheduleMsg, onOpenAdmin, onAutoSchedule, onRetryLoad, onSelectTeacher,
 }: Props) {
   return (
     <div>
@@ -70,7 +73,26 @@ export default function IdentityView({
         ))}
       </div>
       {teachers.length === 0 && (
-        <div className="text-center text-gray-400 py-16">暂无教师数据，请先加载实验安排表</div>
+        // 两种"没有老师"必须分开说：
+        //  - 服务端压根没数据      → 提示去找安排表（现状，保留）
+        //  - 接口报错了（loadError）→ 说清是加载失败，并给一个当场能点的重试。
+        //    原先两种都写"请先加载实验安排表"，而界面上没有任何加载入口，
+        //    教秘照做会卡死在一个不存在的按钮上（实测：把 /teachers 拦成 500 时就是这样）。
+        loadError ? (
+          <div className="text-center py-16">
+            <div className="text-gray-500">教师列表没能加载出来</div>
+            <div className="text-sm text-gray-400 mt-2 max-w-xl mx-auto break-words">{loadError}</div>
+            <button
+              type="button"
+              onClick={onRetryLoad}
+              className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+            >
+              🔄 重新加载
+            </button>
+          </div>
+        ) : (
+          <div className="text-center text-gray-400 py-16">暂无教师数据，请先加载实验安排表</div>
+        )
       )}
     </div>
   );

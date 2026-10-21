@@ -45,6 +45,8 @@ describe('IdentityView', () => {
     render(
       <IdentityView
         teachers={[teacher('吴琳'), teacher('张妹玉')]}
+        loadError=""
+        onRetryLoad={() => {}}
         autoScheduleLoading={false}
         autoScheduleMsg=""
         onOpenAdmin={() => {}}
@@ -60,6 +62,8 @@ describe('IdentityView', () => {
     render(
       <IdentityView
         teachers={[]}
+        loadError=""
+        onRetryLoad={() => {}}
         autoScheduleLoading={false}
         autoScheduleMsg=""
         onOpenAdmin={() => {}}
@@ -70,10 +74,33 @@ describe('IdentityView', () => {
     expect(screen.getByText(/暂无教师数据/)).toBeTruthy();
   });
 
+  it('加载失败时空态要说"失败"并给重试，不能说"请先加载实验安排表"', () => {
+    // 界面上根本没有任何加载安排表的入口，让用户去找它是把人送进死路。
+    const onRetryLoad = vi.fn();
+    render(
+      <IdentityView
+        teachers={[]}
+        loadError="服务端出错（HTTP 500），请稍后重试或刷新页面。"
+        onRetryLoad={onRetryLoad}
+        autoScheduleLoading={false}
+        autoScheduleMsg=""
+        onOpenAdmin={() => {}}
+        onAutoSchedule={() => {}}
+        onSelectTeacher={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/请先加载实验安排表/)).toBeNull();
+    expect(screen.getByText(/没能加载出来/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /重新加载/ }));
+    expect(onRetryLoad).toHaveBeenCalledTimes(1);
+  });
+
   it('自动排课按钮在请求期间置灰并改文案（防重复提交）', () => {
     render(
       <IdentityView
         teachers={[]}
+        loadError=""
+        onRetryLoad={() => {}}
         autoScheduleLoading
         autoScheduleMsg="已排定 433 条"
         onOpenAdmin={() => {}}

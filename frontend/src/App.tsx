@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import {
   rescheduleApi, getAdminToken, setAdminToken, Teacher, TeacherCourse, AvailableSlot, ExcludedSlot, RescheduleRequest,
 } from './api/client';
@@ -10,6 +10,7 @@ import {
   type PendingPhoneOtp, type CloudConsultLog, type ConsultModuleKey,
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
+import { describeApiError } from './utils/apiError';
 import ErrorBoundary from './components/ErrorBoundary';
 import type { View, ImpactResult, AiPlan, NlSlotContext } from './types';
 import IdentityView from './views/IdentityView';
@@ -49,6 +50,10 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [dataLoaded, setDataLoaded] = useState(false);
+  // 首屏加载失败的原因。必须单独记：教师列表为空有两种完全不同的原因 ——
+  // 「服务端没读到安排表」和「服务端报错了」，空态文案不能都写成"请先加载实验安排表"，
+  // 后者会让教秘去找一个界面上根本不存在的加载入口（实测见 probe_faults 首屏场景）。
+  const [loadError, setLoadError] = useState('');
   const [requestStatus, setRequestStatus] = useState('');  // 申请提交后的状态反馈
   const [requests, setRequests] = useState<RescheduleRequest[]>([]);  // 审批台申请列表
   const [nlInput, setNlInput] = useState('');  // 自然语言调课输入
@@ -163,7 +168,7 @@ function App() {
       const r = await withRetry(() => rescheduleApi.parallelOverview());
       setParallelCourses(r.data.data.courses || []);
     } catch (err: any) {
-      setMsg(`加载课程总览失败：${err.response?.data?.detail || err.message}（可刷新页面重试）`);
+      setMsg(`加载课程总览失败：${describeApiError(err)}`);
     } finally {
       setParallelLoading(false);
     }
@@ -186,7 +191,7 @@ function App() {
         setMsg(r.data.error || '并行排课失败');
       }
     } catch (err: any) {
-      setMsg(`并行排课失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`并行排课失败：${describeApiError(err)}`);
     } finally {
       setParallelSolving(false);
     }
@@ -212,7 +217,7 @@ function App() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      setMsg(`导出失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`导出失败：${describeApiError(err)}`);
     }
   };
 
@@ -234,7 +239,7 @@ function App() {
     } catch (err: any) {
       // 失败时清掉旧数据：陈旧数字配上"这是刚扫出来的"比空白更误导
       setAuditData(null);
-      setAuditError(err.response?.data?.detail || err.message || '未知错误');
+      setAuditError(describeApiError(err));
     } finally {
       setAuditLoading(false);
     }
@@ -244,7 +249,7 @@ function App() {
       setStatsData(s.data.data);
     } catch (err: any) {
       setStatsData(null);
-      setStatsError(err.response?.data?.detail || err.message || '未知错误');
+      setStatsError(describeApiError(err));
     }
   };
 
@@ -259,7 +264,7 @@ function App() {
       );
       setImpact(r.data.data);
     } catch (err: any) {
-      setMsg(`影响分析失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`影响分析失败：${describeApiError(err)}`);
     } finally {
       setImpactLoading(false);
     }
@@ -273,7 +278,7 @@ function App() {
       const r = await rescheduleApi.autoSchedule();
       setAutoScheduleMsg(r.data.message);
     } catch (err: any) {
-      setAutoScheduleMsg(`❌ 自动排课失败：${err.response?.data?.detail || err.message}`);
+      setAutoScheduleMsg(`❌ 自动排课失败：${describeApiError(err)}`);
     } finally {
       setAutoScheduleLoading(false);
     }
@@ -446,22 +451,30 @@ function App() {
   // 先问 /status 再决定是否 load-default：排课数据在进程内存里，
   // 页面刷新（数据仍在）时无条件 load-default 会把 433 行 Excel **整表重解析一遍**
   // （本地实测 0.98s CPU / 冷沙箱 3.8s），纯属白烧 —— 而且它还是限流桶里的一员。
-  useEffect(() => {
-    const init = async () => {
-      try {
-        const t = await withRetry(async () => {
-          const st = await rescheduleApi.getStatus();
-          if (!st.data.loaded) await rescheduleApi.loadDefault();
-          return rescheduleApi.getTeachers();
-        });
-        setTeachers(t.data.teachers);
-        setDataLoaded(true);
-      } catch (err: any) {
-        setMsg(`加载失败：${err.response?.data?.detail || err.message}（可刷新页面重试）`);
-      }
-    };
-    init();
+  // 首屏加载（也是空态「重试」按钮的入口）：/status → 需要才 load-default → /teachers。
+  // 抽成一个函数是为了一处定义、两处调用 —— 重试与首刷必须走**完全相同的路径**，
+  // 否则"刷新能好、点重试不好"这类差异会在演示现场才被发现。
+  const loadTeacherList = useCallback(async () => {
+    setLoadError('');
+    try {
+      const t = await withRetry(async () => {
+        const st = await rescheduleApi.getStatus();
+        if (!st.data.loaded) await rescheduleApi.loadDefault();
+        return rescheduleApi.getTeachers();
+      });
+      setTeachers(t.data.teachers);
+      setDataLoaded(true);
+      setMsg('');
+    } catch (err: any) {
+      const why = describeApiError(err);
+      setLoadError(why);
+      setMsg(`加载失败：${why}`);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadTeacherList();
+  }, [loadTeacherList]);
 
   // F1: 选择教师身份 → 加载其课程列表（F2）
   const handleSelectTeacher = async (name: string) => {
@@ -485,7 +498,7 @@ function App() {
       setPlansLoading(false);
       setView('courses');
     } catch (err: any) {
-      setMsg(`加载课程失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`加载课程失败：${describeApiError(err)}`);
     } finally {
       setLoading(false);
     }
@@ -550,7 +563,7 @@ function App() {
       setExcluded(r.data.data.excluded_slots || []);
       setView('reschedule');
     } catch (err: any) {
-      setMsg(`查询失败：${err.response?.data?.detail || err.message}`);
+      setMsg(`查询失败：${describeApiError(err)}`);
     } finally {
       setLoading(false);
     }
@@ -670,7 +683,7 @@ function App() {
       }
       setNlMsg(r.data.message);
     } catch (err: any) {
-      setNlMsg(`❌ 请求失败：${err.response?.data?.detail || err.message}`);
+      setNlMsg(`❌ 请求失败：${describeApiError(err)}`);
     } finally {
       setLoading(false);
       setNlInput('');
@@ -735,7 +748,7 @@ function App() {
       if (err?.response?.status === 401) {
         setAdminLoginErr(err?.response?.data?.detail || '管理员账号或密码错误');
       } else {
-        setMsg(`管理员登录失败：${err?.response?.data?.detail || err?.message || '请稍后重试'}`);
+        setMsg(`管理员登录失败：${describeApiError(err)}`);
       }
     } finally {
       setLoading(false);
@@ -1033,10 +1046,12 @@ function App() {
           {view === 'identity' && (
             <IdentityView
               teachers={teachers}
+              loadError={loadError}
               autoScheduleLoading={autoScheduleLoading}
               autoScheduleMsg={autoScheduleMsg}
               onOpenAdmin={handleOpenAdmin}
               onAutoSchedule={handleAutoSchedule}
+              onRetryLoad={loadTeacherList}
               onSelectTeacher={handleSelectTeacher}
             />
           )}

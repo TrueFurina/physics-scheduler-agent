@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { TeacherCourse } from '../api/client';
 import type { NlSlotContext } from '../types';
 
@@ -22,6 +23,18 @@ export default function CoursesView({
 }: Props) {
   const adjustable = courses.filter((c) => c.adjustable);
   const notAdjustable = courses.filter((c) => !c.adjustable);
+
+  // 失败提示必须自己滚到眼前。
+  //
+  // 实测（probe_faults 的 NL 500 场景）：课程多时这一栏在页面最底部，教秘点完「发送」
+  // 提示条出现在输入框下方 12px、**恰好在视口之外** —— 点了没反应，等于静默失败。
+  // 只在失败时自动滚；成功路径会切到沙盘视图，不需要滚动。
+  const nlMsgRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!nlMsg || !/❌|失败/.test(nlMsg)) return;
+    nlMsgRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [nlMsg]);
+  const nlFailed = /❌|失败/.test(nlMsg);
 
   return (
     <div>
@@ -123,7 +136,16 @@ export default function CoursesView({
 
         {/* 自然语言反馈 */}
         {nlMsg && (
-          <div className="mt-3 text-sm text-gray-600 whitespace-pre-wrap">{nlMsg}</div>
+          <div
+            ref={nlMsgRef}
+            className={
+              nlFailed
+                ? 'mt-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 whitespace-pre-wrap'
+                : 'mt-3 text-sm text-gray-600 whitespace-pre-wrap'
+            }
+          >
+            {nlMsg}
+          </div>
         )}
       </div>
     </div>
