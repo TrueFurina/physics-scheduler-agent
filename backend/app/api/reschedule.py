@@ -966,29 +966,50 @@ _init_db()
 
 
 def _parse_original_time(text: str) -> dict:
-    """从 original_time（如 '周四 13:30-15:45 · A504'）解析 星期/时段/教室"""
+    """从 original_time（如 '周四 13:30-15:45 · A504'）解析 星期/时段/教室。
+
+    ⚠️ 这是**兜底**：云端工单表只存了给人读的文案，没有结构化字段，只能反解。
+    反解必须保守 —— **认不出就留空**（调用方据此拒绝），绝不能猜。三处实测过的坑：
+
+    · 星期 `周[一二三四五]` 漏掉周末。真实表 433 条里 71 条（16%）在周六/周日，
+      一所学校"金工 5、6 周排周六"本就是常态。漏掉之后 "周六 上午 · A412-2" 的
+      星期解析为空 ⇒ 星期不参与匹配 ⇒ 第 6 周周六和周日各有一条同名课，
+      **一张工单把两天的课一起搬走**（实测 applied=2）。
+    · 兜底数字正则 `(?<!\\d)([1-9])[1-9]{1,2}(?!\\d)` 会从**教室号**里抠数字：
+      `A412-2` → "412"、"A504" → 不匹配（0 不在 [1-9]）纯属巧合。上午时段的卡片
+      文案是 `周六 上午 · A412-2`（没有 HH:MM），于是时段被解析成 "412" ⇒
+      一个字都匹配不到 ⇒ 审批"通过"了，课表一个字节没变。
+    · 跨节次写法 `14:00-17:00` 映射到主标签 567，判匹配时也只比主标签 ——
+      见 `_apply_reschedule` 里的 blocked 匹配。
+    """
     import re
     out = {"weekday": "", "time_slot": "", "room": ""}
     if not text:
         return out
-    m = re.search(r"周[一二三四五]", text)
+
+    # 教室在最后一个 "·" 之后：先切开，后面所有反解只在**教室之前**那段里找，
+    # 教室号就再也不会被当成节次。
+    head, sep, tail = text.partition("·")
+    if sep:
+        out["room"] = tail.strip()
+
+    m = re.search(r"周([一二三四五六日天])", head)
     if m:
-        out["weekday"] = m.group(0)
-    # 时段：优先时间区间（归一化），其次节次数字（如 567）
-    m = re.search(r"(\d{1,2}:\d{2}\s*[-~]\s*\d{1,2}:\d{2})", text)
+        out["weekday"] = "周" + ("日" if m.group(1) == "天" else m.group(1))
+
+    # 时段：① 真实时间区间 → 归一化  ② 明确的节次码  ③ "上午/早上"
+    m = re.search(r"(\d{1,2}:\d{2}\s*[-~—]\s*\d{1,2}:\d{2})", head)
     if m:
-        try:
-            from app.utils.excel_parser import TIME_SLOT_NORMALIZE
-            key = re.sub(r"\s", "", m.group(1))
-            out["time_slot"] = TIME_SLOT_NORMALIZE.get(key, TIME_SLOT_NORMALIZE.get(m.group(1), ""))
-        except Exception:
-            out["time_slot"] = ""
+        from app.utils.excel_parser import TIME_SLOT_NORMALIZE
+        key = re.sub(r"\s", "", m.group(1)).replace("—", "-").replace("~", "-")
+        out["time_slot"] = TIME_SLOT_NORMALIZE.get(key, "")
     if not out["time_slot"]:
-        m = re.search(r"(?<!\d)([1-9])[1-9]{1,2}(?!\d)", text)
+        m = re.search(r"(?<![\dA-Za-z])(567|678|91011|78|34)(?!\d)", head)
         if m:
-            out["time_slot"] = m.group(0)
-    if "·" in text:
-        out["room"] = text.split("·")[-1].strip()
+            from app.utils.excel_parser import TIME_SLOT_NORMALIZE
+            out["time_slot"] = TIME_SLOT_NORMALIZE.get(m.group(1), "")
+    if not out["time_slot"] and re.search(r"上午|早上", head):
+        out["time_slot"] = "MORNING"
     return out
 
 
@@ -1028,8 +1049,11 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
             return False
         if parsed["weekday"] and e.weekday != parsed["weekday"]:
             return False
-        if parsed["time_slot"] and e.time_slot != parsed["time_slot"]:
-            return False
+        if parsed["time_slot"]:
+            # 按**真实占住的节次**比，不是主标签相等：`14:00-17:00` 主标签 567，
+            # 但它同时占着 678 的前 1 小时 15 分，卡片上回显的就是 "14:00-17:00"。
+            if parsed["time_slot"] not in set(getattr(e, "blocked", None) or [e.time_slot]):
+                return False
         if parsed["room"] and e.room != parsed["room"]:
             return False
         if class_name:
@@ -1040,7 +1064,15 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
 
     candidates = [e for e in _db.entries if _match(e)]
     if not candidates:
-        return {"applied": 0, "skipped": 0, "details": ["未找到匹配的排课记录（可能已在教务系统中人工调整）"]}
+        # 说清"哪一段没认出来"，否则教秘只会看到"未找到匹配的排课记录"，
+        # 以为是自己记错了课，而实际是卡片文案里有系统读不懂的写法。
+        unknown = [k for k in ("weekday", "time_slot", "room") if not parsed[k]]
+        hint = f"（申请原文：{record.get('original_time', '') or '空'}"
+        if unknown:
+            hint += f"；其中 {'/'.join({'weekday': '星期', 'time_slot': '时段', 'room': '教室'}[k] for k in unknown)} 未能识别"
+        hint += "）"
+        return {"applied": 0, "skipped": 0,
+                "details": [f"未找到匹配的排课记录（可能已在教务系统中人工调整）{hint}"]}
 
     # 选源周
     if record.get("source_week", 0) > 0:
@@ -1053,6 +1085,21 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
 
     if not src_entries:
         return {"applied": 0, "skipped": 0, "details": ["未找到可移动的源周记录"]}
+
+    # ⚠️ 反解不出星期时**不许"全都搬"**。真实表里周六/周日各有一节的同名课是常态
+    # （24服工_4 周六、24服工_5 周日，同教师同教室同实验同周次）。原先星期为空 ⇒
+    # 星期不参与过滤 ⇒ 一张只申请"周六那节"的工单把周日的也搬走了（实测 applied=2）。
+    # 少动一条教秘能自己补，多动一条他会以为系统乱改课表。
+    days = sorted({e.weekday for e in src_entries})
+    if not parsed["weekday"] and len(days) > 1:
+        return {
+            "applied": 0, "skipped": len(src_entries),
+            "details": [
+                f"该申请未写明星期，而第{src_entries[0].week}周「{src_entries[0].experiment}」"
+                f"在 {'、'.join(days)} 各有一条（{src_entries[0].class_name}）。"
+                f"为避免一次搬走两天的课，本次未做任何改动 —— 请在申请里写明是哪一天。"
+            ],
+        }
 
     applied, skipped, details = 0, 0, []
     for e in src_entries:

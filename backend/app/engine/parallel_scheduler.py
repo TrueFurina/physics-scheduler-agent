@@ -26,6 +26,10 @@ from app.utils.excel_parser import ScheduleDatabase
 from app.agent.student_schedule import StudentSchedule
 
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
+# 真实表 433 条里 71 条（16%）在周六/周日 —— 一所学校"金工 5、6 周排周六"是常态。
+# 建模用 WEEKDAYS，但"这班平时哪天上课"必须把周末算进去，否则 42/46 节课都在
+# 周末的班会被判成"周一出勤"（见 get_course_overview）。
+ALL_WEEKDAYS = WEEKDAYS + ["周六", "周日"]
 TIME_SLOTS = ["567", "678", "91011"]
 
 
@@ -48,12 +52,17 @@ class ParallelScheduler:
         for e in self.db.entries:
             if e.class_name and e.experiment and e.group and not _is_intro(e.experiment):
                 courses[e.class_name][e.experiment].add(e.group)
-                if e.weekday in WEEKDAYS:
+                if e.weekday in ALL_WEEKDAYS:
                     weekday_votes[e.class_name][e.weekday] += 1
         return [
             {
                 "class_name": cls,
                 "weekday": weekday_votes[cls].most_common(1)[0][0] if weekday_votes[cls] else "周四",
+                # 星期分布（含周末）：「常上周一」原先只统计周一~周五，于是 42/46 节课
+                # 都在周六/周日的班（24级电子信息工程1、2班）被显示成"常上周一"。
+                "weekday_mix": dict(weekday_votes[cls].most_common()),
+                "weekend_sessions": sum(v for k, v in weekday_votes[cls].items()
+                                        if k in ("周六", "周日")),
                 "projects": [
                     {"project": p, "groups": sorted(gs)}
                     for p, gs in sorted(projs.items())
@@ -73,7 +82,7 @@ class ParallelScheduler:
         for e in self.db.entries:
             if e.class_name != class_name:
                 continue
-            if e.weekday in WEEKDAYS:
+            if e.weekday in ALL_WEEKDAYS:
                 weekday_votes[e.weekday] += 1
             if not e.experiment or not e.group or _is_intro(e.experiment):
                 continue
@@ -94,9 +103,9 @@ class ParallelScheduler:
         if not units:
             return {"success": False, "error": f"未找到 {class_name} 的实验项目/分组数据"}
 
-        # 2. 上课星期：参数优先，否则取历史最常用
+        # 2. 上课星期：参数优先，否则取历史最常用（含周六/周日）
         wd = weekday or (weekday_votes.most_common(1)[0][0] if weekday_votes else "周四")
-        if wd not in WEEKDAYS:
+        if wd not in ALL_WEEKDAYS:
             wd = "周四"
 
         rooms = self.db.get_all_rooms()
@@ -126,8 +135,46 @@ class ParallelScheduler:
                 if s.get("teacher"):
                     teacher_occupied.add((s["week"], ts, s["teacher"]))
 
-        # 4. CP-SAT 建模（资源不足自动加周重试一次）
-        for attempt_weeks in (weeks, weeks + 4):
+        # 4. 可排周次窗口 —— 按"这门课至少需要几周"推导，并且不越过本表覆盖的最后一个周次。
+        #
+        # 原先硬编码成 `(weeks, weeks + 4)`，默认 start_week=2 / weeks=10 ⇒ 最多 14 周
+        # （第2–15周）。真实表里 17 个班有 2 个排不出来，而它们需要的是 15 周：
+        #   23物本                 30 个单元 / 2 组                → 15 周
+        #   24级电子信息工程1、2班   45 个单元 / 5 组 / 1 位教师(3 时段) → 15 周
+        # 差的就是这 1 周，可错误文案写的是"场地/教师资源在该星期被占用过多"⇒
+        # 教秘把 7 个星期按钮挨个点一遍，得到 7 个一模一样的失败。
+        # 同时，`weeks+4` 也不看表里到底有几个周次：weeks=14 时重试 18 周，
+        # 会排出第 17–19 周 —— 那是学校里根本不存在的周次。
+        all_weeks = sorted({e.week for e in self.db.entries})
+        week_max = all_weeks[-1] if all_weeks else start_week
+        max_avail = max(0, week_max - start_week + 1)
+        if max_avail <= 0:
+            return {"success": False,
+                    "error": (f"起始周第{start_week}周已超出本表覆盖范围"
+                              f"（第{all_weeks[0]}–{week_max}周），请把起始周调早")}
+
+        groups_n = len({u["group"] for u in units})
+        n_u = len(units)
+        teachers_n = len(set(unit_teacher.values())) or 1
+        per_week = max(1, min(groups_n, len(TIME_SLOTS) * teachers_n))
+        need_weeks = -(-n_u // per_week)
+
+        free_cells = sum(
+            1
+            for w in range(start_week, start_week + max_avail)
+            for ts in TIME_SLOTS
+            for rm in rooms
+            if (w, ts, rm) not in room_occupied
+        )
+
+        # 由小到大尝试：先按最小可行窗口，再放宽到整张表。窗口只影响"最多能排到第几周"。
+        windows = sorted({
+            min(max(weeks, 1), max_avail),
+            min(max(need_weeks, weeks), max_avail),
+            max_avail,
+        })
+
+        for attempt_weeks in windows:
             week_list = list(range(start_week, start_week + attempt_weeks))
             n_w, n_t, n_r = len(week_list), len(TIME_SLOTS), len(rooms)
             n_u = len(units)
@@ -226,15 +273,30 @@ class ParallelScheduler:
                     "weekday": wd,
                     "total_units": len(units),
                     "scheduled": len(schedule),
-                    "weeks_used": attempt_weeks,
+                    # `weeks_used` 是"实际用到了几周"，`weeks_window` 才是"最多允许排到第几周"。
+                    # 原先 `weeks_used` 填的是窗口宽度：界面写"18/18 个单元已排定，用 10 周"，
+                    # 而沙盘上只有第 2–7 周有格子（实测 2024级制药工程）。
+                    "weeks_used": len(by_week),
+                    "weeks_window": attempt_weeks,
                     "schedule": schedule,
                     "by_week": {str(k): v for k, v in sorted(by_week.items())},
                     "note": f"并行排课（CP-SAT）：{len(units)} 个项目×组别单元一键排定，"
                             f"固定{wd}，组/场地/教师三重互斥",
                 }
-            if status == cp_model.INFEASIBLE and attempt_weeks == weeks:
-                continue  # 周数不够，加周重试
-            break
+            if status != cp_model.INFEASIBLE and status != cp_model.UNKNOWN:
+                break  # 别的状态（如 MODEL_INVALID）加周也没用，别白试
 
+        # 所有窗口都不可行 —— 把原因说准。
+        span = f"第{start_week}–{start_week + max_avail - 1}周（共 {max_avail} 周）"
+        hist = "、".join(f"{k} {v} 节" for k, v in weekday_votes.most_common(3))
+        tail = f"（该班历史课次：{hist}）" if hist else ""
+        if need_weeks > max_avail:
+            return {"success": False,
+                    "error": (f"排不下：这门课有 {n_u} 个教学单元、{groups_n} 个学生组、"
+                              f"{teachers_n} 位指导教师，每周最多排 {per_week} 个 ⇒ 至少需要 "
+                              f"{need_weeks} 周；而本表只覆盖到第{week_max}周，从第{start_week}周起"
+                              f"仅剩 {max_avail} 周。请把起始周调早，或减少同批排课的项目/组别。{tail}")}
         return {"success": False,
-                "error": "无可行排课方案（场地/教师资源在该星期被占用过多，请尝试其他星期）"}
+                "error": (f"排不下：需要 {n_u} 个可用的「周次×时段×场地」格子，"
+                          f"而{wd} {span}内只剩 {free_cells} 个空闲教室格子"
+                          f"（其余被其他班占用）。可换一个上课星期再试。{tail}")}

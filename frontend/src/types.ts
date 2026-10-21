@@ -62,6 +62,9 @@ export interface NlSlotContext {
 export interface ParallelCourse {
   class_name: string;
   weekday: string;
+  /** 星期分布（含周六/周日）——「常上周一」不能只看周中，真实表 16% 的课在周末 */
+  weekday_mix?: Record<string, number>;
+  weekend_sessions?: number;
   projects: Array<{ project: string; groups: string[] }>;
   total_units: number;
 }
@@ -83,7 +86,10 @@ export interface ParallelSolveResult {
   weekday: string;
   scheduled: number;
   total_units: number;
+  /** 实际用到几周（原先是"窗口宽度"，界面会写"用 10 周"而沙盘只有 6 周有格子） */
   weeks_used: number;
+  /** 最多允许排到第几周（窗口宽度） */
+  weeks_window?: number;
   by_week?: Record<string, number>;
   schedule?: ParallelSession[];
 }

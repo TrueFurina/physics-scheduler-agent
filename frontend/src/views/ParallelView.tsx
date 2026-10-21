@@ -2,7 +2,9 @@ import { Fragment } from 'react';
 import type { ParallelCourse, ParallelSolveResult } from '../types';
 import { GRID_TIME_SLOTS, timeSlotLabels } from '../constants/labels';
 
-const WEEKDAY_OPTIONS = ['', '周一', '周二', '周三', '周四', '周五'];
+// 周六/周日也是真实上课日（真实表 71/433 条在周末，"金工 5、6 周排周六"是常态）。
+// 原先只给周中五个按钮，周末班连"选对日子"的入口都没有。
+const WEEKDAY_OPTIONS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 interface Props {
   weekday: string;
@@ -70,6 +72,12 @@ export default function ParallelView({
                   <div className="text-xs text-gray-500 mt-1">
                     常上{c.weekday} · {c.projects.length} 个实验项目 · {c.total_units} 个教学单元
                   </div>
+                  {!!c.weekend_sessions && (
+                    <div className="text-xs text-amber-600 mt-0.5">
+                      历史课次含周末 {c.weekend_sessions} 节（
+                      {Object.entries(c.weekday_mix || {}).map(([d, n]) => `${d} ${n}`).join(' / ')}）
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => onSolve(c.class_name)}
