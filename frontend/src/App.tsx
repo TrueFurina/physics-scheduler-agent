@@ -4,6 +4,7 @@ import {
   rescheduleApi, getAdminToken, setAdminToken, Teacher, TeacherCourse, AvailableSlot, ExcludedSlot, RescheduleRequest,
 } from './api/client';
 import { describeCloudError } from './cloud';
+import { withRetry, whenIdle } from './utils/async';
 import {
   dispatchAuthCallback, getCloudSession, signOutCloud, sendPhoneCode, verifyPhoneCode,
   signInWithWechat, askCloudLlm, logConsult, listConsultLogs,
@@ -25,23 +26,6 @@ const timeSlotLabels: Record<string, string> = {
 
 type View = 'identity' | 'courses' | 'reschedule' | 'admin' | 'course_select' | 'tutor' | 'parallel' | 'dashboard';
 
-/**
- * 有界重试：线上由沙箱托管，进程被回收后首个请求可能因冷启动而失败。
- * 原先首屏初始化只请求一次、无重试，一旦那一次失败就永久空白、只能手动刷新页面。
- * 这里做 3 次、最多约 2.3s 的退避重试；仍失败则抛出最后一个错误交调用方展示。
- */
-async function withRetry<T>(fn: () => Promise<T>, delaysMs: number[] = [0, 700, 1600]): Promise<T> {
-  let lastErr: unknown;
-  for (const delay of delaysMs) {
-    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr;
-}
 
 
 function App() {
@@ -132,8 +116,18 @@ function App() {
         if (cb.session) {
           setSession(cb.session);
         } else if (!cb.handled) {
-          const restored = await getCloudSession();
-          if (restored) setSession(restored);
+          // 会话恢复推到**首屏空闲之后**：它会拉起云 SDK（独立 chunk ~70KB）。
+          // 教秘主路径不碰云接口，没必要让它和主包抢首屏带宽；
+          // 真需要云能力时（点登录/提交申请）getCloud() 仍走同一个共享 Promise，
+          // 提前/延后都只下载一次，不会重复请求。
+          whenIdle(async () => {
+            try {
+              const restored = await getCloudSession();
+              if (restored) setSession(restored);
+            } catch {
+              /* 云端暂时不可达不影响本地功能 */
+            }
+          });
         }
       } catch {
         // 首屏不因云端暂时不可达而中断

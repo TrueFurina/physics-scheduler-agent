@@ -4,6 +4,8 @@ import openpyxl
 from typing import List, Dict, Optional
 from datetime import datetime
 
+from app.utils import parse_cache
+
 # 时间段映射（节次标记 → 实际时间）
 TIME_SLOTS = {
     "567": "13:30-15:45",
@@ -35,6 +37,44 @@ WEEKDAY_MAP = {
 
 # 上午时段不算实验冲突（实验课都排在下午/晚上），筛选时忽略
 IGNORED_TIME_SLOTS = {"MORNING", ""}
+
+
+# ---------------------------------------------------------------------------
+# 工作簿级解析助手（接收已打开的 workbook，避免"同一个文件开三遍"）
+# ---------------------------------------------------------------------------
+
+def _parse_teacher_roles(wb) -> Dict[str, str]:
+    """从"教师联系表"提取教师角色/备注（负责人、实验室管理员等）。"""
+    roles: Dict[str, str] = {}
+    try:
+        if "教师联系表" in wb.sheetnames:
+            ws = wb["教师联系表"]
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                name, _, _, note = row[0], row[1], row[2], row[3]
+                if name and note:
+                    roles[str(name).strip()] = str(note).strip()
+    except Exception:
+        pass
+    return roles
+
+
+def _parse_semester_start(wb):
+    """从安排表解析真实学期起始日（"第1周2月17日-2月23日"）。失败返回 None。"""
+    import re
+    from datetime import date
+    try:
+        ws = wb["大学物理实验安排表 (周) "]
+        for row in ws.iter_rows(min_row=2, max_row=3, values_only=True):
+            for cell in row:
+                if cell and "第1周" in str(cell):
+                    m = re.search(r"第1周(\d{1,2})月(\d{1,2})日", str(cell))
+                    if m:
+                        month, day = int(m.group(1)), int(m.group(2))
+                        # 学年：24-25学年第二学期（春季），起始年在2月→2025
+                        return date(2025, month, day)
+    except Exception:
+        pass
+    return None
 
 
 class ScheduleEntry:
@@ -74,9 +114,22 @@ class ScheduleDatabase:
         self.loaded = False
 
     def load_from_excel(self, filepath: str):
-        """从 Excel 文件加载排课数据"""
-        wb = openpyxl.load_workbook(filepath)
+        """从 Excel 文件加载排课数据（带解析缓存，签名不符则重解析）。
+
+        缓存只省"解析"这一步，索引（`_build_index`）永远现场重建 ——
+        索引很便宜（433 行），没理由为它引入第二处可能不一致的状态。
+        """
         self._filepath = filepath  # 保存路径，供 get_teacher_roles 等使用
+
+        cached = parse_cache.load(filepath)
+        if cached is not None:
+            self.entries = [ScheduleEntry(*row) for row in cached["entries"]]
+            self._build_index()
+            self.loaded = True
+            print(f"✅ 已加载 {len(self.entries)} 条排课记录（解析缓存命中）")
+            return
+
+        wb = openpyxl.load_workbook(filepath)
 
         # 读取"大学物理实验安排表 (周) "工作表
         sheet = wb["大学物理实验安排表 (周) "]
@@ -117,6 +170,15 @@ class ScheduleDatabase:
         self._build_index()
         self.loaded = True
         print(f"✅ 已加载 {len(self.entries)} 条排课记录")
+
+        # 工作簿已经打开了，顺手把"另开一次工作簿才能拿到"的两项一起算掉再落缓存：
+        # 否则 /teachers 会在同一份文件上再 openpyxl.load_workbook 一遍（实测 +0.28s）。
+        semester_start = _parse_semester_start(wb)
+        parse_cache.save(filepath, {
+            "entries": parse_cache.entries_to_rows(self.entries),
+            "roles": _parse_teacher_roles(wb),
+            "semester_start": semester_start.isoformat() if semester_start else None,
+        })
 
     def _build_index(self):
         """构建索引加速查询"""
@@ -178,19 +240,26 @@ class ScheduleDatabase:
         return sorted(set(e.teacher for e in self.entries if e.teacher))
 
     def get_teacher_roles(self) -> Dict[str, str]:
-        """从"教师联系表"提取教师角色/备注（负责人、实验室管理员等）"""
+        """从"教师联系表"提取教师角色/备注（负责人、实验室管理员等）。
+
+        优先用解析缓存里已有的结果：这个函数每次页面加载都会被调一次，
+        而为了读十几个备注去 `load_workbook` 整个 400+ 行工作簿纯属浪费
+        （实测 /teachers 因此稳定在 0.28s）。
+        """
+        path = self.schedule_path()
+        cached = parse_cache.load(path) if path else None
+        if cached and isinstance(cached.get("roles"), dict):
+            return dict(cached["roles"])
+
         roles: Dict[str, str] = {}
         try:
             import openpyxl
-            wb = openpyxl.load_workbook(self._filepath if hasattr(self, "_filepath") else self.schedule_path())
-            if "教师联系表" in wb.sheetnames:
-                ws = wb["教师联系表"]
-                for row in ws.iter_rows(min_row=3, values_only=True):
-                    name, _, _, note = row[0], row[1], row[2], row[3]
-                    if name and note:
-                        roles[str(name).strip()] = str(note).strip()
+            wb = openpyxl.load_workbook(path if path else self.schedule_path())
+            roles = _parse_teacher_roles(wb)
         except Exception:
             pass
+        if roles and path:
+            parse_cache.merge(path, {"roles": roles})
         return roles
 
     def schedule_path(self) -> str:
@@ -198,24 +267,35 @@ class ScheduleDatabase:
         return getattr(self, "_filepath", "")
 
     def get_semester_start_date(self):
-        """从安排表解析真实学期起始日（"第1周2月17日-2月23日"）"""
-        import re
+        """从安排表解析真实学期起始日（"第1周2月17日-2月23日"）。
+
+        同样优先吃缓存：这行日期在加载时就已经一起解析过了。
+        """
+        import openpyxl
+        from datetime import date
+
+        path = self.schedule_path()
+        cached = parse_cache.load(path) if path else None
+        if cached is not None and "semester_start" in cached:
+            raw = cached["semester_start"]
+            if not raw:
+                return None
+            try:
+                return date.fromisoformat(raw)
+            except Exception:
+                pass  # 缓存里的日期坏了 → 老老实实重新解析
+
         try:
-            import openpyxl
-            wb = openpyxl.load_workbook(self.schedule_path())
-            ws = wb["大学物理实验安排表 (周) "]
-            for row in ws.iter_rows(min_row=2, max_row=3, values_only=True):
-                for cell in row:
-                    if cell and "第1周" in str(cell):
-                        m = re.search(r"第1周(\d{1,2})月(\d{1,2})日", str(cell))
-                        if m:
-                            month, day = int(m.group(1)), int(m.group(2))
-                            # 学年：24-25学年第二学期（春季），起始年在2月→2025
-                            from datetime import date
-                            return date(2025, month, day)
+            wb = openpyxl.load_workbook(path)
         except Exception:
-            pass
-        return None  # 解析失败时回退到默认
+            return None
+
+        parsed = _parse_semester_start(wb)
+        if parse_cache.load(path) is not None:
+            parse_cache.merge(path, {
+                "semester_start": parsed.isoformat() if parsed else None,
+            })
+        return parsed
 
     def get_teacher_courses(self, teacher_name: str) -> List[Dict]:
         """

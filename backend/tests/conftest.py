@@ -22,9 +22,16 @@ LLM 渠道解析本身的正确性由 `test_llm_config.py` 显式构造环境后
 
 import os
 import sys
+import tempfile
 
 # 让 `import app.*` 在任何执行目录下都能工作（与各测试文件里的 sys.path 插入等价）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("RATELIMIT_DISABLED", "1")
 os.environ.setdefault("LLM_DISABLED", "1")
+
+# 解析缓存写到系统临时目录：否则测试会把 schedule-*.json 落进仓库
+# `backend/app/data/cache/`（而该目录会随发布包上传）。
+os.environ.setdefault(
+    "PARSE_CACHE_DIR", os.path.join(tempfile.gettempdir(), "physics-scheduler-test-cache")
+)

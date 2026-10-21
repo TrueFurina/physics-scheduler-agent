@@ -3,7 +3,7 @@
  * 所有调用都走 @tencent-ai/workbuddy-cloud-sdk，不手写 fetch、不拼 /.cloud/** 路径。
  */
 import type { ChatCompletionCreateParamsStreaming } from '@tencent-ai/workbuddy-cloud-sdk';
-import { cloud } from './cloud';
+import { getCloud } from './cloud';
 import type { RescheduleRequestRow, ConsultLogRow } from './cloud';
 
 export type CloudSession = {
@@ -23,13 +23,13 @@ export type ConsultModuleKey = 'course_select' | 'tutor';
 // ---------------------------------------------------------------------------
 
 export async function getCloudSession(): Promise<CloudSession> {
-  const { data, error } = await cloud.auth.getSession();
+  const { data, error } = await (await getCloud()).auth.getSession();
   if (error) return null;
   return (data as CloudSession) ?? null;
 }
 
 export async function signOutCloud(): Promise<void> {
-  await cloud.auth.signOut();
+  await (await getCloud()).auth.signOut();
 }
 
 /**
@@ -76,7 +76,7 @@ export async function dispatchAuthCallback(): Promise<{
     };
   }
 
-  const auth = cloud.auth;
+  const auth = (await getCloud()).auth;
   const handleCallback =
     provider === 'workbuddy' ? auth.handleWorkBuddyCallback : auth.handleWechatWebCallback;
   // 不能直接 .bind()：方法缺失时 .bind 会抛错，被外层 catch 吞掉后变成静默无响应。
@@ -107,7 +107,7 @@ export interface PendingPhoneOtp {
 
 /** 发送短信验证码（会真的发一条短信，只在「获取验证码」按钮里调用）。 */
 export async function sendPhoneCode(phone: string): Promise<PendingPhoneOtp> {
-  const { data, error } = await cloud.auth.sendOtp({ phone });
+  const { data, error } = await (await getCloud()).auth.sendOtp({ phone });
   if (error) throw new Error(error.message);
   return {
     phone,
@@ -118,7 +118,7 @@ export async function sendPhoneCode(phone: string): Promise<PendingPhoneOtp> {
 
 /** 只用已保存的验证码会话提交，绝不在这里重新发码。 */
 export async function verifyPhoneCode(pending: PendingPhoneOtp, code: string): Promise<CloudSession> {
-  const { data, error } = await cloud.auth.verifyOtp({
+  const { data, error } = await (await getCloud()).auth.verifyOtp({
     phone: pending.phone,
     verificationId: pending.verificationId,
     isExistingUser: pending.isExistingUser,
@@ -130,7 +130,7 @@ export async function verifyPhoneCode(pending: PendingPhoneOtp, code: string): P
 
 /** 网页微信登录：拿到授权地址后在当前标签页跳转（PKCE 校验器在当前标签页，不能新开窗口）。 */
 export async function signInWithWechat(): Promise<void> {
-  const { data, error } = await cloud.auth.signInWithOAuth({
+  const { data, error } = await (await getCloud()).auth.signInWithOAuth({
     provider: 'wechat',
     redirectTo: location.origin,
   });
@@ -145,7 +145,7 @@ export async function signInWithWechat(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function listCloudRequests(status?: string): Promise<CloudRequest[]> {
-  const base = cloud.database
+  const base = (await getCloud()).database
     .from('reschedule_requests')
     .select('*')
     .order('created_at', { ascending: false })
@@ -167,7 +167,7 @@ export async function createCloudRequest(
   ownerName: string | null,
 ): Promise<CloudRequest> {
   // 不传 owner_id：由表默认值 auth.uid() 在服务端填充，RLS 会拒绝伪造的 owner
-  const { data, error } = await cloud.database
+  const { data, error } = await (await getCloud()).database
     .from('reschedule_requests')
     .insert({ ...payload, status: 'pending', owner_name: ownerName })
     .select();
@@ -183,7 +183,7 @@ export async function approveCloudRequest(
   comment: string,
   decidedBy: string | null,
 ): Promise<CloudRequest> {
-  const { data, error } = await cloud.database
+  const { data, error } = await (await getCloud()).database
     .from('reschedule_requests')
     .update({
       status: approve ? 'approved' : 'rejected',
@@ -209,7 +209,7 @@ export async function logConsult(
   answer: string,
   ownerName: string | null,
 ): Promise<void> {
-  const { error } = await cloud.database.from('consult_logs').insert({
+  const { error } = await (await getCloud()).database.from('consult_logs').insert({
     module: moduleKey,
     question,
     answer: answer.slice(0, 6000),
@@ -219,7 +219,7 @@ export async function logConsult(
 }
 
 export async function listConsultLogs(moduleKey: ConsultModuleKey): Promise<CloudConsultLog[]> {
-  const { data, error } = await cloud.database
+  const { data, error } = await (await getCloud()).database
     .from('consult_logs')
     .select('id, module, question, answer, owner_name, created_at')
     .eq('module', moduleKey)
@@ -246,7 +246,7 @@ let cachedModelId: string | null = null;
 
 async function resolveModelId(): Promise<string> {
   if (cachedModelId) return cachedModelId;
-  const models = await cloud.llm.models.list();
+  const models = await (await getCloud()).llm.models.list();
   if (!models || models.length === 0) throw new Error('云端当前没有可用的大模型');
   const pick = models.find((m) => m.disabled !== true);
   if (!pick) throw new Error('云端当前没有可用的大模型');
@@ -278,7 +278,7 @@ export async function askCloudLlm(
   };
 
   let answer = '';
-  for await (const chunk of cloud.llm.chat.completions.create(params)) {
+  for await (const chunk of (await getCloud()).llm.chat.completions.create(params)) {
     const text = chunk?.choices?.[0]?.delta?.content;
     if (text) {
       answer += text;

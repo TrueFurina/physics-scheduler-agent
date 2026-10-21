@@ -50,6 +50,8 @@ def test_health_not_swallowed():
     assert body["data"]["loaded"] is False or body["data"]["loaded"] is True
     assert body["data"]["total_entries"] >= 0
     assert body["uptime_s"] >= 0
+    # 预热状态可见：pending/running/ok/failed 之一（TestClient 不起 lifespan，故常为 pending）
+    assert body["solver"]["status"] in {"pending", "running", "ok", "failed", "disabled", "unexpected"}
 
 
 def test_api_not_swallowed():
@@ -131,3 +133,24 @@ def test_index_html_must_revalidate():
         r = client.get(path)
         assert r.status_code == 200
         assert "no-cache" in r.headers.get("cache-control", "")
+
+
+# ---------------------------------------------------------------------------
+# 可观测性：耗时头 + 进程内计数
+# ---------------------------------------------------------------------------
+
+def test_every_response_carries_timing_header():
+    r = client.get("/health")
+    assert r.headers.get("x-response-time-ms", "").isdigit()
+
+
+def test_counters_track_requests_and_client_errors():
+    from app.main import metrics
+
+    before = metrics()
+    client.get("/health")               # 200 → requests+1，errors 不变
+    client.post("/health")              # 405 → errors+1（方法不允许）
+    after = metrics()
+
+    assert after["requests"] >= before["requests"] + 2
+    assert after["errors"] >= before["errors"] + 1
