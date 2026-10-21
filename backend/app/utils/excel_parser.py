@@ -77,12 +77,167 @@ def _parse_teacher_roles(wb) -> Dict[str, str]:
     return roles
 
 
+# 工作表候选名（按优先级）。
+# 原先硬编码 `wb["大学物理实验安排表 (周) "]`（**还带一个尾随空格**），
+# 换一所学校、或同一个文件另存时少个空格，就抛 KeyError → 400「文件解析失败：'大学物理实验安排表 (周) '」。
+# 而 `docs/产品使用指南.md` 里写的是"上传 Excel 可替换（支持其他学校）"—— 那句话在当时是伪承诺。
+SHEET_CANDIDATES = [
+    "大学物理实验安排表 (周) ",
+    "大学物理实验安排表 (周)",
+    "大学物理实验安排表",
+    "实验安排表",
+    "安排表",
+]
+
+
+def find_schedule_sheet(wb):
+    """容错定位安排表工作表：精确候选 → 名称含"安排表" → 名称含"周" → 第一个表。
+
+    返回 (worksheet, 命中的名字)。找不到返回 (None, None)。
+    """
+    for name in SHEET_CANDIDATES:
+        if name in wb.sheetnames:
+            return wb[name], name
+    for name in wb.sheetnames:
+        if "安排表" in str(name):
+            return wb[name], name
+    for name in wb.sheetnames:
+        if "周" in str(name):
+            return wb[name], name
+    if wb.sheetnames:
+        return wb[wb.sheetnames[0]], wb.sheetnames[0]
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# 教学大纲 / 主数据清单解析
+#
+# 为什么单独一套：排课的输入不该只有"上一次排完的课表行"。
+# 导师的第 1–3 步（导入课程 → 新建实验项目 → 指定排课人）产出的是一份**清单**，
+# 它天然没有周次/星期/时段。此前这些行会被主解析流程静默丢弃（excel_parser.py 里
+# 的两个 `continue`），于是"排一个新增实验项目"在本系统里根本无从下手。
+# ---------------------------------------------------------------------------
+
+MASTER_SHEET_CANDIDATES = ["实验项目清单", "教学任务清单", "主数据", "实验项目", "课程清单"]
+
+# 表头别名 → 字段（不同学校/不同人写的列名差很远，靠别名兜底，不靠列序）
+MASTER_FIELDS = {
+    "course": ("课程", "课程名称", "课程名", "所属课程"),
+    "class_name": ("班级", "班级名称", "行政班级", "教学班", "班级/专业"),
+    "experiment": ("实验项目", "项目名称", "实验名称", "项目", "实验"),
+    "group": ("学生组", "组别", "分组", "组"),
+    "teacher": ("教师", "授课教师", "指导教师", "任课教师", "老师"),
+    "room": ("场地", "教室", "实验室", "候选场地", "上课地点"),
+    "week": ("周次", "周", "上课周次"),
+    "weekday": ("星期", "上课星期", "星期几"),
+}
+
+
+# 考试/考核类事项：真实表里有 3 行「大物实验B/C 考试」（有班级+项目，但没排时间）。
+# 它们**不能被丢**（这正是本次要修的静默丢弃），但把"考试"当实验项目丢进求解器
+# 是另一回事 —— 考试的时间与场地安排逻辑和实验课不同（真实表里它们连教师都没有）。
+# 所以：照常记进 pending 并报出来，但不参与排课；这个判断是**显式且可见**的
+# （load_report 里单列 pending_excluded），不是悄悄过滤。
+EXAM_KEYWORDS = ("考试", "考核", "测验", "补考", "重修")
+
+
+def looks_like_exam(name: str) -> bool:
+    return any(k in (name or "") for k in EXAM_KEYWORDS)
+
+
+def _norm_header(cell) -> str:
+    return str(cell or "").strip().replace(" ", "").replace("：", "").replace(":", "")
+
+
+def parse_master_tasks(filepath: str):
+    """解析教学大纲/主数据清单 → (PendingTask 列表, 解析报告)。
+
+    表头按别名匹配，匹配不到才退回列序；找不到就报清楚"缺哪一列"，
+    而不是像主流程那样静默丢行。
+    """
+    wb = openpyxl.load_workbook(filepath)
+    sheet, sheet_name = None, None
+    for name in MASTER_SHEET_CANDIDATES:
+        if name in wb.sheetnames:
+            sheet, sheet_name = wb[name], name
+            break
+    if sheet is None:
+        for name in wb.sheetnames:
+            if any(k in str(name) for k in ("清单", "项目", "主数据")):
+                sheet, sheet_name = wb[name], name
+                break
+    if sheet is None:
+        sheet, sheet_name = (wb[wb.sheetnames[0]], wb.sheetnames[0]) if wb.sheetnames else (None, None)
+    if sheet is None:
+        raise ValueError("文件里没有任何工作表")
+
+    # 找表头行：前 5 行里命中别名最多的一行
+    header_row, mapping = None, {}
+    for r in range(1, min(6, sheet.max_row + 1)):
+        cells = [_norm_header(c) for c in next(sheet.iter_rows(min_row=r, max_row=r, values_only=True))]
+        hit = {}
+        for field, aliases in MASTER_FIELDS.items():
+            for i, c in enumerate(cells):
+                if c and any(a in c or c in a for a in aliases):
+                    hit[field] = i
+                    break
+        if len(hit) > len(mapping):
+            header_row, mapping = r, hit
+    if header_row is None or "class_name" not in mapping or "experiment" not in mapping:
+        raise ValueError(
+            "清单里必须至少能认出「班级」和「实验项目」两列"
+            f"（当前识别到的列：{sorted(set(mapping)) or '无'}）"
+        )
+
+    tasks, blanks = [], 0
+    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+        def cell(field):
+            i = mapping.get(field)
+            return row[i] if i is not None and i < len(row) else None
+
+        cls = str(cell("class_name") or "").strip()
+        exp = str(cell("experiment") or "").strip()
+        if not cls and not exp:
+            blanks += 1
+            continue
+        if not cls or not exp:
+            blanks += 1
+            continue
+        week = cell("week")
+        try:
+            week = int(week) if week not in (None, "") else None
+        except (TypeError, ValueError):
+            week = None
+        tasks.append(PendingTask(
+            class_name=cls,
+            experiment=exp,
+            group=str(cell("group") or "1组").strip(),
+            teacher=str(cell("teacher") or "").strip(),
+            room=str(cell("room") or "").strip(),
+            course=str(cell("course") or "").strip(),
+            week=week,
+            weekday=str(cell("weekday") or "").strip(),
+            source="master",
+        ))
+    report = {
+        "sheet": str(sheet_name),
+        "header_row": header_row,
+        "recognized_columns": sorted(set(mapping)),
+        "tasks": len(tasks),
+        "blank_or_incomplete_rows": blanks,
+        "samples": [repr(t) for t in tasks[:5]],
+    }
+    return tasks, report
+
+
 def _parse_semester_start(wb):
     """从安排表解析真实学期起始日（"第1周2月17日-2月23日"）。失败返回 None。"""
     import re
     from datetime import date
     try:
-        ws = wb["大学物理实验安排表 (周) "]
+        ws, _ = find_schedule_sheet(wb)
+        if ws is None:
+            return None
         for row in ws.iter_rows(min_row=2, max_row=3, values_only=True):
             for cell in row:
                 if cell and "第1周" in str(cell):
@@ -141,6 +296,41 @@ class ScheduleEntry:
         return f"[W{self.week} {self.weekday} {self.time_slot}] {self.class_name}/{self.group} @ {self.room}"
 
 
+class PendingTask:
+    """一条**还没排时间**的教学任务（来自教学大纲/项目清单，而不是上一次排课结果）。
+
+    为什么需要它
+    ------------
+    两个求解器（并行排课 / 一键自动排课）的教学任务清单，此前**只可能**来自
+    `db.entries` —— 也就是上一次排课的行。于是系统只能"重排去年"，无法"从零排课"：
+    教秘想排一个大纲里新增的实验项目，必须先伪造一行带周次和星期的记录塞进去。
+    导师座谈里明确否定了"往年数据瞬移"，理由（培养方案/专业方向/实验顺序年年变）
+    同样否定了"以去年课表行当输入"。
+
+    PendingTask 让"课程 → 实验项目 → 学生组"这套主数据成为独立输入：
+    没排过时间的行不再被丢弃，而是直接进求解器当待排单元。
+    """
+
+    def __init__(self, class_name: str, experiment: str, group: str,
+                 teacher: str = "", room: str = "", course: str = "",
+                 week: Optional[int] = None, weekday: str = "", source: str = "schedule"):
+        self.course = course or ""
+        self.class_name = class_name or ""
+        self.experiment = experiment or ""
+        self.group = group or ""
+        self.teacher = (teacher or "").strip()
+        self.room = (room or "").strip()
+        self.week = week
+        self.weekday = (weekday or "").strip()
+        self.source = source          # 'schedule'（表里没排时间的行）/ 'master'（主数据清单）
+
+    def unit_key(self) -> tuple:
+        return (self.class_name, self.experiment, self.group)
+
+    def __repr__(self):
+        return f"⟨待排⟩ {self.class_name}/{self.group} {self.experiment}（{self.teacher or '未指派教师'}）"
+
+
 class ScheduleDatabase:
     """排课数据内存数据库"""
 
@@ -156,6 +346,14 @@ class ScheduleDatabase:
         self._by_class: Dict[str, List[ScheduleEntry]] = {}
         # 时段无法识别而被剔除的行（原样保留，用于"整日按占用处理"和体检提示）
         self.skipped: List[Dict] = []
+        # 待排任务：表里写了"课程/班级/实验项目/组"但**没排时间**的行。
+        # ⚠️ 2026-10-22 之前这些行是静默 `continue` 掉的（不计数、不报告）——
+        # 教秘拿今年的教学大纲清单来上传，会看到"成功加载 0 条"而不知为什么。
+        # 现在它们单独成列，并可直接进入并行排课（这是"从零排课"的最小闭环）。
+        self.pending: List["PendingTask"] = []
+        # 本次加载的解析账本：进了多少条、多少条待排、多少条被丢、为什么丢
+        self.load_report: Dict = {}
+        self.sheet_name: str = ""
         self.loaded = False
 
     def load_from_excel(self, filepath: str):
@@ -170,26 +368,50 @@ class ScheduleDatabase:
         if cached is not None:
             self.entries = [ScheduleEntry(*row) for row in cached["entries"]]
             self.skipped = list(cached.get("skipped") or [])
+            self.pending = [PendingTask(*row) for row in (cached.get("pending") or [])]
+            self.sheet_name = cached.get("sheet_name") or ""
             self._build_index()
+            self._finalize_report()
             self.loaded = True
-            print(f"✅ 已加载 {len(self.entries)} 条排课记录（解析缓存命中）")
+            print(f"✅ 已加载 {len(self.entries)} 条排课记录（解析缓存命中）"
+                  + (f"，其中 {len(self.pending)} 条待排" if self.pending else ""))
             return
 
         wb = openpyxl.load_workbook(filepath)
 
-        # 读取"大学物理实验安排表 (周) "工作表
-        sheet = wb["大学物理实验安排表 (周) "]
+        # 容错定位安排表：换学校/另存时表名对不上不该直接 400（见 find_schedule_sheet）
+        sheet, sheet_name = find_schedule_sheet(wb)
+        if sheet is None:
+            raise ValueError(
+                f"文件里找不到可用的工作表（现有：{'、'.join(map(str, wb.sheetnames)) or '无'}）；"
+                "请把安排表放在名为「实验安排表」的工作表里"
+            )
+        self.sheet_name = str(sheet_name)
         self.entries = []
         self.skipped = []
+        self.pending = []
 
         for row in sheet.iter_rows(min_row=3, values_only=True):
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
                 row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
 
-            # 跳过空行和无效数据
-            if not week or not isinstance(week, (int, float)):
-                continue
-            if not weekday or not class_name:
+            class_str = str(class_name).strip() if class_name else ""
+            exp_str = str(experiment).strip() if experiment else ""
+            group_str = str(group).strip() if group else ""
+            room_str = str(room).strip() if room else ""
+            teacher_str = str(teacher).strip() if teacher else ""
+
+            # ⚠️ 2026-10-22 之前这里是两个静默 `continue`：没有周次/星期的行直接蒸发，
+            # 不计数、不报告。教秘拿今年教学大纲的清单来上传，只会看到"成功加载 0 条"。
+            # 现在：写了"班级 + 实验项目"却没排时间的行 ⇒ 记成**待排任务**（可直接进求解器）；
+            # 既没班级也没项目的行 ⇒ 记为空白行，照样计数。
+            if (not week or not isinstance(week, (int, float))) or not weekday:
+                if class_str and exp_str:
+                    self.pending.append(PendingTask(
+                        class_name=class_str, experiment=exp_str, group=group_str,
+                        teacher=teacher_str, room=room_str,
+                        source="schedule",
+                    ))
                 continue
 
             # 清理教室字段
@@ -241,8 +463,10 @@ class ScheduleDatabase:
             self.entries.append(entry)
 
         self._build_index()
+        self._finalize_report()
         self.loaded = True
-        print(f"✅ 已加载 {len(self.entries)} 条排课记录")
+        print(f"✅ 已加载 {len(self.entries)} 条排课记录"
+              + (f"，其中 {len(self.pending)} 条待排" if self.pending else ""))
 
         # 工作簿已经打开了，顺手把"另开一次工作簿才能拿到"的两项一起算掉再落缓存：
         # 否则 /teachers 会在同一份文件上再 openpyxl.load_workbook 一遍（实测 +0.28s）。
@@ -250,9 +474,37 @@ class ScheduleDatabase:
         parse_cache.save(filepath, {
             "entries": parse_cache.entries_to_rows(self.entries),
             "skipped": self.skipped,
+            "pending": [[t.class_name, t.experiment, t.group, t.teacher, t.room, t.course,
+                         t.week, t.weekday, t.source] for t in self.pending],
+            "sheet_name": self.sheet_name,
             "roles": _parse_teacher_roles(wb),
             "semester_start": semester_start.isoformat() if semester_start else None,
         })
+
+    def _finalize_report(self):
+        """算出本次解析的账本：进了多少 / 多少待排 / 多少被丢、为什么丢。
+
+        ⚠️ 静默丢弃是这个项目反复踩的坑（R-35 时段看不懂整行丢、这里缺周次整行丢）。
+        凡是"没进 entries"的行，都必须能在界面上说出数量和原因。
+        """
+        schedulable = [t for t in self.pending if not looks_like_exam(t.experiment)]
+        excluded = [t for t in self.pending if looks_like_exam(t.experiment)]
+        self.load_report = {
+            "entries": len(self.entries),
+            "pending": len(schedulable),
+            "pending_excluded": len(excluded),
+            # 考试类不是被"过滤掉"，是**单独报出来**：不静默丢弃的原则同样适用于它们
+            "pending_excluded_reason": "考试/考核类事项不参与实验排课（时间与场地逻辑不同）",
+            "skipped": len(self.skipped),
+            "sheet": self.sheet_name,
+            "pending_samples": [repr(t) for t in schedulable[:5]],
+            "pending_excluded_samples": [repr(t) for t in excluded[:5]],
+            "skipped_samples": [
+                f"第{s['week']}周 {s['weekday']} {s.get('class_name') or ''}"
+                f"（时段原文「{s.get('raw_ts')}」）"
+                for s in self.skipped[:5]
+            ],
+        }
 
     def _build_index(self):
         """构建索引加速查询"""

@@ -47,6 +47,10 @@ _ADMIN_ONLY = [Depends(require_admin)]
 # 全局排课数据库 + 学生课表
 _db = ScheduleDatabase()
 _student = StudentSchedule()
+# 主数据（教学大纲清单）里的待排任务：与"上一次排完的课表行"并列的一类输入。
+# 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表 —— 这是
+# 导师座谈后换轨的核心（见 docs/战略复盘-20261022.md）。
+_master_tasks: List = []
 _agent = RescheduleAgent(_db, student=_student)
 
 # 默认实验安排表路径解析
@@ -191,16 +195,74 @@ async def upload_schedule(file: UploadFile = File(...)):
 
     try:
         _db.load_from_excel(save_path)
+        rep = _db.load_report
+        msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
+        if rep.get("pending"):
+            msg += f"，另有 {rep['pending']} 条待排任务（没排时间，可直接进并行排课）"
+        if rep.get("skipped"):
+            msg += f"；⚠️ {rep['skipped']} 条因时段无法识别未纳入冲突扫描"
         return {
             "success": True,
-            "message": f"✅ 成功加载 {len(_db.entries)} 条排课记录",
+            "message": msg,
             "total_entries": len(_db.entries),
             "rooms": _db.get_all_rooms()[:10],
             "teachers": _db.get_all_teachers(),
             "week_range": list(_db.get_week_range()),
+            # 解析账本：进了多少 / 多少待排 / 多少被丢。静默丢弃是本项目反复踩的坑，
+            # 界面必须能说出数量与原因，而不是只回一个 total_entries。
+            "load_report": rep,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败：{str(e)}")
+
+
+@router.post("/upload-master", summary="上传教学大纲/主数据清单（从零排课的输入）",
+             dependencies=_ADMIN_ONLY)
+async def upload_master(file: UploadFile = File(...)):
+    """上传「课程 → 实验项目 → 学生组（→ 候选教师/场地）」清单。
+
+    这是"从零排课"的输入口：清单天然没有周次/星期/时段，此前这类行会被主解析
+    流程静默丢弃。上传后这些任务直接进入并行排课的总览与求解。
+    """
+    save_path = _upload_target(file.filename, _EXCEL_SUFFIXES)
+    content = await file.read()
+    with open(save_path, "wb") as f:
+        f.write(content)
+
+    try:
+        from app.utils.excel_parser import parse_master_tasks
+
+        tasks, report = parse_master_tasks(save_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+
+    _master_tasks.clear()
+    _master_tasks.extend(tasks)
+    return {
+        "success": True,
+        "message": f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）",
+        "total_tasks": len(tasks),
+        "classes": sorted({t.class_name for t in tasks}),
+        "report": report,
+    }
+
+
+@router.get("/master-status", summary="主数据（大纲清单）状态")
+async def master_status():
+    """当前主数据任务数、覆盖班级，以及安排表里"没排时间"的待排行数。"""
+    _ensure_loaded()
+    pending_in_table = list(getattr(_db, "pending", None) or [])
+    return {
+        "success": True,
+        "data": {
+            "master_tasks": len(_master_tasks),
+            "master_classes": sorted({t.class_name for t in _master_tasks}),
+            "pending_in_schedule": len(pending_in_table),
+            "pending_samples": [repr(t) for t in pending_in_table[:5]],
+            "total_units_to_schedule": len(_master_tasks) + len(pending_in_table),
+            "load_report": _db.load_report,
+        },
+    }
 
 
 @router.post("/chat", response_model=ChatResponse, summary="教师调课咨询",
@@ -351,7 +413,25 @@ def _load_default_schedule() -> tuple[str, int]:
     msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
     if replay_applied:
         msg += f"（已重放 {replay_applied} 条审批通过的调课）"
+    # 待排/丢弃都必须说出口：静默丢弃是本项目反复踩的坑（R-35、以及缺周次的整行蒸发）
+    rep = _db.load_report
+    if rep.get("pending"):
+        msg += f"（另有 {rep['pending']} 条待排任务：写了班级与实验项目但没排时间，可直接进并行排课）"
+    if rep.get("skipped"):
+        msg += f"（⚠️ {rep['skipped']} 条时段无法识别，未纳入冲突扫描）"
     return msg, len(_db.entries)
+
+
+def _schedulable_extra_tasks() -> List:
+    """可排的待排任务 = 表里没排时间的行 + 上传的大纲清单，**去掉考试/考核类**。
+
+    考试类（真实表里 3 行「大物实验B/C 考试」）仍留在 `db.pending` 里被报出来，
+    只是不参与排课 —— 不静默丢弃的原则同样适用于它们。
+    """
+    from app.utils.excel_parser import looks_like_exam
+
+    raw = list(getattr(_db, "pending", None) or []) + list(_master_tasks)
+    return [t for t in raw if not looks_like_exam(getattr(t, "experiment", "") or "")]
 
 
 def _ensure_loaded() -> None:
@@ -499,8 +579,17 @@ async def parallel_overview():
     """按班级聚合：每门课的全部实验项目、学生组别（并行排课入口数据）"""
     _ensure_loaded()
     from app.engine.parallel_scheduler import ParallelScheduler
-    ps = ParallelScheduler(_db, student=_student)
-    return {"success": True, "data": {"courses": ps.get_course_overview()}}
+
+    # 待排任务（表里没排时间的行 + 上传的大纲清单）与已排记录一起进总览
+    extra = _schedulable_extra_tasks()
+    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+    return {
+        "success": True,
+        "data": {
+            "courses": ps.get_course_overview(),
+            "pending_total": len(extra),
+        },
+    }
 
 
 @router.post("/parallel/solve", summary="并行排课-一键求解（访谈核心需求）",
@@ -513,7 +602,9 @@ async def parallel_solve(req: ParallelSolveRequest):
     """
     _ensure_loaded()
     from app.engine.parallel_scheduler import ParallelScheduler
-    ps = ParallelScheduler(_db, student=_student)
+
+    extra = _schedulable_extra_tasks()
+    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
     result = await run_in_threadpool(
         ps.solve, req.class_name,
         weekday=req.weekday, start_week=req.start_week, weeks=req.weeks,
@@ -1082,7 +1173,10 @@ async def auto_schedule():
     _ensure_loaded()
 
     from app.engine.auto_scheduler import AutoScheduler
-    scheduler = AutoScheduler(_db, student=_student)
+    scheduler = AutoScheduler(
+        _db, student=_student,
+        extra_tasks=_schedulable_extra_tasks(),
+    )
     result = await run_in_threadpool(scheduler.solve, max_sections=30)
 
     # 定位说明：自动排课是"辅助初稿生成"，非替代学校已排定的完整安排表。

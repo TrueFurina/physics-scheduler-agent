@@ -50,7 +50,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from ortools.sat.python import cp_model
 
-from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
 from app.agent.student_schedule import StudentSchedule
 
 # 可排课时段（工作日 3 个下午时段）
@@ -100,9 +100,12 @@ def _is_intro(project: str) -> bool:
 class AutoScheduler:
     """排课自动生成器（CP-SAT 求解，带周次维度）"""
 
-    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None):
+    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None,
+                 extra_tasks: Optional[List] = None):
         self.db = db
         self.student = student
+        # 待排任务（PendingTask）：没排过时间的教学任务，与已排记录并列的一类输入
+        self.extra_tasks = list(extra_tasks or [])
 
     # ------------------------------------------------------------------ 取数
     def _get_rooms(self) -> List[str]:
@@ -112,6 +115,9 @@ class AutoScheduler:
         """提取需要排课的教学任务（教师 + 课程 + 班级）。
 
         返回 (任务列表, 被排除的绪论任务数)。
+
+        ⚠️ 任务源除了"已排过的课表行"，还包括**待排任务**（表里没排时间的行 + 上传的
+        大纲清单）：否则一键自动排课永远只能重排去年，排不了大纲里新增的实验项目。
         """
         sections, seen = [], set()
         excluded_intro = 0
@@ -130,6 +136,18 @@ class AutoScheduler:
                 "teacher": e.teacher or "",
                 "course": e.experiment or "未知实验",
                 "class_name": e.class_name or "",
+            })
+        for t in (self.extra_tasks or []):
+            if _is_intro(t.experiment or "") or looks_like_exam(t.experiment or ""):
+                continue
+            key = (t.teacher, t.experiment, t.class_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            sections.append({
+                "teacher": t.teacher or "",
+                "course": t.experiment or "未知实验",
+                "class_name": t.class_name or "",
             })
         return sections, excluded_intro
 

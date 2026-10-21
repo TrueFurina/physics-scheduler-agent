@@ -80,6 +80,13 @@ export default function ParallelView({
                       {Object.entries(c.weekday_mix || {}).map(([d, n]) => `${d} ${n}`).join(' / ')}）
                     </div>
                   )}
+                  {/* 待排单元：大纲里新增、此前从没排过时间的实验项目。
+                      没有这个提示，教秘会以为系统只会"把去年的课重排一遍"。 */}
+                  {!!c.pending_units && (
+                    <div className="text-xs text-cyan-700 mt-0.5">
+                      含 {c.pending_units} 个待排单元（大纲新增，此前没排过时间）
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => onSolve(c.class_name)}

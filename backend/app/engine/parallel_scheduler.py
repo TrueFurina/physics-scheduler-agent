@@ -22,7 +22,7 @@ from collections import defaultdict, Counter
 
 from ortools.sat.python import cp_model
 
-from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
 from app.agent.student_schedule import StudentSchedule
 
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
@@ -31,6 +31,8 @@ WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 # 周末的班会被判成"周一出勤"（见 get_course_overview）。
 ALL_WEEKDAYS = WEEKDAYS + ["周六", "周日"]
 TIME_SLOTS = ["567", "678", "91011"]
+# 安排表里没有任何已排记录时（只上传大纲清单），按一学期的默认跨度排
+DEFAULT_SEMESTER_WEEKS = 16
 
 
 def _is_intro(project: str) -> bool:
@@ -41,19 +43,42 @@ def _is_intro(project: str) -> bool:
 class ParallelScheduler:
     """并行排课：一门课的全部实验项目 × 学生组别，一键统一排课"""
 
-    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None):
+    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None,
+                 extra_tasks: Optional[List] = None):
         self.db = db
         self.student = student
+        # 待排任务（PendingTask）：表里没排时间的行 + 上传的教学大纲/主数据清单。
+        # 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表。
+        self.extra_tasks = list(extra_tasks or [])
+
+    def _tasks_of(self, class_name: str) -> List:
+        return [t for t in self.extra_tasks
+                if t.class_name == class_name and t.experiment
+                and not _is_intro(t.experiment)
+                # 考试/考核类不进实验排课（真实表里有 3 行"大物实验B/C 考试"没排时间）。
+                # 它们仍被记在待排清单里并报出来，只是不参与求解。
+                and not looks_like_exam(t.experiment)]
 
     def get_course_overview(self) -> List[Dict]:
         """按班级聚合：每门课有哪些实验项目、每个项目有哪些学生组别、常用星期"""
         courses: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
         weekday_votes: Dict[str, Counter] = defaultdict(Counter)
+        pending_units: Dict[str, set] = defaultdict(set)
         for e in self.db.entries:
             if e.class_name and e.experiment and e.group and not _is_intro(e.experiment):
                 courses[e.class_name][e.experiment].add(e.group)
                 if e.weekday in ALL_WEEKDAYS:
                     weekday_votes[e.class_name][e.weekday] += 1
+        # 待排任务并入总览：教秘要能在界面上看见"大纲里这几个项目还没排"
+        for t in self.extra_tasks:
+            if not t.class_name or not t.experiment or _is_intro(t.experiment):
+                continue
+            if looks_like_exam(t.experiment):
+                continue
+            courses[t.class_name][t.experiment].add(t.group or "1组")
+            pending_units[t.class_name].add((t.experiment, t.group or "1组"))
+            if t.weekday in ALL_WEEKDAYS:
+                weekday_votes[t.class_name][t.weekday] += 1
         return [
             {
                 "class_name": cls,
@@ -68,6 +93,8 @@ class ParallelScheduler:
                     for p, gs in sorted(projs.items())
                 ],
                 "total_units": sum(len(gs) for gs in projs.values()),
+                # 其中有多少是"还没排过时间"的（大纲新增 / 清单里带来的）
+                "pending_units": len(pending_units.get(cls, set())),
             }
             for cls, projs in sorted(courses.items())
         ]
@@ -100,6 +127,17 @@ class ParallelScheduler:
             if key not in seen:
                 seen.add(key)
                 units.append({"project": e.experiment, "group": e.group})
+        # 待排任务：与已排过的单元按 (项目, 组) 去重后并入 —— 这就是"从零排课"的入口
+        pending_count = 0
+        for t in self._tasks_of(class_name):
+            key = (t.experiment, t.group or "1组")
+            if key in seen:
+                continue
+            seen.add(key)
+            units.append({"project": t.experiment, "group": t.group or "1组"})
+            pending_count += 1
+            if t.teacher:
+                unit_teacher.setdefault(key, t.teacher)
         if not units:
             return {"success": False, "error": f"未找到 {class_name} 的实验项目/分组数据"}
 
@@ -108,9 +146,13 @@ class ParallelScheduler:
         if wd not in ALL_WEEKDAYS:
             wd = "周四"
 
+        # 场地：安排表里没有（例如只上传了大纲清单）时，退回主数据里写的候选场地 ——
+        # 否则"没有可用场地"会直接把从零排课这条路堵死。
         rooms = self.db.get_all_rooms()
         if not rooms:
-            return {"success": False, "error": "没有可用场地"}
+            rooms = sorted({t.room for t in self._tasks_of(class_name) if t.room})
+        if not rooms:
+            return {"success": False, "error": "没有可用场地（安排表里没有场地，主数据里也没写候选场地）"}
 
         # 3. 其他课程已占用（同星期）：场地 / 教师
         room_occupied, teacher_occupied = set(), set()
@@ -146,6 +188,10 @@ class ParallelScheduler:
         # 同时，`weeks+4` 也不看表里到底有几个周次：weeks=14 时重试 18 周，
         # 会排出第 17–19 周 —— 那是学校里根本不存在的周次。
         all_weeks = sorted({e.week for e in self.db.entries})
+        # 只上传了大纲清单（表里一条已排记录都没有）时，不能拿"表里的最后一周"当上限 ——
+        # 那样可用周数恒为 0，从零排课直接被自己堵死。退回一学期的默认跨度。
+        if not all_weeks:
+            all_weeks = list(range(1, DEFAULT_SEMESTER_WEEKS + 1))
         week_max = all_weeks[-1] if all_weeks else start_week
         max_avail = max(0, week_max - start_week + 1)
         if max_avail <= 0:
@@ -278,10 +324,14 @@ class ParallelScheduler:
                     # 而沙盘上只有第 2–7 周有格子（实测 2024级制药工程）。
                     "weeks_used": len(by_week),
                     "weeks_window": attempt_weeks,
+                    # 其中有多少单元是"大纲里新增、此前从没排过时间"的（从零排课的证据）
+                    "pending_units": pending_count,
                     "schedule": schedule,
                     "by_week": {str(k): v for k, v in sorted(by_week.items())},
                     "note": f"并行排课（CP-SAT）：{len(units)} 个项目×组别单元一键排定，"
-                            f"固定{wd}，组/场地/教师三重互斥",
+                            f"固定{wd}，组/场地/教师三重互斥"
+                            + (f"；其中 {pending_count} 个是待排任务（大纲新增，此前没排过时间）"
+                               if pending_count else ""),
                 }
             if status != cp_model.INFEASIBLE and status != cp_model.UNKNOWN:
                 break  # 别的状态（如 MODEL_INVALID）加周也没用，别白试

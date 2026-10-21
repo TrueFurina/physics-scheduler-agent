@@ -60,6 +60,8 @@ export interface NlSlotContext {
 
 /** `/parallel/overview` 里的一门课。 */
 export interface ParallelCourse {
+  /** 其中"还没排过时间"的单元数（大纲新增 / 清单里带来的）。>0 说明这门课有从零排的部分 */
+  pending_units?: number;
   class_name: string;
   weekday: string;
   /** 星期分布（含周六/周日）——「常上周一」不能只看周中，真实表 16% 的课在周末 */

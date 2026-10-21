@@ -37,7 +37,9 @@ from typing import Any, Dict, List, Optional
 # v3：新增 time_raw / blocked —— 跨节次写法（14:00-17:00）要同时占住 567 与 678。
 #     ⚠️ 结构变了必须失效：否则旧缓存里的条目没有 blocked，判占用会退回单标签，
 #     于是"沙盘把 678 判为空闲"这个缺陷会在命中缓存时重现（且难以察觉）。
-CACHE_VERSION = 3
+# v4：新增 pending（没排时间的行 → 待排任务）与 sheet_name。
+#     旧缓存里没有 pending ⇒ 命中缓存时"待排任务"会凭空消失（正好是静默丢弃的另一种形态）。
+CACHE_VERSION = 4
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
 _DEFAULT_DIR = _APP_DIR / "data" / "cache"
