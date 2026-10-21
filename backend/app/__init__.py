@@ -5,7 +5,6 @@
 下列配置都是在**模块导入时**求值的：
 
     app/security.py    ADMIN_USER / ADMIN_PASS / APP_SECRET_KEY / ADMIN_TOKEN_TTL
-    app/config.py      Settings(...)  ← pydantic-settings 读 .env
     app/agent/llm_intent_parser.py  LLM_PROVIDER / *_API_KEY
 
 而 `import app.security` 一定会先执行 `app/__init__.py`，所以这里是唯一

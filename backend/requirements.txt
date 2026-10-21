@@ -8,18 +8,10 @@ uvicorn[standard]==0.52.4
 
 # --- 配置与数据校验 ---
 pydantic==2.13.4
-pydantic-settings==2.14.2
 python-dotenv==1.2.1
-
-# --- 数据库（调课申请 SQLite 持久化） ---
-sqlalchemy==2.0.52
 
 # --- HTTP 客户端（调用外部 LLM 接口） ---
 httpx==0.28.1
-
-# --- 鉴权（管理员登录） ---
-python-jose[cryptography]==3.5.0
-passlib[bcrypt]==1.7.4
 
 # --- 排课求解（并行排课 CP-SAT 模型） ---
 ortools==9.15.6755
