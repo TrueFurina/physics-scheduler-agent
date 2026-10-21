@@ -5,6 +5,7 @@
  */
 const { launch } = require('./_browser.cjs');
 const path = require('path');
+const fs = require('fs');
 
 const SITE = process.env.SITE || 'https://physics-scheduler.app.workbuddy.host/';
 const SHOT_DIR = process.env.PROBE_SHOT_DIR || path.join(require('os').tmpdir(), 'psprobe');
@@ -93,23 +94,77 @@ function rec(ok, name, detail, opts = {}) {
     const m = txt.match(/(\d+)\/(\d+)\s*个单元已排定/);
     rec(ok, '⚡ 一键排课（CP-SAT）', `${Date.now() - t2}ms 返回，${m ? `${m[1]}/${m[2]} 单元已排定` : '未见结果摘要'}`);
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-solve.png') });
+
+    // ⬇️ 导出 Excel —— 教秘真正带走成果的那一步，此前零覆盖。
+    // 只断言"点了不报错"没有意义：即便后端返回 429/500 的 JSON，浏览器照样会下成一个
+    // 后缀是 .xlsx 的坏文件。所以这里读下载回来的字节，验 zip 魔数 PK。
+    try {
+      const t4 = Date.now();
+      const [download] = await Promise.all([
+        page.waitForEvent('download', { timeout: 30000 }),
+        page.getByRole('button', { name: /导出 Excel/ }).first().click(),
+      ]);
+      const name = download.suggestedFilename();
+      const saved = await download.path();
+      const buf = saved ? fs.readFileSync(saved) : Buffer.alloc(0);
+      const isZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b;
+      rec(
+        isZip && /\.xlsx$/i.test(name) && buf.length > 1000,
+        '⬇️ 导出 Excel',
+        `${Date.now() - t4}ms，「${name}」${(buf.length / 1024).toFixed(1)} KB，` +
+          (isZip ? 'zip 魔数 PK 正常' : `不是 xlsx（前 2 字节 ${buf.slice(0, 2).toString('hex') || '空'}，可能下到了错误 JSON）`),
+      );
+    } catch (e) {
+      rec(false, '⬇️ 导出 Excel', `没拿到下载事件：${String(e).slice(0, 110)}`);
+    }
   } catch (e) {
     rec(false, '⚡ 并行排课链路', String(e).slice(0, 120));
   }
 
   // 数据看板
+  //
+  // ⚠️ 这条断言曾经是假绿：等待条件写的 /数据体检|冲突|统计/ 在**页面一挂载**就命中，
+  //    因为副标题「教室/教师冲突扫描」是静态文案；接口被 abort 掉照样 PASS（已实测证实）。
+  //    现在只认**数据到达后才会出现**的字符串：「共 N 条安排」「N 间场地」「平均教室利用率」。
   try {
+    const t3 = Date.now();
     await page.getByRole('button', { name: /数据看板/ }).first().click();
     await page.waitForFunction(
-      () => /数据体检|冲突|统计/.test(document.body.innerText),
+      () => /共 \d+ 条安排/.test(document.body.innerText),
       { timeout: 40000 },
     );
-    await page.waitForTimeout(1000);
-    const hasAudit = await page.evaluate(() => /数据体检|健康|冲突/.test(document.body.innerText));
-    rec(hasAudit, '📊 数据看板', '体检/统计内容已渲染');
-    await page.screenshot({ path: path.join(SHOT_DIR, 'flow-dashboard.png') });
+    await page.waitForFunction(
+      () => /平均教室利用率/.test(document.body.innerText),
+      { timeout: 20000 },
+    );
+    const txt = await page.evaluate(() => document.body.innerText);
+    const mEntries = txt.match(/共 (\d+) 条安排/);
+    const mRooms = txt.match(/(\d+) 间场地/);
+    const mUtil = txt.match(/([\d.]+)%\s*\n\s*平均教室利用率/);
+    const conclusion = /整体健康/.test(txt)
+      ? '整体健康'
+      : /发现潜在冲突/.test(txt)
+        ? '发现潜在冲突'
+        : /未发现资源冲突/.test(txt)
+          ? '无冲突但有数据缺口'
+          : '无结论';
+    const mGap = txt.match(/(\d+) 条记录没填场地/);
+    const failedCard = /体检没能完成/.test(txt);
+    rec(
+      Boolean(mEntries) && Boolean(mRooms) && Boolean(mUtil) && conclusion !== '无结论' && !failedCard,
+      '📊 数据看板',
+      `${Date.now() - t3}ms：${mEntries ? mEntries[1] : '?'} 条安排 / ${mRooms ? mRooms[1] : '?'} 间场地 / ` +
+        `平均利用率 ${mUtil ? mUtil[1] + '%' : '?'}；结论「${conclusion}」` +
+        (mGap ? `（${mGap[1]} 条未填场地）` : '') +
+        (failedCard ? '（出现失败卡！）' : ''),
+    );
+    await page.screenshot({ path: path.join(SHOT_DIR, 'flow-dashboard.png'), fullPage: true });
   } catch (e) {
-    rec(false, '📊 数据看板', String(e).slice(0, 100));
+    const txt = await page.evaluate(() => document.body.innerText).catch(() => '');
+    const why = /体检没能完成/.test(txt)
+      ? '界面上是「体检没能完成」失败卡'
+      : '40s 内没等到体检数字（共 N 条安排 / 平均教室利用率）';
+    rec(false, '📊 数据看板', `${why}：${String(e).slice(0, 90)}`);
   }
 
   // 选课咨询（懒加载视图）：验证按需 chunk 真的能到达且正常渲染。

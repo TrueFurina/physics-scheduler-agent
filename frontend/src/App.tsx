@@ -219,25 +219,32 @@ function App() {
   // 数据看板：体检报告（扫描现有安排表冲突）
   const [auditData, setAuditData] = useState<any>(null);
   const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState('');   // 体检失败原因：空白卡片会被误读成"没冲突"
   const [statsData, setStatsData] = useState<any>(null);
+  const [statsError, setStatsError] = useState('');
 
   const handleOpenDashboard = async () => {
     setView('dashboard');
     setAuditLoading(true);
+    setAuditError('');
+    setStatsError('');
     try {
       const r = await rescheduleApi.dataAudit();
       setAuditData(r.data.data);
     } catch (err: any) {
-      setMsg(`数据体检失败：${err.response?.data?.detail || err.message}`);
+      // 失败时清掉旧数据：陈旧数字配上"这是刚扫出来的"比空白更误导
+      setAuditData(null);
+      setAuditError(err.response?.data?.detail || err.message || '未知错误');
     } finally {
       setAuditLoading(false);
     }
-    // 统计面板（失败不影响体检展示）
+    // 统计面板（失败不影响体检展示，但必须让用户看见它失败了）
     try {
       const s = await rescheduleApi.stats();
       setStatsData(s.data.data);
-    } catch {
+    } catch (err: any) {
       setStatsData(null);
+      setStatsError(err.response?.data?.detail || err.message || '未知错误');
     }
   };
 
@@ -1110,7 +1117,10 @@ function App() {
               <DashboardView
                 auditLoading={auditLoading}
                 auditData={auditData}
+                auditError={auditError}
                 statsData={statsData}
+                statsError={statsError}
+                onRetry={handleOpenDashboard}
               />
             </Suspense>
           )}

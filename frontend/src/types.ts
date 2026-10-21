@@ -107,6 +107,9 @@ export interface AuditData {
   week_max: number;
   room_conflict_count: number;
   teacher_conflict_count: number;
+  /** 没填场地的记录数：这些条不参与教室冲突判定，属于数据缺口而非冲突。 */
+  missing_room_count?: number;
+  missing_room_samples?: string[];
   room_conflicts?: AuditConflict[];
   teacher_conflicts?: AuditConflict[];
 }

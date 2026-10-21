@@ -18,6 +18,7 @@ import AdminView from '../AdminView';
 import CoursesView from '../CoursesView';
 import RescheduleView from '../RescheduleView';
 import ParallelView from '../ParallelView';
+import DashboardView from '../DashboardView';
 import ConsultView from '../ConsultView';
 
 // vitest 未开 globals，RTL 的自动 cleanup 不会注册 —— 不显式清理的话，
@@ -435,5 +436,100 @@ describe('ConsultView', () => {
     fireEvent.click(screen.getByRole('button', { name: /停止生成/ }));
     expect(onStop).toHaveBeenCalled();
     expect(onAsk).not.toHaveBeenCalled();
+  });
+});
+
+describe('DashboardView', () => {
+  const audit = {
+    healthy: true, total_entries: 312, teacher_count: 13, room_count: 8,
+    week_min: 1, week_max: 16, room_conflict_count: 0, teacher_conflict_count: 0,
+    room_conflicts: [], teacher_conflicts: [],
+  };
+  const stats = {
+    n_weeks: 16, avg_room_utilization: 27.5, avg_teacher_load: 24, teacher_load_balance: 91,
+    busiest_room: { room: 'A410', utilization: 29.2 },
+    top_rooms: [{ room: 'A410', sessions: 70, utilization: 29.2 }],
+    top_teachers: [{ teacher: '吴琳', sessions: 52, experiments: 13 }],
+  };
+
+  it('体检失败时给明确失败卡，绝不显示成"健康"', () => {
+    // 空白卡片会被教秘读成"扫过了，没冲突" —— 这是最危险的误读
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={null}
+        auditError="Network Error"
+        statsData={stats}
+        onRetry={() => {}}
+      />,
+    );
+    expect(screen.getByText(/体检没能完成/)).toBeTruthy();
+    expect(screen.getByText(/Network Error/)).toBeTruthy();
+    expect(screen.queryByText(/整体健康/)).toBeNull();
+    expect(screen.queryByText(/发现潜在冲突/)).toBeNull();
+  });
+
+  it('体检失败时重试按钮真的回到 onRetry', () => {
+    const onRetry = vi.fn();
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={null}
+        auditError="Network Error"
+        statsData={null}
+        onRetry={onRetry}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /重新体检/ }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('统计数据加载失败也要说出来，不能静默少一块', () => {
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={audit}
+        statsData={null}
+        statsError="timeout of 10000ms exceeded"
+      />,
+    );
+    expect(screen.getByText(/统计加载失败/)).toBeTruthy();
+    expect(screen.getByText(/共 312 条安排/)).toBeTruthy();
+  });
+
+  it('正常数据：条数/场地/利用率都落到界面上', () => {
+    render(<DashboardView auditLoading={false} auditData={audit} statsData={stats} />);
+    expect(screen.getByText(/共 312 条安排/)).toBeTruthy();
+    expect(screen.getByText(/8 间场地/)).toBeTruthy();
+    expect(screen.getByText(/27\.5%/)).toBeTruthy();
+    expect(screen.queryByText(/体检没能完成/)).toBeNull();
+    expect(screen.getByText(/整体健康/)).toBeTruthy();
+  });
+
+  it('无冲突但有未填场地的记录：不许报成「整体健康」', () => {
+    // healthy=true 只代表"没发现冲突"，不代表"每条都检查过" ——
+    // 没场地的条目根本没参与教室冲突扫描，报绿会让教秘以为全查了
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={{ ...audit, missing_room_count: 16, missing_room_samples: ['24级机械电子工程/1和2 绪论课（第1周 周五）'] }}
+        statsData={stats}
+      />,
+    );
+    expect(screen.queryByText(/整体健康/)).toBeNull();
+    expect(screen.getByText(/有 16 条记录没填场地/)).toBeTruthy();
+    expect(screen.getByText(/未纳入教室冲突检查/)).toBeTruthy();
+  });
+
+  it('有真冲突时不被缺口文案顶掉', () => {
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={{ ...audit, healthy: false, room_conflict_count: 1, missing_room_count: 2 }}
+        statsData={stats}
+      />,
+    );
+    expect(screen.getByText(/发现潜在冲突/)).toBeTruthy();
+    expect(screen.queryByText(/整体健康/)).toBeNull();
   });
 });

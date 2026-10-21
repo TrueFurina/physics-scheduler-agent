@@ -566,14 +566,21 @@ async def data_audit():
     room_map = defaultdict(list)     # (week, weekday, slot, room) -> entries
     teacher_map = defaultdict(list)  # (week, weekday, slot, teacher) -> entries
     weeks, teachers, rooms = set(), set(), set()
+    missing_room = []                # 无场地条目：不能参与"同室"判定，但要作为数据缺口报出来
 
     for e in _db.entries:
         weeks.add(e.week)
         if e.teacher:
             teachers.add(e.teacher)
-        if e.room:
+        if (e.room or '').strip():
             rooms.add(e.room)
-        room_map[(e.week, e.weekday, e.time_slot, e.room)].append(e)
+            room_map[(e.week, e.weekday, e.time_slot, e.room)].append(e)
+        else:
+            # ⚠️ 曾经无条件放进 room_map：于是一堆"空场地"被归到同一个 key
+            # (week, weekday, slot, '')，凡两条以上就报"教室冲突（同室同段多班）"，
+            # 而 place 是空串 —— 界面上显示成"第1周 周五 18:30-20:45 ·"，场地空着。
+            # 没填场地不可能撞场地，这是纯假阳性；真正该说的是"这些条没场地"。
+            missing_room.append(e)
         if e.teacher:
             teacher_map[(e.week, e.weekday, e.time_slot, e.teacher)].append(e)
 
@@ -595,6 +602,13 @@ async def data_audit():
     room_conflicts = _find_conflicts(room_map)
     teacher_conflicts = _find_conflicts(teacher_map)
 
+    # 数据缺口（不是冲突）：这些条目没填场地，教室冲突扫描覆盖不到它们。
+    # 单独报出来 —— 沉默地少扫 16 条，比报一个假冲突更危险。
+    missing_samples = [
+        f"{e.class_name}/{e.group} {e.experiment}（第{e.week}周 {e.weekday}）"
+        for e in missing_room[:5]
+    ]
+
     return {
         "success": True,
         "data": {
@@ -606,6 +620,8 @@ async def data_audit():
             "week_max": max(weeks) if weeks else 0,
             "room_conflict_count": len(room_conflicts),
             "teacher_conflict_count": len(teacher_conflicts),
+            "missing_room_count": len(missing_room),
+            "missing_room_samples": missing_samples,
             "room_conflicts": room_conflicts[:30],
             "teacher_conflicts": teacher_conflicts[:30],
         },

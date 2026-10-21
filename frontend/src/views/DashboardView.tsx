@@ -4,11 +4,17 @@ import { timeSlotLabels } from '../constants/labels';
 interface Props {
   auditLoading: boolean;
   auditData: AuditData | null;
+  /** 体检失败原因。为空表示没失败过。 */
+  auditError?: string;
   statsData: StatsData | null;
+  statsError?: string;
+  onRetry?: () => void;
 }
 
 /** 📊 数据看板：安排表体检报告 + 利用率/工作量统计。 */
-export default function DashboardView({ auditLoading, auditData, statsData }: Props) {
+export default function DashboardView({
+  auditLoading, auditData, auditError = '', statsData, statsError = '', onRetry,
+}: Props) {
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-6">
@@ -17,18 +23,60 @@ export default function DashboardView({ auditLoading, auditData, statsData }: Pr
 
         {auditLoading && <div className="text-sm text-gray-400 py-4">体检扫描中...</div>}
 
+        {/* 体检失败：必须给出明确的失败态。只留一张空白卡片会被读成"扫过了，没冲突" */}
+        {!auditLoading && auditError && (
+          <div className="rounded-xl p-4 border bg-red-50 border-red-200">
+            <div className="text-sm font-medium text-red-700">⚠️ 体检没能完成，下面的数字都不是本次扫描的结果</div>
+            <div className="text-xs text-red-500 mt-1 break-words">{auditError}</div>
+            {onRetry && (
+              <button
+                onClick={onRetry}
+                className="mt-3 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-xs font-medium"
+              >
+                重新体检
+              </button>
+            )}
+          </div>
+        )}
+
         {auditData && (
           <>
-            {/* 健康总览 */}
-            <div className={`rounded-xl p-4 mb-4 ${auditData.healthy ? 'bg-green-50 border border-green-200' : 'bg-amber-50 border border-amber-200'}`}>
+            {/* 健康总览 —— 三态：有冲突 / 无冲突但有数据缺口 / 全干净。
+                "无冲突但有缺口"不能报成绿色「整体健康」：那 N 条根本没被检查过。 */}
+            <div className={`rounded-xl p-4 mb-4 ${auditData.healthy && !(auditData.missing_room_count ?? 0)
+              ? 'bg-green-50 border border-green-200'
+              : 'bg-amber-50 border border-amber-200'}`}>
               <div className="text-lg font-medium">
-                {auditData.healthy ? '✅ 安排表整体健康，未发现资源冲突' : '⚠️ 发现潜在冲突，建议核查'}
+                {!auditData.healthy
+                  ? '⚠️ 发现潜在冲突，建议核查'
+                  : (auditData.missing_room_count ?? 0) > 0
+                    ? `🟡 未发现资源冲突，但有 ${auditData.missing_room_count} 条记录没填场地`
+                    : '✅ 安排表整体健康，未发现资源冲突'}
               </div>
               <div className="text-sm text-gray-600 mt-1">
                 共 {auditData.total_entries} 条安排 ｜ {auditData.teacher_count} 位教师 ｜ {auditData.room_count} 间场地
                 ｜ 覆盖第 {auditData.week_min}~{auditData.week_max} 周
+                {(auditData.missing_room_count ?? 0) > 0 && `｜ ${auditData.missing_room_count} 条未填场地`}
               </div>
             </div>
+
+            {/* 数据缺口：没场地的条目扫不了教室冲突，必须说出来 */}
+            {(auditData.missing_room_count ?? 0) > 0 && (
+              <div className="mb-4 bg-gray-50 border border-gray-200 rounded-xl p-4">
+                <div className="text-sm font-medium text-gray-700 mb-1">
+                  ⚪ {auditData.missing_room_count} 条记录未填场地，未纳入教室冲突检查
+                </div>
+                <div className="text-xs text-gray-500">
+                  {(auditData.missing_room_samples || []).map((s, i) => (
+                    <div key={i}>· {s}</div>
+                  ))}
+                  {(auditData.missing_room_count ?? 0) > (auditData.missing_room_samples || []).length && (
+                    <div className="mt-1">…另有 {(auditData.missing_room_count ?? 0) - (auditData.missing_room_samples || []).length} 条</div>
+                  )}
+                </div>
+                <div className="text-xs text-gray-400 mt-2">这类多为绪论课（安排表里写「教室已安排，请查系统」），请到教务系统核对场地</div>
+              </div>
+            )}
 
             {/* 冲突计数 */}
             <div className="grid grid-cols-2 gap-3 mb-4">
@@ -83,6 +131,11 @@ export default function DashboardView({ auditLoading, auditData, statsData }: Pr
         )}
 
         {/* 统计面板 */}
+        {!statsData && statsError && (
+          <div className="mt-6 pt-5 border-t border-gray-100 text-xs text-amber-600">
+            ⚠️ 利用率与工作量统计加载失败：{statsError}
+          </div>
+        )}
         {statsData && (
           <div className="mt-6 pt-5 border-t border-gray-100">
             <h3 className="text-sm font-medium text-gray-800 mb-3">📈 利用率与工作量统计（{statsData.n_weeks} 周）</h3>
