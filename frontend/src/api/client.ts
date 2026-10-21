@@ -274,6 +274,23 @@ export const rescheduleApi = {
   parallelExport: (className: string, schedule: Array<{ project: string; group: string; week: number; weekday: string; time_slot: string; room: string; teacher: string }>) =>
     api.post('/reschedule/parallel/export', { class_name: className, schedule }, { responseType: 'blob' }),
 
+  // 教务两类标准课表（基于**现有安排表**，不是新排的方案）：
+  // 班级课表 = 每班一页；场地课表 = 每间实验室一页。传空 = 全部。
+  exportClassSchedule: (className?: string) =>
+    api.get('/reschedule/export/class-schedule', {
+      params: className ? { class_name: className } : {},
+      responseType: 'blob',
+    }),
+  exportRoomSchedule: (room?: string) =>
+    api.get('/reschedule/export/room-schedule', {
+      params: room ? { room } : {},
+      responseType: 'blob',
+    }),
+  // 基础数据台账：把安排表反推成 实验项目/教师/场地/班级 四张实体表
+  // （教务第一号行动项"梳理实验课程属性、重构数据库"的起始材料）
+  exportMasterData: () =>
+    api.get('/reschedule/export/master-data', { responseType: 'blob' }),
+
   // 数据体检报告（扫描现有安排表冲突）
   dataAudit: () =>
     api.get<{ success: boolean; data: {

@@ -92,6 +92,9 @@ RULES: Dict[str, Tuple[int, int, int]] = {
     # 前端只在首屏调用一次 load-default，阈值放到 20/分钟 仍远超正常节奏。
     "load-default": (20, 200, 60),
     "parallel-export": (20, 200, 60),
+    # 标准课表导出（班级/场地）：每次遍历全表并生成一个多 sheet 的 xlsx，
+    # 代价与 parallel-export 同档
+    "standard-export": (20, 200, 60),
 }
 
 # 单 IP 桶的 key 数量上限：防止伪造大量源 IP 撑爆内存。

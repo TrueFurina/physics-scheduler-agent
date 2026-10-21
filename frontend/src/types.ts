@@ -126,6 +126,11 @@ export interface AuditData {
 /** `/stats` 返回：利用率与工作量统计。 */
 export interface StatsData {
   n_weeks: number;
+  /** 利用率的分母口径（如"16 周 × 7 天 × 4 时段 = 448 格/间"）。
+   *  没有它，教秘无从判断这个百分比对自己有没有意义。 */
+  capacity_basis?: string;
+  schedulable_days?: number;
+  schedulable_slots?: number;
   avg_room_utilization: number;
   avg_teacher_load: number;
   teacher_load_balance: number;

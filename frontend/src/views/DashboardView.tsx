@@ -9,11 +9,17 @@ interface Props {
   statsData: StatsData | null;
   statsError?: string;
   onRetry?: () => void;
+  /** 导出教务两类标准课表（基于当前安排表：班级课表 / 场地课表） */
+  onExportClass?: () => void;
+  onExportRoom?: () => void;
+  /** 导出基础数据台账（实验项目/教师/场地/班级 四张实体表） */
+  onExportMaster?: () => void;
 }
 
 /** 📊 数据看板：安排表体检报告 + 利用率/工作量统计。 */
 export default function DashboardView({
   auditLoading, auditData, auditError = '', statsData, statsError = '', onRetry,
+  onExportClass, onExportRoom, onExportMaster,
 }: Props) {
   // "没发现冲突"有两种：真干净，和"有一部分根本没检查"。后者不能标绿色。
   const noRoom = auditData?.missing_room_count ?? 0;
@@ -172,6 +178,12 @@ export default function DashboardView({
               <div className="bg-teal-50 border border-teal-200 rounded-xl p-3">
                 <div className="text-xl font-semibold text-teal-700">{statsData.avg_room_utilization}%</div>
                 <div className="text-xs text-teal-700">平均教室利用率</div>
+                {/* 分母口径必须一起给：只说 9.4% 而不说"按 448 格/间算"，
+                    教秘无法判断这个数字对自己有没有意义（分母曾写死 5天×3时段，
+                    把周末的课排除在外 ⇒ 利用率虚高近一倍） */}
+                {statsData.capacity_basis && (
+                  <div className="text-[10px] text-teal-600/80 mt-0.5">按 {statsData.capacity_basis}</div>
+                )}
               </div>
               <div className="bg-teal-50 border border-teal-200 rounded-xl p-3">
                 <div className="text-xl font-semibold text-teal-700">{statsData.avg_teacher_load}</div>
@@ -215,6 +227,38 @@ export default function DashboardView({
                   ))}
                 </div>
               </div>
+            </div>
+
+            {/* 教务两类标准课表导出
+                在用系统（理论课排课工具）被认可的能力之一就是"排完能导出班级课表、
+                场地课表"。此前本系统只能导出新排出来的并行方案，教秘还得自己整理
+                一遍才能发到班级群/贴到实验室门口。这里导出的是**当前安排表**。 */}
+            <div className="mt-5 pt-4 border-t border-gray-100">
+              <div className="text-xs font-medium text-gray-500 mb-2">📤 导出标准课表（基于当前安排表）</div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={onExportClass}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+                >
+                  ⬇️ 班级课表（每班一页）
+                </button>
+                <button
+                  onClick={onExportRoom}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+                >
+                  ⬇️ 场地课表（每间一页）
+                </button>
+                <button
+                  onClick={onExportMaster}
+                  className="px-3 py-1.5 bg-white text-emerald-700 border border-emerald-300 rounded-lg hover:bg-emerald-50 text-xs font-medium"
+                >
+                  ⬇️ 基础数据台账（4 张实体表）
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1.5">
+                班级课表发给班级，场地课表贴在实验室门口；没填场地的记录会进「（未填场地）」页，不会漏掉。
+                台账把安排表反推成实验项目/教师/场地/班级四个实体，供核对与补全实验项目用。
+              </p>
             </div>
           </div>
         )}

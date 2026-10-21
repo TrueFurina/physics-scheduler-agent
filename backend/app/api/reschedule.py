@@ -556,6 +556,266 @@ async def parallel_export(req: ParallelExportRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# 标准课表导出（班级课表 / 场地课表）
+#
+# 为什么要有这两个接口：教务在用系统（理论课排课工具）被认可的两项能力之一，
+# 就是"排完能导出班级课程表、场地课程表"。本系统此前只能导出**新排出来的并行方案**，
+# 导不出基于现有安排表的标准课表 —— 教秘拿不到可以直接发到班级群/贴在实验室门口的成品，
+# 于是"排完了"和"能交付"之间还差一步人工整理。
+# ---------------------------------------------------------------------------
+
+# 节次渲染顺序（与 time_model.ORDER 一致；unknown 排最后，绝不静默丢弃）
+_SLOT_ORDER = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
+
+
+def _safe_sheet_name(raw: str, used: set) -> str:
+    """Excel 表名：最长 31 字符，且不允许 : \\ / ? * [ ]。重名加 ~N 后缀。"""
+    name = re.sub(r"[:\\/?*\[\]]", "_", str(raw or "").strip())[:31] or "未标注"
+    base, i = name, 1
+    while name in used:
+        suffix = f"~{i}"
+        name = base[: 31 - len(suffix)] + suffix
+        i += 1
+    used.add(name)
+    return name
+
+
+def _slot_text(e) -> str:
+    """给教秘看的上课时间：原表写的是时间区间就照抄（含 14:00-17:00 这类跨节次写法），
+    否则用节次码换成时钟（567 → 13:30-15:45）。"""
+    raw = (getattr(e, "time_raw", "") or "").strip()
+    if ":" in raw or "：" in raw:
+        return raw
+    from app.utils.time_model import clock_text
+
+    return clock_text(e.time_slot) or raw or e.time_slot
+
+
+def _entry_sort_key(e):
+    from app.engine.parallel_scheduler import ALL_WEEKDAYS
+
+    wd = ALL_WEEKDAYS.index(e.weekday) if e.weekday in ALL_WEEKDAYS else 99
+    return (e.week, wd, _SLOT_ORDER.get(e.time_slot, 99), str(e.group))
+
+
+def _xlsx_response(wb, filename: str):
+    """工作簿 → 带中文文件名的下载响应（与并行排课导出同一套口径）。"""
+    from io import BytesIO
+    from urllib.parse import quote
+
+    from fastapi.responses import StreamingResponse
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+def _write_sheet(ws, headers, widths):
+    from openpyxl.styles import Alignment, Font
+
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for col, w in zip("ABCDEFGH", widths):
+        ws.column_dimensions[col].width = w
+
+
+@router.get("/export/class-schedule", summary="导出班级课表（教务标准课表之一）",
+            dependencies=[Depends(rate_limit("standard-export"))])
+async def export_class_schedule(class_name: Optional[str] = None):
+    """按班级导出课表：每个班一个 sheet，行=该班全部实验安排（按周次/星期/节次排序）。
+
+    `class_name` 留空 = 导出全部班级（每班一页）。
+    """
+    _ensure_loaded()
+    import openpyxl
+
+    entries = [e for e in _db.entries if (not class_name or e.class_name == class_name)]
+    if class_name and not entries:
+        raise HTTPException(404, f"安排表里没有班级「{class_name}」的记录")
+
+    grouped: dict = {}
+    for e in sorted(entries, key=_entry_sort_key):
+        grouped.setdefault(e.class_name or "未标注班级", []).append(e)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    used: set = set()
+    for cls in sorted(grouped, key=str):
+        ws = wb.create_sheet(_safe_sheet_name(cls, used))
+        _write_sheet(ws, ["周次", "星期", "节次", "上课时间", "实验项目", "学生组", "教师", "场地"],
+                     [8, 7, 8, 14, 30, 12, 10, 12])
+        for e in grouped[cls]:
+            ws.append([f"第{e.week}周", e.weekday, e.time_slot, _slot_text(e),
+                       e.experiment, e.group, e.teacher, e.room or "（未填场地）"])
+    if not grouped:
+        ws = wb.create_sheet("无数据")
+        ws.append(["当前安排表里没有可导出的记录"])
+    return _xlsx_response(wb, f"班级课表_{class_name or '全部班级'}.xlsx")
+
+
+@router.get("/export/room-schedule", summary="导出场地课表（教务标准课表之二）",
+            dependencies=[Depends(rate_limit("standard-export"))])
+async def export_room_schedule(room: Optional[str] = None):
+    """按场地导出课表：每间实验室一个 sheet，行=该场地的全部占用。
+
+    `room` 留空 = 导出全部场地。⚠️ 没填场地的记录（绪论课等）**不能静默丢弃** ——
+    它们单独进「（未填场地）」页，否则教秘会以为全表都被扫到了（R-35 口径）。
+    """
+    _ensure_loaded()
+    import openpyxl
+
+    entries = [e for e in _db.entries if (not room or (e.room or "").strip() == room)]
+    if room and not entries:
+        raise HTTPException(404, f"安排表里没有场地「{room}」的记录")
+
+    grouped: dict = {}
+    for e in sorted(entries, key=_entry_sort_key):
+        grouped.setdefault((e.room or "").strip() or "（未填场地）", []).append(e)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    used: set = set()
+    for rm in sorted(grouped, key=str):
+        ws = wb.create_sheet(_safe_sheet_name(rm, used))
+        _write_sheet(ws, ["周次", "星期", "节次", "上课时间", "班级", "实验项目", "学生组", "教师"],
+                     [8, 7, 8, 14, 26, 30, 12, 10])
+        for e in grouped[rm]:
+            ws.append([f"第{e.week}周", e.weekday, e.time_slot, _slot_text(e),
+                       e.class_name, e.experiment, e.group, e.teacher])
+    if not grouped:
+        ws = wb.create_sheet("无数据")
+        ws.append(["当前安排表里没有可导出的记录"])
+    return _xlsx_response(wb, f"场地课表_{room or '全部场地'}.xlsx")
+
+
+@router.get("/export/master-data", summary="导出基础数据台账（数据库重构的起始材料）",
+            dependencies=[Depends(rate_limit("standard-export"))])
+async def export_master_data():
+    """把现有安排表**反推**成四张实体台账：实验项目 / 教师 / 场地 / 班级。
+
+    为什么要有它：教务侧的第一号行动项是"基于教学大纲梳理所有实验课程属性、
+    重构数据库"。而本系统手里只有扁平的安排表行，没有独立的课程/项目/场地实体 ——
+    教秘想补全实验项目、核对哪些项目只在个别班开、哪些场地利用率异常，无处下手。
+    这份台账就是可以直接打开核对、补列、再导回的起始材料。
+
+    ⚠️ 口径：课次一律按**真实占用格数**计（`14:00-17:00` 算 2 格），
+    与利用率面板保持一致；缺字段的记录归入"未标注/未指派"而不是丢弃。
+    """
+    _ensure_loaded()
+    import openpyxl
+    from collections import defaultdict
+
+    WD = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+    def _cells(e):
+        return len(getattr(e, "blocked", None) or [e.time_slot])
+
+    def _week_span(weeks):
+        if not weeks:
+            return "—"
+        ws = sorted(weeks)
+        return f"第{ws[0]}-{ws[-1]}周（{len(ws)}周）"
+
+    def _weekday_mix(counter):
+        """按周一→周日顺序输出，周末不会被挤到末尾（R-41a）。"""
+        parts = [f"{d} {counter[d]}" for d in WD if counter.get(d)]
+        parts += [f"{d} {n}" for d, n in counter.items() if d not in WD]
+        return "、".join(parts) or "—"
+
+    proj = defaultdict(lambda: {"classes": set(), "groups": set(), "cells": 0,
+                                "teachers": set(), "rooms": set(), "weeks": set()})
+    teach = defaultdict(lambda: {"cells": 0, "projects": set(), "classes": set(),
+                                 "weeks": set(), "wd": defaultdict(int)})
+    room = defaultdict(lambda: {"cells": 0, "projects": set(), "classes": set(), "weeks": set()})
+    cls = defaultdict(lambda: {"cells": 0, "projects": set(), "groups": set(),
+                               "weeks": set(), "teachers": set(), "wd": defaultdict(int)})
+
+    for e in _db.entries:
+        c = _cells(e)
+        p = proj[e.experiment or "未标注实验项目"]
+        p["classes"].add(e.class_name or "未标注班级")
+        p["groups"].add(e.group or "")
+        p["cells"] += c
+        p["teachers"].add(e.teacher or "未指派教师")
+        p["rooms"].add((e.room or "").strip() or "（未填场地）")
+        p["weeks"].add(e.week)
+
+        t = teach[e.teacher or "未指派教师"]
+        t["cells"] += c
+        t["projects"].add(e.experiment or "未标注实验项目")
+        t["classes"].add(e.class_name or "未标注班级")
+        t["weeks"].add(e.week)
+        t["wd"][e.weekday or "未标注"] += 1
+
+        if (e.room or "").strip():
+            r = room[e.room.strip()]
+            r["cells"] += c
+            r["projects"].add(e.experiment or "未标注实验项目")
+            r["classes"].add(e.class_name or "未标注班级")
+            r["weeks"].add(e.week)
+
+        k = cls[e.class_name or "未标注班级"]
+        k["cells"] += c
+        k["projects"].add(e.experiment or "未标注实验项目")
+        k["groups"].add(e.group or "")
+        k["weeks"].add(e.week)
+        k["teachers"].add(e.teacher or "未指派教师")
+        k["wd"][e.weekday or "未标注"] += 1
+
+    # 容量口径与 /stats 一致：分母由本表实际开放的星期×时段推导
+    weeks_all = {e.week for e in _db.entries}
+    n_weeks = (max(weeks_all) - min(weeks_all) + 1) if weeks_all else 0
+    n_days = len({e.weekday for e in _db.entries if e.weekday}) or 5
+    n_slots = len({s for e in _db.entries for s in (getattr(e, "blocked", None) or [e.time_slot]) if s}) or 3
+    capacity = n_weeks * n_days * n_slots
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("实验项目")
+    _write_sheet(ws, ["实验项目", "班级数", "学生组数", "课次(格)", "授课教师", "使用场地", "覆盖周次"],
+                 [34, 8, 10, 10, 26, 24, 18])
+    for name in sorted(proj, key=str):
+        v = proj[name]
+        ws.append([name, len(v["classes"]), len([g for g in v["groups"] if g]),
+                   v["cells"], "、".join(sorted(v["teachers"])), "、".join(sorted(v["rooms"])),
+                   _week_span(v["weeks"])])
+
+    ws = wb.create_sheet("教师")
+    _write_sheet(ws, ["教师", "课次(格)", "实验项目数", "班级数", "活跃周数", "上课星期分布"],
+                 [12, 10, 12, 8, 10, 30])
+    for name in sorted(teach, key=str):
+        v = teach[name]
+        ws.append([name, v["cells"], len(v["projects"]), len(v["classes"]),
+                   len(v["weeks"]), _weekday_mix(v["wd"])])
+
+    ws = wb.create_sheet("场地")
+    _write_sheet(ws, ["场地", "占用格数", "利用率%", "班级数", "实验项目数", "覆盖周次"],
+                 [12, 10, 10, 8, 12, 18])
+    for name in sorted(room, key=str):
+        v = room[name]
+        ws.append([name, v["cells"], round(v["cells"] / capacity * 100, 1) if capacity else 0,
+                   len(v["classes"]), len(v["projects"]), _week_span(v["weeks"])])
+
+    ws = wb.create_sheet("班级")
+    _write_sheet(ws, ["班级", "课次(格)", "实验项目数", "学生组数", "覆盖周次", "上课星期分布", "授课教师"],
+                 [30, 10, 12, 10, 18, 30, 26])
+    for name in sorted(cls, key=str):
+        v = cls[name]
+        ws.append([name, v["cells"], len(v["projects"]), len([g for g in v["groups"] if g]),
+                   _week_span(v["weeks"]), _weekday_mix(v["wd"]), "、".join(sorted(v["teachers"]))])
+
+    return _xlsx_response(wb, "实验排课基础数据台账.xlsx")
+
+
 @router.get("/data-audit", summary="数据体检报告（扫描现有安排表冲突）")
 async def data_audit():
     """一键审计现有实验安排表：教室冲突 / 教师时间冲突 / 数据覆盖情况"""
@@ -653,7 +913,19 @@ async def stats():
 
     weeks = {e.week for e in _db.entries}
     n_weeks = (max(weeks) - min(weeks) + 1) if weeks else 0
-    total_slots = n_weeks * 5 * 3  # 5 天 × 3 时段
+
+    # ⚠️ 分母曾经写死 `n_weeks * 5 * 3`（5 天 × 3 时段），而真实表**周末照常排课**
+    # （433 条里周六 36、周日 35，占 16%；"24电信 42/46 节在周末"是常态）且存在上午时段
+    # （MORNING 4 条）。把这两类排除在分母外 ⇒ 利用率系统性虚高：
+    # 实测 17.6% vs 真实 9.4%（分母 240 vs 448/间），教秘会据此误判"场地还很空"。
+    # 与 R-41 同族：拿"枚举里有的"（5 天 3 时段）当"现实里有的"（7 天 4 时段）。
+    # 现在按**本表实际开放**的星期/时段推导，并把口径一并返回，界面上写清楚。
+    schedulable_days = len({e.weekday for e in _db.entries if e.weekday}) or 5
+    schedulable_slots = len(
+        {s for e in _db.entries for s in (getattr(e, "blocked", None) or [e.time_slot]) if s}
+    ) or 3
+    total_slots = n_weeks * schedulable_days * schedulable_slots
+    capacity_basis = f"{n_weeks} 周 × {schedulable_days} 天 × {schedulable_slots} 时段 = {total_slots} 格/间"
 
     room_sessions = Counter()
     room_weeks = defaultdict(set)
@@ -663,7 +935,8 @@ async def stats():
 
     for e in _db.entries:
         if e.room:
-            room_sessions[e.room] += 1
+            # 按真实占用格数计：一条 `14:00-17:00` 同时占 567+678，算 2 格而不是 1 节。
+            room_sessions[e.room] += len(getattr(e, "blocked", None) or [e.time_slot])
             room_weeks[e.room].add(e.week)
         if e.teacher:
             teacher_sessions[e.teacher] += 1
@@ -697,6 +970,11 @@ async def stats():
             "n_weeks": n_weeks,
             "room_count": len(rooms_stat),
             "teacher_count": len(teachers_stat),
+            # 口径必须和利用率一起给出：只说"9.4%"而不说分母怎么来的，
+            # 教秘无法判断这个数字对自己有没有意义（R-38 同族：算出来的数要说清没算什么）
+            "capacity_basis": capacity_basis,
+            "schedulable_days": schedulable_days,
+            "schedulable_slots": schedulable_slots,
             "avg_room_utilization": round(sum(r["utilization"] for r in rooms_stat) / len(rooms_stat), 1) if rooms_stat else 0,
             "busiest_room": rooms_stat[0] if rooms_stat else None,
             "avg_teacher_load": round(avg_load, 1),

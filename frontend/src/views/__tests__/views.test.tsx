@@ -364,6 +364,7 @@ describe('ParallelView', () => {
     solving: false,
     result: null,
     viewWeek: null,
+    resultRef: { current: null },
     onWeekdayChange: () => {},
     onSolve: () => {},
     onExport: () => {},
@@ -558,5 +559,48 @@ describe('DashboardView', () => {
     );
     expect(screen.getByText(/发现潜在冲突/)).toBeTruthy();
     expect(screen.queryByText(/整体健康/)).toBeNull();
+  });
+
+  it('三类导出按钮各自回传，不串台', () => {
+    // 教务在用系统被认可的能力之一就是"能导出班级课表、场地课表"；
+    // 台账则对应"梳理实验课程属性、重构数据库"这个第一号行动项。
+    // 只给一个"导出"按钮、或把几类串成同一个 handler，教秘拿到的就不是他要的那份。
+    const onClass = vi.fn();
+    const onRoom = vi.fn();
+    const onMaster = vi.fn();
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={audit}
+        statsData={stats}
+        onExportClass={onClass}
+        onExportRoom={onRoom}
+        onExportMaster={onMaster}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /班级课表/ }));
+    expect(onClass).toHaveBeenCalledTimes(1);
+    expect(onRoom).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /场地课表/ }));
+    expect(onRoom).toHaveBeenCalledTimes(1);
+    expect(onClass).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /基础数据台账/ }));
+    expect(onMaster).toHaveBeenCalledTimes(1);
+    expect(onClass).toHaveBeenCalledTimes(1);
+    expect(onRoom).toHaveBeenCalledTimes(1);
+  });
+
+  it('利用率必须同时给出分母口径', () => {
+    // 只说"9.4%"而不说"按 16周×7天×4时段=448格/间"，教秘无从判断这个数字的含义
+    // （分母曾写死 5天×3时段，把周末的课排除在外 ⇒ 利用率虚高近一倍）
+    render(
+      <DashboardView
+        auditLoading={false}
+        auditData={audit}
+        statsData={{ ...stats, avg_room_utilization: 9.4, capacity_basis: '16 周 × 7 天 × 4 时段 = 448 格/间' }}
+      />,
+    );
+    expect(screen.getByText(/9\.4%/)).toBeTruthy();
+    expect(screen.getByText(/448 格\/间/)).toBeTruthy();
   });
 });

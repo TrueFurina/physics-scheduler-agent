@@ -83,6 +83,11 @@ function App() {
   const [parallelSolving, setParallelSolving] = useState(false);  // 求解中
   const [parallelResult, setParallelResult] = useState<any>(null);  // 求解结果
   const [parallelSelected, setParallelSelected] = useState('');  // 当前选中课程
+  // 失败提示条渲染在页面顶部（header 正下方），而教秘的点按发生在页面中部/底部
+  // （如并行排课点某张课程卡的「一键排课」）—— 不滚进视口就是"点了没反应"（R-30 同族）。
+  const msgBannerRef = useRef<HTMLDivElement>(null);
+  // 并行排课结果渲染在全部课程卡之后：点靠后的卡时，结果顶部只露 56px，沙盘/明细全在折叠线下。
+  const parallelResultRef = useRef<HTMLDivElement>(null);
   // AI 候选方案（B3/F9）：与沙盘分开加载——沙盘要立刻出现，候选方案可以后到。
   // PRD 验收标准与演示脚本都承诺"显示 AI 候选方案"，但历史上前端从未渲染过它。
   const [aiPlans, setAiPlans] = useState<AiPlan[]>([]);
@@ -203,21 +208,60 @@ function App() {
     if (parallelSelected) handleParallelSolve(parallelSelected, w || undefined);
   };
 
+  // 失败提示出现在页面顶部：用户此刻往往已滚到别处，把提示带进视口中央。
+  // （首屏加载失败时页面本就在顶部，scrollIntoView 是空操作，不会乱滚。）
+  useEffect(() => {
+    if (msg) msgBannerRef.current?.scrollIntoView({ block: "center" });
+  }, [msg]);
+
+  // 求解成功：结果区在 17 张课程卡之后，直接滚动会让教秘"点了没反应"。
+  // 只在结果出现时滚一次（切周沙盘不重复滚）。
+  useEffect(() => {
+    if (parallelResult) parallelResultRef.current?.scrollIntoView({ block: "start" });
+  }, [parallelResult]);
+
+  // blob → 浏览器下载。⚠️ 后端出错时返回的是 JSON，浏览器照样会下成一个 .xlsx，
+  // 所以校验走接口侧（导出接口只返回 xlsx），这里不额外猜内容。
+  const downloadBlob = (data: any, filename: string) => {
+    const url = window.URL.createObjectURL(new Blob([data]));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   // 并行排课：方案导出 Excel（blob 触发浏览器下载）
   const handleParallelExport = async () => {
     if (!parallelResult?.schedule) return;
     try {
       const r = await rescheduleApi.parallelExport(parallelSelected, parallelResult.schedule);
-      const url = window.URL.createObjectURL(new Blob([r.data]));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `并行排课方案_${parallelSelected}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      downloadBlob(r.data, `并行排课方案_${parallelSelected}.xlsx`);
     } catch (err: any) {
       setMsg(`导出失败：${describeApiError(err)}`);
+    }
+  };
+
+  // 教务标准课表 + 基础数据台账（都基于当前安排表，不是新排的方案）
+  const EXPORT_KINDS: Record<string, { label: string; file: string }> = {
+    class: { label: '班级课表', file: '班级课表_全部班级.xlsx' },
+    room: { label: '场地课表', file: '场地课表_全部场地.xlsx' },
+    master: { label: '基础数据台账', file: '实验排课基础数据台账.xlsx' },
+  };
+  const handleExportStandard = async (kind: 'class' | 'room' | 'master') => {
+    const meta = EXPORT_KINDS[kind];
+    try {
+      const r = kind === 'class'
+        ? await rescheduleApi.exportClassSchedule()
+        : kind === 'room'
+          ? await rescheduleApi.exportRoomSchedule()
+          : await rescheduleApi.exportMasterData();
+      downloadBlob(r.data, meta.file);
+    } catch (err: any) {
+      // 失败要说清是哪一类 —— "导出失败"四个字教秘不知道该重试哪个按钮
+      setMsg(`${meta.label}导出失败：${describeApiError(err)}`);
     }
   };
 
@@ -924,7 +968,7 @@ function App() {
       </header>
 
       {msg && (
-        <div className="max-w-4xl mx-auto px-4 pt-3">
+        <div ref={msgBannerRef} className="max-w-4xl mx-auto px-4 pt-3">
           <div className="bg-red-50 text-red-600 text-sm px-4 py-2.5 rounded-lg border border-red-200 flex items-start gap-3">
             <span className="flex-1 break-words">{msg}</span>
             <button
@@ -1152,6 +1196,7 @@ function App() {
                 solving={parallelSolving}
                 result={parallelResult}
                 viewWeek={parallelViewWeek}
+                resultRef={parallelResultRef}
                 onWeekdayChange={handleParallelWeekdayChange}
                 onSolve={handleParallelSolve}
                 onExport={handleParallelExport}
@@ -1170,6 +1215,9 @@ function App() {
                 statsData={statsData}
                 statsError={statsError}
                 onRetry={handleOpenDashboard}
+                onExportClass={() => handleExportStandard('class')}
+                onExportRoom={() => handleExportStandard('room')}
+                onExportMaster={() => handleExportStandard('master')}
               />
             </Suspense>
           )}

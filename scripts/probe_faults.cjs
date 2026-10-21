@@ -141,16 +141,20 @@ const SCENARIOS = [
   },
   {
     id: 'solve',
-    name: '⚡ 一键排课 500（页面已滚到按钮处）',
+    name: '⚡ 一键排课 500（已滚到靠后的课程卡）',
     url: /\/api\/reschedule\/parallel\/solve$/,
     body: 'Internal Server Error',
     contentType: 'text/plain',
     // 这条专治"点了没反应"：按钮在页面底部，提示出现在顶端而视口没回滚。
+    // ⚠️ 必须点**靠后的一张卡**：第一张卡本就在首屏内，scrollIntoViewIfNeeded 是空操作，
+    // 页面根本没滚动 —— 那样这条断言从来测不到真场景（R-25：探针的价值等于它敢红的能力）。
     drive: async (page, ctx) => {
       await page.getByRole('button', { name: /并行排课/ }).first().click();
       await page.waitForFunction(() => /2024级/.test(document.body.innerText), { timeout: 40000 });
       await ctx.arm();                     // 总览已到，现在才让 solve 开始失败
-      const btn = page.getByRole('button', { name: /^一键排课$/ }).first();
+      const buttons = page.getByRole('button', { name: /^一键排课$/ });
+      const n = await buttons.count();
+      const btn = buttons.nth(Math.min(8, n - 1));
       await btn.scrollIntoViewIfNeeded();
       await btn.click();
       await page.waitForTimeout(2500);

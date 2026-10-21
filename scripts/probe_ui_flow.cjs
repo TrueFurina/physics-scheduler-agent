@@ -105,8 +105,12 @@ function rec(ok, name, detail, opts = {}) {
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-parallel.png') });
 
     const t2 = Date.now();
-    const btn = page.getByRole('button', { name: /^一键排课$/ }).first();
-    await btn.click();
+    // 点**靠后的一张卡**：结果区渲染在全部课程卡之后，点第一张卡（本就在首屏）
+    // 或点最后一张卡，结果都可能掉到折叠线以下 —— 教秘只看到按钮从"求解中"恢复，
+    // 等于"点了没反应"（R-24 / R-30 同族）。这里连视口一起断言。
+    const buttons = page.getByRole('button', { name: /^一键排课$/ });
+    const nCards = await buttons.count();
+    await buttons.nth(Math.min(8, nCards - 1)).click();
     // 结果区渲染的是「📋 排课方案（周五）· 状态 OPTIMAL」+「24/24 个单元已排定」
     // 注意：不能用"周次"之类的泛词做等待条件 —— 页面本来就有这些字，会立刻命中造成假通过。
     await page.waitForFunction(
@@ -115,9 +119,32 @@ function rec(ok, name, detail, opts = {}) {
     );
     await page.waitForTimeout(600);
     const txt = await page.evaluate(() => document.body.innerText);
-    const ok = /个单元已排定/.test(txt) && /状态\s*(OPTIMAL|FEASIBLE)/.test(txt);
     const m = txt.match(/(\d+)\/(\d+)\s*个单元已排定/);
-    rec(ok, '⚡ 一键排课（CP-SAT）', `${Date.now() - t2}ms 返回，${m ? `${m[1]}/${m[2]} 单元已排定` : '未见结果摘要'}`);
+    const vis = await page.evaluate(() => {
+      const h3 = [...document.querySelectorAll('h3')].find((h) => /排课方案/.test(h.textContent || ''));
+      if (!h3) return { has: false, ok: false };
+      const r = h3.getBoundingClientRect();
+      const p = [...document.querySelectorAll('p')].find((x) => /个单元已排定/.test(x.textContent || ''));
+      const pr = p ? p.getBoundingClientRect() : null;
+      return {
+        has: true,
+        titleTop: Math.round(r.top),
+        summaryTop: pr ? Math.round(pr.top) : null,
+        vh: window.innerHeight,
+        // 摘要行必须**完整**落在视口内：只断言"标题顶边在视口内"是假绿 ——
+        // 修复前点最后一张卡，标题顶边 744px 也 < 800，照样判过，教秘其实只看到一条缝。
+        ok: r.top >= 0 && r.top < window.innerHeight && !!pr && pr.top >= 0 && pr.bottom <= window.innerHeight + 1,
+      };
+    });
+    const ok = /状态\s*(OPTIMAL|FEASIBLE)/.test(txt) && vis.ok;
+    rec(
+      ok,
+      '⚡ 一键排课（CP-SAT）',
+      `${Date.now() - t2}ms 返回，${m ? `${m[1]}/${m[2]} 单元已排定` : '未见结果摘要'}；` +
+        (vis.ok
+          ? '结果区在视口内'
+          : `结果区掉到视口外（标题 top=${vis.titleTop}px / 摘要 top=${vis.summaryTop}px / 视口 ${vis.vh}px）`),
+    );
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-solve.png') });
 
     // ⬇️ 导出 Excel —— 教秘真正带走成果的那一步，此前零覆盖。
@@ -184,6 +211,35 @@ function rec(ok, name, detail, opts = {}) {
         (failedCard ? '（出现失败卡！）' : ''),
     );
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-dashboard.png'), fullPage: true });
+
+    // 📤 教务两类标准课表（班级课表 / 场地课表）—— 基于**当前安排表**，不是新排的方案。
+    // 只断言"点了不报错"没有意义：后端出错时返回的是 JSON，浏览器照样下成一个 .xlsx 坏文件。
+    // 所以这里读回字节：验 zip 魔数 + 体积（433 条记录 ≈ 30–40KB，空表不可能这么大）。
+    for (const [label, re, minKb] of [
+      ['班级课表', /班级课表/, 15000],
+      ['场地课表', /场地课表/, 15000],
+      ['基础数据台账', /基础数据台账/, 6000],
+    ]) {
+      try {
+        const t5 = Date.now();
+        const [download] = await Promise.all([
+          page.waitForEvent('download', { timeout: 30000 }),
+          page.getByRole('button', { name: re }).first().click(),
+        ]);
+        const name = download.suggestedFilename();
+        const saved = await download.path();
+        const buf = saved ? fs.readFileSync(saved) : Buffer.alloc(0);
+        const isZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b;
+        rec(
+          isZip && buf.length > minKb,
+          `📤 导出${label}`,
+          `${Date.now() - t5}ms，「${name}」${(buf.length / 1024).toFixed(1)} KB，` +
+            (isZip ? 'zip 魔数 PK 正常' : `不是 xlsx（前 2 字节 ${buf.slice(0, 2).toString('hex') || '空'}）`),
+        );
+      } catch (e) {
+        rec(false, `📤 导出${label}`, `没拿到下载事件：${String(e).slice(0, 110)}`);
+      }
+    }
   } catch (e) {
     const txt = await page.evaluate(() => document.body.innerText).catch(() => '');
     const why = /体检没能完成/.test(txt)

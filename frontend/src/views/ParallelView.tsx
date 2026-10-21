@@ -1,4 +1,5 @@
 import { Fragment } from 'react';
+import type { RefObject } from 'react';
 import type { ParallelCourse, ParallelSolveResult } from '../types';
 import { GRID_TIME_SLOTS, timeSlotLabels } from '../constants/labels';
 
@@ -14,6 +15,7 @@ interface Props {
   solving: boolean;
   result: ParallelSolveResult | null;
   viewWeek: number | null;
+  resultRef: RefObject<HTMLDivElement>;
   onWeekdayChange: (w: string) => void;
   onSolve: (className: string) => void;
   onExport: () => void;
@@ -22,7 +24,7 @@ interface Props {
 
 /** ⚡ 并行排课：一门课的全部实验项目 × 学生组别一次列出，CP-SAT 一键统一分配。 */
 export default function ParallelView({
-  weekday, courses, selected, loading, solving, result, viewWeek,
+  weekday, courses, selected, loading, solving, result, viewWeek, resultRef,
   onWeekdayChange, onSolve, onExport, onViewWeekChange,
 }: Props) {
   // 周沙盘：只渲染被选中的那一周，行=时段 列=学生组
@@ -104,7 +106,7 @@ export default function ParallelView({
 
       {/* 求解结果 */}
       {result && (
-        <div className="bg-white rounded-xl border border-cyan-200 p-5">
+        <div ref={resultRef} className="bg-white rounded-xl border border-cyan-200 p-5">
           <h3 className="font-medium text-gray-900 mb-1">
             📋 排课方案（{result.weekday}）· 状态 {result.status}
           </h3>
