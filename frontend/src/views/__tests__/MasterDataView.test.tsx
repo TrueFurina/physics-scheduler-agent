@@ -40,7 +40,7 @@ const OVERVIEW = {
   ],
   teachers: [{ name: '吴老师', projects: ['扭摆法'] }],
   rooms: [{ name: 'A410', capacity: null }],
-  classes: [{ name: '一班', groups: ['1组', '2组'] }],
+  classes: [{ name: '一班', groups: ['1组', '2组'], weekday: '周四', time_slots: ['567', '678'], week_min: 1, week_max: 16 }],
 };
 
 function renderView(authed = false) {

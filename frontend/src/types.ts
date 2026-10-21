@@ -151,5 +151,9 @@ export interface MasterOverview {
   }>;
   teachers: Array<{ name: string; projects: string[] }>;
   rooms: Array<{ name: string; capacity: number | null }>;
-  classes: Array<{ name: string; groups: string[] }>;
+  classes: Array<{
+    name: string; groups: string[];
+    /** 教务给定的「课程总时间范围」：主要星期 / 节次 / 周次 */
+    weekday: string; time_slots: string[]; week_min: number | null; week_max: number | null;
+  }>;
 }

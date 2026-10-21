@@ -124,6 +124,10 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
         r = await rescheduleApi.masterUpsertClass({
           name: form.name || '',
           groups: form.groups ? splitList(form.groups) : undefined,
+          weekday: form.weekday?.trim() || undefined,
+          time_slots: form.time_slots ? splitList(form.time_slots) : undefined,
+          week_min: form.week_min?.trim() ? Number(form.week_min) : undefined,
+          week_max: form.week_max?.trim() ? Number(form.week_max) : undefined,
         });
       } else {
         r = await rescheduleApi.masterUpsertCourse({ name: form.name || '' });
@@ -222,6 +226,10 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
             {tab === 'teachers' && field('projects', '可授实验项目', '扭摆法, 声速测量', true)}
             {tab === 'rooms' && field('capacity', '容量（可选）', '如 40')}
             {tab === 'classes' && field('groups', '学生组', '1组, 2组', true)}
+            {tab === 'classes' && field('weekday', '上课星期', '如 周四')}
+            {tab === 'classes' && field('time_slots', '节次', '如 567, 678')}
+            {tab === 'classes' && field('week_min', '起始周', '如 1')}
+            {tab === 'classes' && field('week_max', '结束周', '如 16')}
           </div>
           <div className="flex gap-2 mt-3">
             <button onClick={doSubmit} disabled={busy} className="px-3 py-1.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 text-sm font-medium disabled:opacity-40">
@@ -283,7 +291,10 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
               {tab === 'classes' && data?.classes.map((c) => (
                 <tr key={c.name} className="border-t border-gray-100 hover:bg-gray-50">
                   <td className="px-4 py-2.5 font-medium text-gray-800">{c.name}</td>
-                  <td className="px-4 py-2.5 text-gray-500 text-xs">学生组：{c.groups.length ? c.groups.join('、') : '未标注'}</td>
+                  <td className="px-4 py-2.5 text-gray-500 text-xs">
+                    <div>学生组：{c.groups.length ? c.groups.join('、') : '未标注'}</div>
+                    <div>时间范围：{c.weekday || '未定星期'}{c.time_slots.length ? ` ${c.time_slots.join('/')}` : ''} · 第{c.week_min ?? '?'}-{c.week_max ?? '?'}周</div>
+                  </td>
                   <td className="px-4 py-2.5 text-right">
                     <button onClick={() => doDelete('classes', c.name)} disabled={busy || !adminAuthed}
                       className="text-red-500 hover:text-red-700 text-xs disabled:opacity-30">删除</button>

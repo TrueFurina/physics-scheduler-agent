@@ -302,6 +302,10 @@ class _RoomIn(BaseModel):
 class _ClassIn(BaseModel):
     name: str
     groups: Optional[List[str]] = None
+    weekday: Optional[str] = None
+    time_slots: Optional[List[str]] = None
+    week_min: Optional[int] = None
+    week_max: Optional[int] = None
 
 
 @router.get("/master/overview", summary="主数据五张实体表总览")
@@ -399,7 +403,8 @@ async def master_upsert_class(req: _ClassIn):
     _ensure_loaded()
     _ensure_master_data()
     try:
-        _master_data.upsert_class(req.name, groups=req.groups)
+        _master_data.upsert_class(req.name, groups=req.groups, weekday=req.weekday or "",
+                                  time_slots=req.time_slots, week_min=req.week_min, week_max=req.week_max)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "data": _master_data.overview()}
@@ -755,9 +760,9 @@ async def admin_login(req: AdminLoginRequest):
 class ParallelSolveRequest(BaseModel):
     """并行排课求解请求"""
     class_name: str
-    weekday: Optional[str] = None  # 上课星期（默认沿用历史）
-    start_week: int = 2
-    weeks: int = 10
+    weekday: Optional[str] = None   # 上课星期（默认用主数据该班的上课星期）
+    start_week: Optional[int] = None  # 起始周（默认用主数据该班的起始周）
+    weeks: Optional[int] = None       # 窗口宽度（默认用主数据该班的周次范围）
 
 
 class ParallelExportRequest(BaseModel):
@@ -793,13 +798,31 @@ async def parallel_solve(req: ParallelSolveRequest):
     同一时刻在刷沙盘/看板的人一起冻住。
     """
     _ensure_loaded()
+    _ensure_master_data()
     from app.engine.parallel_scheduler import ParallelScheduler
 
     extra = _schedulable_extra_tasks()
     ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+
+    # 教务给定的「课程总时间范围」：主数据里该班的星期 / 节次 / 周次，是求解器的可用时间空间。
+    # 请求显式指定的优先；否则用主数据基线（反推自安排表，教秘可在「主数据」里改）。
+    cls_info = _master_data.classes.get(req.class_name, {}) if _master_data.initialized else {}
+    md_time_slots = sorted(cls_info.get("time_slots") or []) or None
+    md_week_min = cls_info.get("week_min")
+    md_week_max = cls_info.get("week_max")
+
+    # 起始周：请求显式指定优先，否则主数据该班起始周（或默认 2）
+    start_week = req.start_week if req.start_week is not None else (md_week_min or 2)
+    # 周次上限：请求显式传了 weeks（窗口宽度）则走原有窗口逻辑；否则用主数据该班结束周当上限
+    week_max_override = None if req.weeks is not None else md_week_max
+
     result = await run_in_threadpool(
         ps.solve, req.class_name,
-        weekday=req.weekday, start_week=req.start_week, weeks=req.weeks,
+        weekday=(req.weekday or cls_info.get("weekday") or None),
+        start_week=start_week,
+        weeks=(req.weeks if req.weeks is not None else 10),
+        time_slots=md_time_slots,
+        week_max_override=week_max_override,
     )
     return result
 

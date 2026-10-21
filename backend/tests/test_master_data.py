@@ -173,3 +173,50 @@ def test_master_derived_tasks_group_granularity_no_false_positive(monkeypatch):
     monkeypatch.setattr(api, "_master_data", md)
 
     assert api._master_derived_tasks() == []  # 按 (班级, 项目) 判，不因组名差异而误派生
+
+
+# ------------------------------------------------------- 教务给定的时间范围
+
+def test_build_from_entries_derives_class_time_range():
+    """班级的上课时间范围（星期/节次/周次）从安排表反推，少数派星期不计入。"""
+    md = MasterData()
+    md.build_from_entries([
+        _entry(1, "周四", "567", "一班", "1组", "A410", experiment="扭摆法"),
+        _entry(2, "周四", "567", "一班", "1组", "A410", experiment="声速测量"),
+        _entry(3, "周四", "678", "一班", "1组", "A410", experiment="扭摆法"),
+        _entry(4, "周五", "567", "一班", "1组", "A410", experiment="扭摆法"),  # 少数派
+    ])
+    c = md.classes["一班"]
+    assert c["weekday"] == "周四"          # 多数派胜出
+    assert c["time_slots"] == {"567", "678"}
+    assert c["week_min"] == 1 and c["week_max"] == 4
+
+
+def test_upsert_class_time_range():
+    """教务给定的时间范围可显式录入（覆盖反推基线）。"""
+    md = MasterData()
+    md.upsert_class("一班", weekday="周五", time_slots=["567"], week_min=2, week_max=8)
+    c = md.classes["一班"]
+    assert c["weekday"] == "周五"
+    assert c["time_slots"] == {"567"}
+    assert c["week_min"] == 2 and c["week_max"] == 8
+
+
+def test_solve_respects_time_slots_parameter():
+    """求解器只在教务给定的节次里排，不会用到范围外的节次。"""
+    from app.engine.parallel_scheduler import ParallelScheduler
+
+    db = ScheduleDatabase()
+    db.entries = [
+        _entry(1, "周四", "567", "一班", "1组", "A410", experiment="扭摆法"),
+        _entry(1, "周四", "567", "一班", "1组", "A410", experiment="声速测量"),
+    ]
+    db.loaded = True
+    ps = ParallelScheduler(db, extra_tasks=[])
+    # 只允许 567 一个节次：两个同组单元只能分到不同周，但绝不能出现 678/91011。
+    # week_max_override 隔离周次推导的干扰（测试数据只在第 1 周）。
+    r = ps.solve("一班", weekday="周四", start_week=1, weeks=4, time_slots=["567"], week_max_override=4)
+    assert r["success"] is True
+    used_slots = {s["time_slot"] for s in r["schedule"]}
+    assert used_slots == {"567"}
+

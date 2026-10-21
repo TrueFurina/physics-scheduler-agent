@@ -90,7 +90,8 @@ def test_parallel_solve_off_event_loop(monkeypatch):
         def __init__(self, *a, **kw):
             pass
 
-        def solve(self, class_name, weekday=None, start_week=None, weeks=None):
+        def solve(self, class_name, weekday=None, start_week=None, weeks=None,
+                  time_slots=None, week_max_override=None, max_time_seconds=10.0):
             seen["thread"] = threading.current_thread()
             return {"status": "OPTIMAL", "scheduled": 24, "total_units": 24}
 

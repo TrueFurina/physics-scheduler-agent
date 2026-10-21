@@ -16,6 +16,8 @@
 
 from typing import Dict, List, Optional, Set
 
+from collections import Counter
+
 from app.utils.excel_parser import looks_like_exam
 
 # 真实表里没有「课程」字段，25 个项目都属于大学物理实验这门大课。
@@ -23,6 +25,12 @@ from app.utils.excel_parser import looks_like_exam
 DEFAULT_COURSE = "大学物理实验"
 
 _INTRO_KW = ("绪论",)
+
+
+def _new_class() -> dict:
+    """班级实体的统一骨架：组 + 教务给定的上课时间范围。"""
+    return {"groups": set(), "weekday": "", "time_slots": set(),
+            "week_min": None, "week_max": None}
 
 
 def _is_intro_like(name: str) -> bool:
@@ -39,7 +47,8 @@ class MasterData:
       experiments : name -> {"course": str, "teachers": Set, "rooms": Set, "classes": Set}
       teachers    : name -> {"projects": Set[str]}
       rooms       : name -> {"capacity": Optional[int]}
-      classes     : name -> {"groups": Set[str]}
+      classes     : name -> {"groups": Set[str], "weekday": str, "time_slots": Set[str],
+                             "week_min": Optional[int], "week_max": Optional[int]}
     """
 
     def __init__(self):
@@ -82,9 +91,25 @@ class MasterData:
             if room:
                 self.rooms.setdefault(room, {"capacity": None})
             if cls:
-                self.classes.setdefault(cls, {"groups": set()})
+                c = self.classes.setdefault(cls, _new_class())
+                c.setdefault("_wd_count", Counter())
                 if group:
-                    self.classes[cls]["groups"].add(group)
+                    c["groups"].add(group)
+                # 时间范围累积：教务已给「课程总时间范围」，这里从安排表反推为默认基线，
+                # 教秘可在主数据里改。节次按 blocked 展开（跨节次记录占多格）。
+                if e.weekday:
+                    c["_wd_count"][e.weekday] += 1
+                for s in (getattr(e, "blocked", None) or [e.time_slot]):
+                    if s:
+                        c["time_slots"].add(s)
+                if isinstance(e.week, int):
+                    c["week_min"] = e.week if c["week_min"] is None else min(c["week_min"], e.week)
+                    c["week_max"] = e.week if c["week_max"] is None else max(c["week_max"], e.week)
+
+        # 主要上课星期：取出现最多的（少数派星期不计入时间范围，避免推断错误）
+        for c in self.classes.values():
+            wd_count = c.pop("_wd_count", None)
+            c["weekday"] = wd_count.most_common(1)[0][0] if wd_count else ""
 
         self._rebuild_courses()
         self.initialized = True
@@ -153,7 +178,7 @@ class MasterData:
                 c = (c or "").strip()
                 if c:
                     ex["classes"].add(c)
-                    self.classes.setdefault(c, {"groups": set()})
+                    self.classes.setdefault(c, _new_class())
         self._rebuild_courses()
         return self.experiments[name]
 
@@ -201,16 +226,30 @@ class MasterData:
             ex.get("rooms", set()).discard(name)
         self.rooms.pop(name, None)
 
-    def upsert_class(self, name: str, groups: Optional[List[str]] = None) -> dict:
+    def upsert_class(self, name: str, groups: Optional[List[str]] = None,
+                     weekday: str = "", time_slots: Optional[List[str]] = None,
+                     week_min: Optional[int] = None, week_max: Optional[int] = None) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("班级名不能为空")
-        c = self.classes.setdefault(name, {"groups": set()})
+        c = self.classes.setdefault(name, _new_class())
         if groups is not None:
             for g in groups:
                 g = (g or "").strip()
                 if g:
                     c["groups"].add(g)
+        # 教务给定的「课程总时间范围」：星期 / 节次 / 周次。空字符串/None 表示不覆盖。
+        if weekday:
+            c["weekday"] = weekday.strip()
+        if time_slots is not None:
+            for s in time_slots:
+                s = (s or "").strip()
+                if s:
+                    c["time_slots"].add(s)
+        if week_min is not None:
+            c["week_min"] = week_min
+        if week_max is not None:
+            c["week_max"] = week_max
         return c
 
     def delete_class(self, name: str):
@@ -244,7 +283,9 @@ class MasterData:
                 for n, v in sorted(self.rooms.items(), key=lambda kv: str(kv[0]))
             ],
             "classes": [
-                {"name": n, "groups": _sorted(v["groups"])}
+                {"name": n, "groups": _sorted(v["groups"]), "weekday": v.get("weekday", ""),
+                 "time_slots": _sorted(v["time_slots"]), "week_min": v.get("week_min"),
+                 "week_max": v.get("week_max")}
                 for n, v in sorted(self.classes.items(), key=lambda kv: str(kv[0]))
             ],
         }

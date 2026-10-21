@@ -101,8 +101,17 @@ class ParallelScheduler:
 
     def solve(self, class_name: str, weekday: Optional[str] = None,
               start_week: int = 2, weeks: int = 10,
+              time_slots: Optional[List[str]] = None,
+              week_max_override: Optional[int] = None,
               max_time_seconds: float = 10.0) -> Dict:
-        """并行排课求解：该课程所有 (项目, 组别) 单元 → (周次, 时段, 场地)"""
+        """并行排课求解：该课程所有 (项目, 组别) 单元 → (周次, 时段, 场地)
+
+        `time_slots` / `week_max_override` 是教务给定的「课程总时间范围」：求解器只在
+        这个范围里排，不再自己推断节次 / 把周次上限当成整张表。缺省时回退到
+        「固定三段 567/678/91011 + 表内最后一周」的旧行为（向后兼容）。
+        """
+        # 教务给定的可用节次（缺省＝三段全集）
+        slots = time_slots or TIME_SLOTS
         # 1. 收集单元（项目×组别，排除绪论）+ 历史教师 + 历史上课星期
         unit_teacher: Dict[tuple, str] = {}
         weekday_votes: Counter = Counter()
@@ -171,7 +180,7 @@ class ParallelScheduler:
         for s in (getattr(self.db, "skipped", None) or []):
             if s.get("weekday") != wd:
                 continue
-            for ts in TIME_SLOTS:
+            for ts in slots:
                 if s.get("room"):
                     room_occupied.add((s["week"], ts, s["room"]))
                 if s.get("teacher"):
@@ -192,7 +201,7 @@ class ParallelScheduler:
         # 那样可用周数恒为 0，从零排课直接被自己堵死。退回一学期的默认跨度。
         if not all_weeks:
             all_weeks = list(range(1, DEFAULT_SEMESTER_WEEKS + 1))
-        week_max = all_weeks[-1] if all_weeks else start_week
+        week_max = week_max_override if week_max_override else (all_weeks[-1] if all_weeks else start_week)
         max_avail = max(0, week_max - start_week + 1)
         if max_avail <= 0:
             return {"success": False,
@@ -202,13 +211,13 @@ class ParallelScheduler:
         groups_n = len({u["group"] for u in units})
         n_u = len(units)
         teachers_n = len(set(unit_teacher.values())) or 1
-        per_week = max(1, min(groups_n, len(TIME_SLOTS) * teachers_n))
+        per_week = max(1, min(groups_n, len(slots) * teachers_n))
         need_weeks = -(-n_u // per_week)
 
         free_cells = sum(
             1
             for w in range(start_week, start_week + max_avail)
-            for ts in TIME_SLOTS
+            for ts in slots
             for rm in rooms
             if (w, ts, rm) not in room_occupied
         )
@@ -222,7 +231,7 @@ class ParallelScheduler:
 
         for attempt_weeks in windows:
             week_list = list(range(start_week, start_week + attempt_weeks))
-            n_w, n_t, n_r = len(week_list), len(TIME_SLOTS), len(rooms)
+            n_w, n_t, n_r = len(week_list), len(slots), len(rooms)
             n_u = len(units)
 
             model = cp_model.CpModel()
@@ -257,7 +266,7 @@ class ParallelScheduler:
             for w in range(n_w):
                 wk = week_list[w]
                 for t in range(n_t):
-                    ts = TIME_SLOTS[t]
+                    ts = slots[t]
                     # 场地互斥
                     for r in range(n_r):
                         model.Add(sum(x[(i, w, t, r)] for i in range(n_u)) <= 1)
@@ -306,11 +315,11 @@ class ParallelScheduler:
                                         "group": u["group"],
                                         "week": week_list[w],
                                         "weekday": wd,
-                                        "time_slot": TIME_SLOTS[t],
+                                        "time_slot": slots[t],
                                         "room": rooms[r],
                                         "teacher": unit_teacher.get((u["project"], u["group"]), ""),
                                     })
-                schedule.sort(key=lambda s: (s["week"], TIME_SLOTS.index(s["time_slot"]),
+                schedule.sort(key=lambda s: (s["week"], slots.index(s["time_slot"]),
                                              s["group"], s["project"]))
                 by_week = Counter(s["week"] for s in schedule)
                 return {

@@ -313,7 +313,7 @@ export const rescheduleApi = {
     api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/rooms', payload),
   masterDeleteRoom: (name: string) =>
     api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/rooms/${encodeURIComponent(name)}`),
-  masterUpsertClass: (payload: { name: string; groups?: string[] }) =>
+  masterUpsertClass: (payload: { name: string; groups?: string[]; weekday?: string; time_slots?: string[]; week_min?: number; week_max?: number }) =>
     api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/classes', payload),
   masterDeleteClass: (name: string) =>
     api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/classes/${encodeURIComponent(name)}`),
