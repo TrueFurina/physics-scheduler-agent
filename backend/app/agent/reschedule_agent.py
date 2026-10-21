@@ -20,12 +20,19 @@ SLOT_KEYS = ("teacher_name", "course_name", "class_name", "target_week", "source
 
 
 def _raw_slot_note(info: Dict) -> str:
-    """占用源头若是跨节次写法，把原表时间补进文案。
+    """占用源头若是**跨节次**写法，把原表时间补进文案。
 
     教秘看到"周四 678 不可用"时，会回表里找 678 那一格 —— 而原表那格写的是
     `14:00-17:00`。不点明这层对应关系，他会以为系统读错了。
+
+    ⚠️ 只在**真的跨了节次**（blocked 多于一个）时才说。原表写 `13:30-15:45`
+    的记录也是"时间区间"格式，但它只占 567 —— 对它说"跨到本时段"是假话，
+    上一版就犯过（凡是区间格式都加注解）。
     """
-    raw = (info or {}).get("time_raw") or ""
+    info = info or {}
+    if len(info.get("blocked") or []) < 2:
+        return ""
+    raw = info.get("time_raw") or ""
     return f"（该课原表时段为 {raw}，跨到本时段）" if parse_clock_range(raw) else ""
 
 
@@ -276,6 +283,7 @@ class RescheduleAgent:
                             "experiment": e.experiment,
                             "teacher": e.teacher or "",
                             "time_raw": e.time_raw or "",
+                            "blocked": list(e.blocked),
                         }
                     if teacher_name and e.teacher and teacher_name in e.teacher:
                         tk = f"{e.weekday}_{slot}"
@@ -285,6 +293,7 @@ class RescheduleAgent:
                                 "experiment": e.experiment,
                                 "teacher": e.teacher or teacher_name,
                                 "time_raw": e.time_raw or "",
+                                "blocked": list(e.blocked),
                             }
 
         # 时段看不懂、已被剔除的行：只知道"这一天这间教室/这个人在上课"，

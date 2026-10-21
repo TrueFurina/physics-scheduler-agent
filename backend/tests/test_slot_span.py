@@ -100,6 +100,23 @@ def test_exclusion_reason_points_back_to_the_original_cell():
     assert "14:00-17:00" in busy[0]["reason"]
 
 
+def test_note_is_not_added_when_the_record_does_not_cross_any_boundary():
+    """原表写 `13:30-15:45` 的记录也是"时间区间"格式，但它只占 567 ——
+    对它说"跨到本时段"是把话说重了（第一版凡是区间格式就加注解）。"""
+    db = ScheduleDatabase()
+    db.entries = [
+        ScheduleEntry(12, "周四", "567", "A班", "a1", "设计性实验", "A410", "林珠云",
+                      time_raw="13:30-15:45", blocked=["567"]),
+    ]
+    db.loaded = True
+    res = RescheduleAgent(db).find_slots_with_reasons(12, "林珠云")
+    busy = [x for x in res["excluded"]
+            if x["weekday"] == "周四" and x["time_slot"] == "567"
+            and x["reason_type"] == "teacher_busy"]
+    assert busy, "567 应该被教师本人挡住"
+    assert "跨到本时段" not in busy[0]["reason"]
+
+
 # ---------------------------------------------------------------------------
 # 3. 数据体检：跨节次重叠是真冲突，不能继续报 0
 # ---------------------------------------------------------------------------
