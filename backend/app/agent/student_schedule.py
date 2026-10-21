@@ -123,6 +123,26 @@ class StudentSchedule:
                     busy[weekday].add(slot)
         return busy
 
+    def get_busy_courses(self, target_week: int) -> Dict[str, Dict[str, List[str]]]:
+        """某周被占用的 (星期 → 时间段 → 课程名列表)
+
+        与 `get_busy_slots` 同源，区别是**保留课程名**：排除原因里写"学生该时段有课（高等数学A2）"
+        比写"（学生课表课程）"有用得多 —— 教秘要拿这个去跟教师解释为什么这个时段不行。
+        只返回课程名，不返回学生姓名/学号（那是越权项，这里没有暴露面）。
+        """
+        busy: Dict[str, Dict[str, List[str]]] = {}
+        for student in self.students:
+            for name, weekday, period, weeks_expr in student["courses"]:
+                if target_week not in self.parse_weeks(weeks_expr):
+                    continue
+                slot = self.period_to_slot(period)
+                if not slot or weekday not in ("周一", "周二", "周三", "周四", "周五", "周六", "周日"):
+                    continue
+                bucket = busy.setdefault(weekday, {}).setdefault(slot, [])
+                if name not in bucket:
+                    bucket.append(name)
+        return busy
+
     def is_student_busy(self, target_week: int, weekday: str, time_slot: str) -> bool:
         """检查学生在 (周, 星期, 时段) 是否有课"""
         busy = self.get_busy_slots(target_week)

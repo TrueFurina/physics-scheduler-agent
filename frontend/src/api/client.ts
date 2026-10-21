@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { AiPlan } from '../types';
 
 const API_BASE = '/api';
 
@@ -78,6 +79,8 @@ export interface ChatResponse {
     target_week?: number;
     available_slots?: AvailableSlot[];
     excluded_slots?: ExcludedSlot[];
+    /** 仅 fast=false 时后端会填（LLM 生成；LLM 不可用时后端规则降级给 3 个） */
+    ai_plans?: AiPlan[];
     total?: number;
     need_info?: boolean;
     followup_questions?: string[];

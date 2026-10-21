@@ -21,9 +21,27 @@ export interface ImpactResult {
   conflict_count: number;
   affected_classes: string[];
   affected_rooms: string[];
+  /** 占着那些教室的教师（真实姓名）。不是"被调课教师"——那个人在 self_busy_slots 里。 */
   affected_teachers: string[];
+  /** 学生课表里挡路的课程名（后端能取到就填课程名，取不到才退回占位文案）。 */
   affected_students: string[];
+  /** 调课教师**本人**在该时段已有课（自身冲突），语义上不是"别人受影响"，故单列。 */
+  self_busy_count?: number;
+  self_busy_slots?: Array<{
+    weekday: string;
+    time_slot: string;
+    class_name: string;
+    experiment: string;
+  }>;
   conflict_slots: any[];
+}
+
+/** `/chat`（fast=false）返回的 AI 候选方案。沙盘与它并行加载，互不阻塞。 */
+export interface AiPlan {
+  weekday: string;
+  time_slot: string;
+  room: string;
+  reason?: string;
 }
 
 /** `/parallel/overview` 里的一门课。 */

@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { AvailableSlot, ExcludedSlot, TeacherCourse } from '../api/client';
-import type { ImpactResult } from '../types';
+import type { ImpactResult, AiPlan } from '../types';
 import { GRID_TIME_SLOTS, WEEKDAYS, timeSlotLabels, weekdayLabels } from '../constants/labels';
 
 interface Props {
@@ -14,6 +14,9 @@ interface Props {
   impactLoading: boolean;
   requestStatus: string;
   loading: boolean;
+  /** AI 候选方案（后台加载）：到达前 planLoading 为真，显示"正在挑"占位 */
+  aiPlans?: AiPlan[];
+  planLoading?: boolean;
   onBack: () => void;
   onTargetWeekChange: (week: number) => void;
   onToggleShowAll: () => void;
@@ -24,7 +27,7 @@ interface Props {
 /** 页面3：调课结果（F3/F4）—— 周沙盘 + 可用/排除时段 + 影响分析 + 提交。 */
 export default function RescheduleView({
   selectedCourse, currentTeacher, targetWeek, available, excluded, showAllAvail,
-  impact, impactLoading, requestStatus, loading,
+  impact, impactLoading, requestStatus, loading, aiPlans = [], planLoading = false,
   onBack, onTargetWeekChange, onToggleShowAll, onImpactAnalysis, onSubmit,
 }: Props) {
   return (
@@ -149,6 +152,38 @@ export default function RescheduleView({
         )}
       </div>
 
+      {/* AI 候选方案（F9）—— 后台加载，通常晚于沙盘 5 秒以上，故有独立占位 */}
+      {(planLoading || aiPlans.length > 0) && (
+        <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
+          <h3 className="font-medium text-indigo-800 mb-1">🤖 AI 推荐候选方案</h3>
+          <p className="text-xs text-gray-400 mb-3">
+            从 {available.length} 个可用时段里挑几个更合适的 —— 只是建议，上面所有可用时段都能选
+          </p>
+          {planLoading && aiPlans.length === 0 ? (
+            <div className="flex items-center gap-2 text-sm text-gray-400 py-2">
+              <span className="w-4 h-4 border-2 border-indigo-200 border-t-indigo-500 rounded-full animate-spin" />
+              正在从可用时段里挑候选…
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-3">
+              {aiPlans.slice(0, 3).map((p, i) => (
+                <div
+                  key={`${p.weekday}-${p.time_slot}-${p.room}`}
+                  className="bg-indigo-50 border border-indigo-100 rounded-lg p-3"
+                >
+                  <div className="text-xs text-indigo-500 mb-1">方案 {i + 1}</div>
+                  <div className="text-sm font-medium text-gray-800">
+                    {weekdayLabels[p.weekday] || p.weekday} {timeSlotLabels[p.time_slot] || p.time_slot}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5">{p.room}</div>
+                  {p.reason && <div className="text-xs text-indigo-600 mt-1.5">{p.reason}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 冲突影响分析（差异化功能） */}
       <div className="bg-white rounded-xl border border-orange-200 p-5 mb-6">
         <h3 className="font-medium text-orange-800 mb-2">🎯 冲突影响分析</h3>
@@ -168,6 +203,28 @@ export default function RescheduleView({
             <div className="text-sm font-medium text-gray-800">
               共 {impact.conflict_count} 处冲突
             </div>
+            {/*
+              自身冲突必须单列：它和"受影响班级/教室/教师"是两件事。
+              以前后端把 teacher_busy（本人该时段已有课）的班级名塞进了「受影响教师」，
+              于是教秘看到"受影响教师：2024级应用化学1、2班"——一个班级出现在教师栏里。
+              现在后端给结构化字段，这里按语义分开展示。
+            */}
+            {impact.self_busy_count ? (
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-3">
+                <div className="text-xs font-medium text-orange-700 mb-1">
+                  🙋 您本人在这些时段已有课（{impact.self_busy_count} 处）
+                </div>
+                <div className="text-sm text-orange-600 space-y-0.5">
+                  {impact.self_busy_slots?.map((s, i) => (
+                    <div key={i}>
+                      {weekdayLabels[s.weekday]} {(timeSlotLabels[s.time_slot] || s.time_slot)}
+                      {s.class_name && <span className="text-orange-500"> · {s.class_name}</span>}
+                      {s.experiment && <span className="text-orange-400"> {s.experiment}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {impact.affected_classes.length > 0 && (
               <div className="bg-red-50 border border-red-200 rounded-lg p-3">
                 <div className="text-xs font-medium text-red-700 mb-1">🏫 受影响班级（教室被占用）</div>
@@ -182,13 +239,13 @@ export default function RescheduleView({
             )}
             {impact.affected_teachers.length > 0 && (
               <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
-                <div className="text-xs font-medium text-purple-700 mb-1">👨‍🏫 受影响教师</div>
+                <div className="text-xs font-medium text-purple-700 mb-1">👨‍🏫 相关教师（该时段在用这些教室）</div>
                 <div className="text-sm text-purple-600">{impact.affected_teachers.join('、')}</div>
               </div>
             )}
             {impact.affected_students.length > 0 && (
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <div className="text-xs font-medium text-blue-700 mb-1">🎓 受影响学生课表</div>
+                <div className="text-xs font-medium text-blue-700 mb-1">🎓 学生课表已有课程</div>
                 <div className="text-sm text-blue-600">{impact.affected_students.join('、')}</div>
               </div>
             )}

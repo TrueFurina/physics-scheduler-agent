@@ -11,7 +11,7 @@ import {
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
 import ErrorBoundary from './components/ErrorBoundary';
-import type { View, ImpactResult } from './types';
+import type { View, ImpactResult, AiPlan } from './types';
 import IdentityView from './views/IdentityView';
 import CoursesView from './views/CoursesView';
 import RescheduleView from './views/RescheduleView';
@@ -73,6 +73,12 @@ function App() {
   const [parallelSolving, setParallelSolving] = useState(false);  // 求解中
   const [parallelResult, setParallelResult] = useState<any>(null);  // 求解结果
   const [parallelSelected, setParallelSelected] = useState('');  // 当前选中课程
+  // AI 候选方案（B3/F9）：与沙盘分开加载——沙盘要立刻出现，候选方案可以后到。
+  // PRD 验收标准与演示脚本都承诺"显示 AI 候选方案"，但历史上前端从未渲染过它。
+  const [aiPlans, setAiPlans] = useState<AiPlan[]>([]);
+  const [plansLoading, setPlansLoading] = useState(false);
+  const plansSeqRef = useRef(0);      // 请求序号：旧响应晚到就丢弃，避免切周次后串台
+  const plansTimerRef = useRef<number | null>(null);  // 切周次的防抖（连点只发最后一次）
 
   // ---- 云服务：登录态 ----
   const [session, setSession] = useState<any>(null);        // 云登录会话（null = 未登录）
@@ -455,6 +461,10 @@ function App() {
       setSelectedCourse(null);
       setAvailable([]);
       setExcluded([]);
+      // 换教师必须作废上一轮的候选方案：在途请求靠序号丢弃，已到的一并清掉
+      plansSeqRef.current += 1;
+      setAiPlans([]);
+      setPlansLoading(false);
       setView('courses');
     } catch (err: any) {
       setMsg(`加载课程失败：${err.response?.data?.detail || err.message}`);
@@ -463,16 +473,60 @@ function App() {
     }
   };
 
+  // AI 候选方案（后台加载，不阻塞沙盘）
+  //
+  // 为什么单独拉一次而不是首屏直接要：`fast=false` 会走 LLM 生成候选（实测 7.6s），
+  // 而沙盘本身只需要规则解析的结果（25ms）。把这两件事绑在一个请求里，等于让教秘
+  // 为一张加分卡片等 7.6 秒；拆开之后首屏 25ms，候选方案晚到就晚到。
+  //
+  // 失败一律静默：候选方案是加分项，LLM 不可用时后端还会规则降级给 3 个候选；
+  // 真的什么都没有也不该在教秘面前弹红字（沙盘和"提交"仍然可用）。
+  const fetchAiPlans = async (course: TeacherCourse, week: number, seq: number) => {
+    try {
+      const r = await rescheduleApi.chat(
+        `我是${currentTeacher}，把${course.course_name}调到第${week}周`,
+        false,
+      );
+      if (seq !== plansSeqRef.current) return;  // 已被更晚的选择取代
+      setAiPlans(r.data.data.ai_plans || []);
+    } catch {
+      if (seq === plansSeqRef.current) setAiPlans([]);
+    } finally {
+      if (seq === plansSeqRef.current) setPlansLoading(false);
+    }
+  };
+
+  const scheduleAiPlans = (course: TeacherCourse, week: number) => {
+    if (plansTimerRef.current !== null) window.clearTimeout(plansTimerRef.current);
+    const seq = ++plansSeqRef.current;
+    // 切周次时先清空：上一周的候选留在屏幕上，比没有更糟（会被当成这一周的答案）
+    setAiPlans([]);
+    setPlansLoading(true);
+    plansTimerRef.current = window.setTimeout(() => {
+      plansTimerRef.current = null;
+      void fetchAiPlans(course, week, seq);
+    }, 350);
+  };
+
+  // 定时器随组件卸载清理（否则关页面后仍可能 setState）
+  useEffect(() => () => {
+    if (plansTimerRef.current !== null) window.clearTimeout(plansTimerRef.current);
+  }, []);
+
   // F3/F4: 模板表单选择课程 + 目标周次 → 查询可用时段（含原因标注）
-  // fast=true 时跳过 LLM 候选方案（沙盘秒回）；首次/手动查候选时 fast=false
-  const handleReschedule = async (course: TeacherCourse, week?: number, fast: boolean = false) => {
+  //
+  // ⚠️ 首屏**恒用 fast=true**（规则解析，实测 25ms）。历史实现首屏传 fast=false，
+  // 于是教秘点「申请调课 →」后要白等一次 LLM 调用（本地实测 7.63s，305 倍差距），
+  // 而换来的 `ai_plans` **界面上根本没渲染** —— 白等且白烧额度。
+  // 现在拆成两段：沙盘立刻出来（fast=true），AI 候选方案后台补（见 scheduleAiPlans）。
+  const handleReschedule = async (course: TeacherCourse, week?: number) => {
     setSelectedCourse(course);
     setLoading(true);
+    const target = week ?? targetWeek;
     try {
-      const target = week ?? targetWeek;
       const r = await rescheduleApi.chat(
         `我是${currentTeacher}，把${course.course_name}调到第${target}周`,
-        fast
+        true,
       );
       setAvailable(r.data.data.available_slots || []);
       setExcluded(r.data.data.excluded_slots || []);
@@ -482,13 +536,14 @@ function App() {
     } finally {
       setLoading(false);
     }
+    scheduleAiPlans(course, target);
   };
 
   // 模板表单：更改目标周次后重新查询（fast 模式——秒回沙盘，不等待 LLM 候选方案）
   const handleTargetWeekChange = (week: number) => {
     setTargetWeek(week);
     if (selectedCourse) {
-      handleReschedule(selectedCourse, week, true);  // fast=true 跳过 LLM
+      handleReschedule(selectedCourse, week);
     }
   };
 
@@ -552,6 +607,9 @@ function App() {
 
   // 返回身份选择
   const handleBackToIdentity = () => {
+    plansSeqRef.current += 1;
+    setAiPlans([]);
+    setPlansLoading(false);
     setView('identity');
     setCurrentTeacher('');
     setCourses([]);
@@ -935,6 +993,8 @@ function App() {
               impactLoading={impactLoading}
               requestStatus={requestStatus}
               loading={loading}
+              aiPlans={aiPlans}
+              planLoading={plansLoading}
               onBack={() => setView('courses')}
               onTargetWeekChange={handleTargetWeekChange}
               onToggleShowAll={() => setShowAllAvail(!showAllAvail)}

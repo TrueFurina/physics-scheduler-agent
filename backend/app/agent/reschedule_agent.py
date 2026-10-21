@@ -219,6 +219,7 @@ class RescheduleAgent:
                     occupied_info[key] = {
                         "class_name": e.class_name,
                         "experiment": e.experiment,
+                        "teacher": e.teacher or "",
                     }
                 if teacher_name and e.teacher and teacher_name in e.teacher:
                     tk = f"{e.weekday}_{e.time_slot}"
@@ -226,14 +227,27 @@ class RescheduleAgent:
                         teacher_occupied[tk] = {
                             "class_name": e.class_name,
                             "experiment": e.experiment,
+                            "teacher": e.teacher or teacher_name,
                         }
 
-        # 学生忙碌时段：{weekday: {time_slot: 课程名}}
+        # 学生忙碌时段：{weekday: {time_slot: 课程名文案}}
+        # 优先用"带课程名"的查询（教秘要拿课程名去跟教师解释）；取不到时退回占位文案，
+        # 但**绝不因为取不到名字就放行**——冲突判定仍然以 get_busy_slots 为准。
         student_busy = {}
+        student_busy_courses: Dict[str, Dict[str, list]] = {}
         if self.student:
             busy = self.student.get_busy_slots(target_week)
+            get_names = getattr(self.student, "get_busy_courses", None)
+            if callable(get_names):
+                try:
+                    student_busy_courses = get_names(target_week) or {}
+                except Exception:
+                    student_busy_courses = {}
             for wd, slots in busy.items():
-                student_busy[wd] = {s: "学生课表课程" for s in slots}
+                student_busy[wd] = {}
+                for s in slots:
+                    names = student_busy_courses.get(wd, {}).get(s) or []
+                    student_busy[wd][s] = "、".join(names) if names else "学生课表课程"
 
         available = []
         excluded = []
@@ -246,7 +260,13 @@ class RescheduleAgent:
                         "weekday": wd, "time_slot": ts, "room": "",
                         "date": week_to_date(target_week, wd, self._get_semester_start()),
                         "reason_type": "teacher_busy",
-                        "reason": f"教师该时段已有课（{info['class_name']} {info['experiment']}）",
+                        # 结构化字段与中文文案并列给出。**下游不要再用正则从 reason 里反解**：
+                        # 文案是给人看的，改一个字（比如换个括号）就会静默解析失败。
+                        "class_name": info["class_name"],
+                        "experiment": info["experiment"],
+                        "teacher": info["teacher"],
+                        "reason": f"您（{info['teacher']}）该时段已有课："
+                                  f"{info['class_name']} {info['experiment']}",
                     })
                     continue
                 for rm in rooms:
@@ -257,6 +277,9 @@ class RescheduleAgent:
                             "weekday": wd, "time_slot": ts, "room": rm,
                             "date": week_to_date(target_week, wd, self._get_semester_start()),
                             "reason_type": "classroom_busy",
+                            "class_name": info["class_name"],
+                            "experiment": info["experiment"],
+                            "teacher": info["teacher"],
                             "reason": f"教室已被占用（{info['class_name']} {info['experiment']}）",
                         })
                         continue
@@ -268,6 +291,7 @@ class RescheduleAgent:
                                 "weekday": wd, "time_slot": ts, "room": rm,
                                 "date": week_to_date(target_week, wd, self._get_semester_start()),
                                 "reason_type": "student_busy",
+                                "courses": student_busy_courses.get(wd, {}).get(check_ts) or [],
                                 "reason": f"学生该时段有课（{student_busy[wd][check_ts]}）",
                             })
                             continue

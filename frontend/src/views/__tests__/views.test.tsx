@@ -203,6 +203,66 @@ describe('RescheduleView', () => {
     expect(screen.queryByRole('button', { name: /提交调课申请/ })).toBeNull();
     expect(screen.getByText(/等待管理员审批/)).toBeTruthy();
   });
+
+  it('自身冲突单列，不混进「相关教师」（班级名不得出现在教师栏）', () => {
+    render(
+      <RescheduleView
+        {...baseProps}
+        impact={{
+          conflict_count: 3,
+          affected_classes: ['24软件1班'],
+          affected_rooms: ['A101'],
+          affected_teachers: ['陈老师'],
+          affected_students: ['高等数学A2'],
+          self_busy_count: 1,
+          self_busy_slots: [
+            { weekday: '周二', time_slot: '567', class_name: '24电子1班', experiment: '示波器的使用' },
+          ],
+          conflict_slots: [],
+        }}
+      />,
+    );
+    expect(screen.getByText(/您本人在这些时段已有课（1 处）/)).toBeTruthy();
+    // 自身冲突的班级只出现在自身冲突卡里
+    expect(screen.getAllByText(/24电子1班/).length).toBe(1);
+    // 教师栏里是教师姓名，班级名不许越界
+    expect(screen.getByText('陈老师')).toBeTruthy();
+  });
+
+  it('没有自身冲突时不渲染自身冲突卡（0 不能被当成"有"）', () => {
+    render(
+      <RescheduleView
+        {...baseProps}
+        impact={{
+          conflict_count: 1, affected_classes: [], affected_rooms: [], affected_teachers: [],
+          affected_students: [], self_busy_count: 0, self_busy_slots: [], conflict_slots: [],
+        }}
+      />,
+    );
+    expect(screen.queryByText(/您本人在这些时段已有课/)).toBeNull();
+  });
+
+  it('AI 候选方案：加载中给占位，到货后渲染方案与理由（PRD F9 的画面）', () => {
+    const plans = [
+      { weekday: '周一', time_slot: '567', room: 'A503', reason: '该时段教室空闲且学生无课' },
+      { weekday: '周三', time_slot: '91011', room: 'A516', reason: '与教师其他课程间隔充足' },
+    ];
+    const { rerender } = render(<RescheduleView {...baseProps} planLoading />);
+    expect(screen.getByText(/正在从可用时段里挑候选/)).toBeTruthy();
+    expect(screen.queryByText(/方案 1/)).toBeNull();
+
+    rerender(<RescheduleView {...baseProps} planLoading={false} aiPlans={plans} />);
+    expect(screen.getByText(/AI 推荐候选方案/)).toBeTruthy();
+    expect(screen.getByText(/方案 1/)).toBeTruthy();
+    expect(screen.getByText(/方案 2/)).toBeTruthy();
+    expect(screen.getByText('A503')).toBeTruthy();
+    expect(screen.getByText(/该时段教室空闲且学生无课/)).toBeTruthy();
+  });
+
+  it('既没加载也没候选时不渲染候选区块（不占位、不留空标题）', () => {
+    render(<RescheduleView {...baseProps} planLoading={false} aiPlans={[]} />);
+    expect(screen.queryByText(/AI 推荐候选方案/)).toBeNull();
+  });
 });
 
 describe('ParallelView', () => {

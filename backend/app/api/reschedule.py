@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.reschedule_agent import RescheduleAgent
@@ -203,11 +204,19 @@ async def upload_schedule(file: UploadFile = File(...)):
 @router.post("/chat", response_model=ChatResponse, summary="教师调课咨询",
              dependencies=[Depends(rate_limit("chat"))])
 async def reschedule_chat(req: ChatRequest):
-    """教师输入调课请求，返回可用时段"""
+    """教师输入调课请求，返回可用时段
+
+    ⚠️ 这里必须 `run_in_threadpool`：`process_request` 在 LLM 可用时会**同步**发起
+    HTTP 请求（生成 AI 候选方案，实测 7.6s）。直接在 `async def` 里调用会把整个
+    事件循环冻住 —— 实测并发期间 `/stats`（平时 4ms）被拖到 8.67s，也就是**一个人
+    点"申请调课"，全站所有人一起卡 8 秒**，连 `/health` 探活都不响应。
+    丢到线程池后，慢的只是这一个请求。
+    """
     if not req.message.strip():
         return ChatResponse(success=False, message="请输入调课请求")
 
-    result = _agent.process_request(req.message, with_ai=not req.fast)
+    result = await run_in_threadpool(_agent.process_request, req.message,
+                                     with_ai=not req.fast)
     return ChatResponse(
         success=result["success"],
         message=result["message"],
@@ -372,7 +381,8 @@ async def load_default():
     免鉴权（教秘主路径），但它会**整表重解析**，属单请求真开销接口，
     故挂限流；`_ensure_loaded()` 的自愈是进程内直调，不经过本路由、不受影响。
     """
-    msg, total = _load_default_schedule()
+    # 冷启动时这是 433 行 Excel 的整表解析（本地 ~1s，冷沙箱 3.8s）——同样不能占着事件循环
+    msg, total = await run_in_threadpool(_load_default_schedule)
     return {"success": True, "message": msg, "total_entries": total}
 
 
@@ -413,7 +423,8 @@ async def course_select_consult(req: ConsultRequest):
         f"当前学生：{_student.name}（{_student.semester}），课表共 {len(_student.courses)} 门课程。\n"
         + _build_knowledge_context()
     )
-    result = _agent.llm_parser.consult(req.question, context=context, role="course_select")
+    result = await run_in_threadpool(_agent.llm_parser.consult, req.question,
+                                     context=context, role="course_select")
 
     if "error" in result:
         return ConsultResponse(success=False, message=result["error"])
@@ -429,7 +440,8 @@ async def experiment_tutor_consult(req: ConsultRequest):
 
     # 实验辅导基于实验知识源上下文
     context = _build_knowledge_context()
-    result = _agent.llm_parser.consult(req.question, context=context, role="experiment_tutor")
+    result = await run_in_threadpool(_agent.llm_parser.consult, req.question,
+                                     context=context, role="experiment_tutor")
 
     if "error" in result:
         return ConsultResponse(success=False, message=result["error"])
@@ -491,12 +503,18 @@ async def parallel_overview():
 @router.post("/parallel/solve", summary="并行排课-一键求解（访谈核心需求）",
              dependencies=[Depends(rate_limit("parallel-solve"))])
 async def parallel_solve(req: ParallelSolveRequest):
-    """并行排课：一门课全部实验项目×学生组别，CP-SAT 一键统一分配（周次/时段/场地）"""
+    """并行排课：一门课全部实验项目×学生组别，CP-SAT 一键统一分配（周次/时段/场地）
+
+    求解是 CPU 密集且同步（实测首次 0.9–1.7s）—— 放线程池，别让一键排课把
+    同一时刻在刷沙盘/看板的人一起冻住。
+    """
     _ensure_loaded()
     from app.engine.parallel_scheduler import ParallelScheduler
     ps = ParallelScheduler(_db, student=_student)
-    result = ps.solve(req.class_name, weekday=req.weekday,
-                      start_week=req.start_week, weeks=req.weeks)
+    result = await run_in_threadpool(
+        ps.solve, req.class_name,
+        weekday=req.weekday, start_week=req.start_week, weeks=req.weeks,
+    )
     return result
 
 
@@ -676,32 +694,43 @@ async def impact_analysis(req: ChatRequest):
     excluded = result["excluded"]
 
     # 聚合影响范围
+    #
+    # ⚠️ 这里**不允许**再从 `reason` 文案里正则反解字段（历史实现用
+    # `re.search(r"（([^）]+) ", e["reason"])` 捞括号内容，结果把班级名塞进了
+    # 「受影响教师」——因为 teacher_busy 的文案里本来就没有教师名）。
+    # 文案是给人读的，改个标点就静默解析失败；数据必须来自结构化字段。
     affected_classes = set()      # 受影响班级（教室被占）
     affected_rooms = set()        # 受影响教室
-    affected_teachers = set()     # 受影响教师（教师时间冲突）
-    affected_students = set()     # 受影响学生课表
+    affected_teachers = set()     # 受影响教师（占着那间教室的教师）
+    affected_students = set()     # 学生课表里被占用的课程
+    self_busy = []                # 教师本人该时段已有课 —— 是「自身冲突」，不是「别人受影响」
     conflict_slots = []
 
     for e in excluded:
+        reason_type = e.get("reason_type", "")
         conflict_slots.append({
             "weekday": e["weekday"], "time_slot": e["time_slot"],
             "room": e.get("room", ""), "date": e.get("date", ""),
-            "reason_type": e["reason_type"], "reason": e["reason"],
+            "reason_type": reason_type, "reason": e["reason"],
         })
-        if e["reason_type"] == "classroom_busy":
+        if reason_type == "classroom_busy":
             affected_rooms.add(e.get("room", ""))
-            # 从原因中提取班级名（"教室已被占用（XX班 ...）"）
-            import re
-            m = re.search(r"（([^）]+) ", e["reason"])
-            if m:
-                affected_classes.add(m.group(1))
-        elif e["reason_type"] == "teacher_busy":
-            import re
-            m = re.search(r"（([^）]+) ", e["reason"])
-            if m:
-                affected_teachers.add(m.group(1))
-        elif e["reason_type"] == "student_busy":
-            affected_students.add("学生课表（该时段有课）")
+            if e.get("class_name"):
+                affected_classes.add(e["class_name"])
+            if e.get("teacher"):
+                affected_teachers.add(e["teacher"])
+        elif reason_type == "teacher_busy":
+            self_busy.append({
+                "weekday": e["weekday"], "time_slot": e["time_slot"],
+                "class_name": e.get("class_name", ""),
+                "experiment": e.get("experiment", ""),
+            })
+        elif reason_type == "student_busy":
+            courses = [c for c in (e.get("courses") or []) if c]
+            if courses:
+                affected_students.update(courses)
+            else:
+                affected_students.add("学生课表（该时段有课）")
 
     return {
         "success": True,
@@ -713,6 +742,8 @@ async def impact_analysis(req: ChatRequest):
             "affected_rooms": sorted(r for r in affected_rooms if r),
             "affected_teachers": sorted(t for t in affected_teachers if t),
             "affected_students": sorted(affected_students),
+            "self_busy_count": len(self_busy),
+            "self_busy_slots": self_busy[:5],
             "conflict_slots": conflict_slots[:10],
         },
     }
@@ -726,7 +757,7 @@ async def auto_schedule():
 
     from app.engine.auto_scheduler import AutoScheduler
     scheduler = AutoScheduler(_db, student=_student)
-    result = scheduler.solve(max_sections=30)
+    result = await run_in_threadpool(scheduler.solve, max_sections=30)
 
     # 定位说明：自动排课是"辅助初稿生成"，非替代学校已排定的完整安排表
     real_entries = len(_db.entries)
