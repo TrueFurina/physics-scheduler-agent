@@ -231,8 +231,11 @@ def test_demo_pace_is_not_throttled(monkeypatch):
     """演示节奏不变量：阈值放宽后，连续 50 次**受限接口**调用必须全部 200。
 
     注意必须打真正挂了限流的接口（`/chat`），打 `/status` 这种没挂闸门的
-    接口是测不出东西的；同时用能被规则解析出周次的文本（"第六周"），
+    接口是测不出东西的；同时用**规则能解析出教师与周次**的文本（"我是吴琳…第六周"），
     保证用例本身廉价可控、不触发 LLM。
+
+    > 教师是必需槽位（B2 多轮追问修正后）：只说"第六周"会走追问分支返回
+    > 「需要补充信息」，那条断言就会误报，测的也不再是限流。
 
     防的是"为了过限流测试而把阈值调到 1"这种反向优化。
     """
@@ -246,7 +249,7 @@ def test_demo_pace_is_not_throttled(monkeypatch):
     per_client = RULES["chat"][0]
     assert per_client >= 60, "chat 阈值低于 60/分钟会开始影响正常演示"
 
-    payload = {"message": "第六周", "fast": True}
+    payload = {"message": "我是吴琳，第六周的课上不了", "fast": True}
     for i in range(50):
         r = client.post("/api/reschedule/chat", json=payload)
         assert r.status_code == 200, f"第 {i+1} 次受限接口调用被误伤：{r.status_code}"

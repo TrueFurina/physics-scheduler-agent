@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan } from '../types';
+import type { AiPlan, NlSlotContext } from '../types';
 
 const API_BASE = '/api';
 
@@ -84,6 +84,8 @@ export interface ChatResponse {
     total?: number;
     need_info?: boolean;
     followup_questions?: string[];
+    /** 本轮已确认的槽位；下一轮请求原样带回，后端做无状态合并（多轮追问） */
+    context?: NlSlotContext;
   };
 }
 
@@ -179,8 +181,9 @@ export const rescheduleApi = {
     api.get<{ success: boolean; teacher: string; courses: TeacherCourse[]; total: number }>(`/reschedule/teachers/${encodeURIComponent(teacherName)}/courses`),
 
   // 调课咨询（fast=true 时跳过 LLM 候选方案，秒回沙盘数据）
-  chat: (message: string, fast: boolean = false) =>
-    api.post<ChatResponse>('/reschedule/chat', { message, fast }),
+  // `context` 是上一轮响应回传的槽位（多轮追问），后端据此补全本轮没说全的信息。
+  chat: (message: string, fast: boolean = false, context?: NlSlotContext | null) =>
+    api.post<ChatResponse>('/reschedule/chat', context ? { message, fast, context } : { message, fast }),
 
   // 提交调课申请（F6）
   createRequest: (data: {

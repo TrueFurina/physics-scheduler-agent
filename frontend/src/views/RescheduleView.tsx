@@ -4,7 +4,16 @@ import type { ImpactResult, AiPlan } from '../types';
 import { GRID_TIME_SLOTS, WEEKDAYS, timeSlotLabels, weekdayLabels } from '../constants/labels';
 
 interface Props {
-  selectedCourse: TeacherCourse;
+  /**
+   * 当前要调的课程。**允许为 null**：沙盘算的是"这一周还有哪些时段空着"，
+   * 这件事只跟教师/周次有关，与具体哪门课无关（`find_slots_with_reasons` 根本不收课程）。
+   * 自然语言路径未必能唯一确定课程（没提课程名，或同名实验挂在多个班下），
+   * 过去是"没有课程就整页不渲染" ⇒ 解析成功却白屏。现在降级成可选项，由下拉补选。
+   */
+  selectedCourse: TeacherCourse | null;
+  /** 可补选的课程（自然语言未唯一确定课程时用） */
+  courseOptions?: TeacherCourse[];
+  onSelectCourse?: (course: TeacherCourse) => void;
   currentTeacher: string;
   targetWeek: number;
   available: AvailableSlot[];
@@ -26,10 +35,12 @@ interface Props {
 
 /** 页面3：调课结果（F3/F4）—— 周沙盘 + 可用/排除时段 + 影响分析 + 提交。 */
 export default function RescheduleView({
-  selectedCourse, currentTeacher, targetWeek, available, excluded, showAllAvail,
+  selectedCourse, courseOptions = [], onSelectCourse,
+  currentTeacher, targetWeek, available, excluded, showAllAvail,
   impact, impactLoading, requestStatus, loading, aiPlans = [], planLoading = false,
   onBack, onTargetWeekChange, onToggleShowAll, onImpactAnalysis, onSubmit,
 }: Props) {
+  const courseLabel = selectedCourse ? selectedCourse.course_name : '未指定课程';
   return (
     <div>
       <button
@@ -41,12 +52,37 @@ export default function RescheduleView({
 
       <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200 mb-6">
         <h2 className="font-semibold text-gray-900">调课申请 · 模板表单</h2>
-        <div className="text-sm text-gray-600 mt-2">
-          课程：{selectedCourse.course_name}（{selectedCourse.class_name}）
-        </div>
-        <div className="text-sm text-gray-600 mt-1">
-          原时间：{selectedCourse.original_time} · {selectedCourse.room} · {selectedCourse.week_range}
-        </div>
+        {selectedCourse ? (
+          <>
+            <div className="text-sm text-gray-600 mt-2">
+              课程：{selectedCourse.course_name}（{selectedCourse.class_name}）
+            </div>
+            <div className="text-sm text-gray-600 mt-1">
+              原时间：{selectedCourse.original_time} · {selectedCourse.room} · {selectedCourse.week_range}
+            </div>
+          </>
+        ) : (
+          <div className="mt-2">
+            <div className="text-sm text-amber-700">
+              自然语言没说清是哪门课（或同名课挂在多个班下），请确认要调整的课程：
+            </div>
+            <select
+              value=""
+              onChange={(e) => {
+                const c = courseOptions.find((x) => `${x.course_name}|${x.class_name}` === e.target.value);
+                if (c && onSelectCourse) onSelectCourse(c);
+              }}
+              className="mt-2 w-full max-w-md px-3 py-2 border border-amber-300 bg-amber-50 rounded-lg text-sm focus:ring-2 focus:ring-amber-400 outline-none"
+            >
+              <option value="">— 选择课程（共 {courseOptions.length} 个可选）—</option>
+              {courseOptions.map((c) => (
+                <option key={`${c.course_name}|${c.class_name}`} value={`${c.course_name}|${c.class_name}`}>
+                  {c.course_name}（{c.class_name}）
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="flex items-center gap-3 mt-4">
           <label className="text-sm text-gray-600">目标周次：</label>
           <select
@@ -188,15 +224,20 @@ export default function RescheduleView({
       <div className="bg-white rounded-xl border border-orange-200 p-5 mb-6">
         <h3 className="font-medium text-orange-800 mb-2">🎯 冲突影响分析</h3>
         <p className="text-sm text-gray-600 mb-3">
-          查看把「{selectedCourse.course_name}」调到第{targetWeek}周，会影响到哪些班级、教室和教师
+          查看把「{courseLabel}」调到第{targetWeek}周，会影响到哪些班级、教室和教师
         </p>
         <button
           onClick={onImpactAnalysis}
-          disabled={impactLoading}
+          // 影响分析的后端入参里带课程名；没有课程时 App 层直接 return，
+          // 按钮可点却毫无反应是最难查的一类"故障"（不报错、不提示）。
+          disabled={impactLoading || !selectedCourse}
           className="px-5 py-2.5 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 text-sm font-medium transition-colors"
         >
           {impactLoading ? '⏳ 分析中...' : '分析影响范围'}
         </button>
+        {!selectedCourse && (
+          <span className="ml-3 text-xs text-amber-600">请先选择要调整的课程</span>
+        )}
 
         {impact && (
           <div className="mt-4 space-y-3">
@@ -279,20 +320,27 @@ export default function RescheduleView({
       <div className="bg-white rounded-xl border border-blue-200 p-5 mb-6">
         <h3 className="font-medium text-blue-800 mb-2">📋 确认提交调课申请</h3>
         <p className="text-sm text-gray-600 mb-4">
-          {currentTeacher} · {selectedCourse.course_name} → 第{targetWeek}周（提交后由管理员审批）
+          {currentTeacher} · {courseLabel} → 第{targetWeek}周（提交后由管理员审批）
         </p>
         {requestStatus ? (
           <div className="text-sm px-4 py-3 bg-green-50 border border-green-200 text-green-700 rounded-lg">
             {requestStatus}
           </div>
         ) : (
-          <button
-            onClick={onSubmit}
-            disabled={loading}
-            className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium transition-colors"
-          >
-            {loading ? '提交中...' : '提交调课申请'}
-          </button>
+          // 没确定课程就不许提交：提交会把 course_name/class_name/原时间写进云端工单，
+          // 空字段进去就成了脏数据，审批台上也看不出要调哪门课。
+          <div>
+            <button
+              onClick={onSubmit}
+              disabled={loading || !selectedCourse}
+              className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium transition-colors"
+            >
+              {loading ? '提交中...' : '提交调课申请'}
+            </button>
+            {!selectedCourse && (
+              <span className="ml-3 text-xs text-amber-600">请先在上方选择要调整的课程</span>
+            )}
+          </div>
         )}
       </div>
     </div>

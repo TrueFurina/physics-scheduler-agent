@@ -11,7 +11,7 @@ import {
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
 import ErrorBoundary from './components/ErrorBoundary';
-import type { View, ImpactResult, AiPlan } from './types';
+import type { View, ImpactResult, AiPlan, NlSlotContext } from './types';
 import IdentityView from './views/IdentityView';
 import CoursesView from './views/CoursesView';
 import RescheduleView from './views/RescheduleView';
@@ -53,6 +53,11 @@ function App() {
   const [requests, setRequests] = useState<RescheduleRequest[]>([]);  // 审批台申请列表
   const [nlInput, setNlInput] = useState('');  // 自然语言调课输入
   const [followupQ, setFollowupQ] = useState<string[]>([]);  // 多轮追问问题
+  // 多轮追问的槽位（B2）：后端不存会话，由前端每轮带回，服务端无状态合并。
+  // 自然语言说到的课程名：同名跨班时用它把下拉从"13 门里挑"收窄成"这几个班挑"
+  const [courseHint, setCourseHint] = useState('');
+  // 多轮追问的槽位（B2）：后端不存会话，由前端每轮带回，服务端无状态合并。
+  const [nlContext, setNlContext] = useState<NlSlotContext | null>(null);
   const [nlMsg, setNlMsg] = useState('');  // 自然语言反馈消息
   const [consultQ, setConsultQ] = useState('');  // 选课/辅导咨询输入
   const [consultMsg, setConsultMsg] = useState('');  // 咨询回复
@@ -461,6 +466,12 @@ function App() {
       setSelectedCourse(null);
       setAvailable([]);
       setExcluded([]);
+      // 换教师 = 换会话：上一轮的追问槽位（含"我是吴琳"）必须清掉，否则会把
+      // 上一个老师的身份合并进新老师的调课请求里。
+      setNlContext(null);
+      setFollowupQ([]);
+      setNlMsg('');
+      setCourseHint('');
       // 换教师必须作废上一轮的候选方案：在途请求靠序号丢弃，已到的一并清掉
       plansSeqRef.current += 1;
       setAiPlans([]);
@@ -572,28 +583,81 @@ function App() {
     }
   };
 
+  // 把后端识别出的课程名/班级回找成课程卡片。
+  // 同一门实验会挂在多个班级下（实测"扭摆法测物体转动惯量"就有两个班），
+  // 这时**不猜** —— 返回 null，由沙盘里的课程下拉交给教秘确认：
+  // 猜错的代价是把 A 班的课按 B 班提交上去。
+  const pickCourseFromContext = (ctx: NlSlotContext): TeacherCourse | null => {
+    const adjustable = courses.filter((c) => c.adjustable);
+    if (ctx.course_name) {
+      let hits = adjustable.filter((c) => c.course_name === ctx.course_name);
+      if (hits.length > 1 && ctx.class_name) {
+        hits = hits.filter((c) => c.class_name === ctx.class_name);
+      }
+      return hits.length === 1 ? hits[0] : null;
+    }
+    return adjustable.length === 1 ? adjustable[0] : null;
+  };
+
+  // 沙盘里补选课程（自然语言没提课程，或同名跨班无法唯一确定时）
+  const handlePickCourse = (c: TeacherCourse) => {
+    setSelectedCourse(c);
+    setCourseHint('');
+    setAiPlans([]);
+    setPlansLoading(false);
+    if (targetWeek) scheduleAiPlans(c, targetWeek);
+  };
+
   // B1/B2: 自然语言调课（支持多轮追问——信息缺失时系统追问）
+  //
+  // 三个坑，都在这一条链路上：
+  // ① 多轮是假的：后端每轮从零解析，教秘照着提示答"我是吴琳"，系统下一句
+  //    又问"您是哪位老师"。修法是**前端持有槽位**、每轮带回，后端无状态合并。
+  // ② 解析成功却白屏：这里只 `setView('reschedule')`，而沙盘的渲染条件是
+  //    `view==='reschedule' && selectedCourse`，自然语言路径从来没设过课程 ⇒
+  //    后端算出 94 个可用时段，屏幕上只剩导航条（0 JS 错误、0 失败请求，纯静默）。
+  // ③ 白等一次 LLM：原来没传 `fast`，默认 `fast=false` 会内联生成一份
+  //    这条路径根本不渲染的候选方案。改 `fast=true`，候选方案等沙盘打开后由
+  //    `scheduleAiPlans` 后台补（与模板表单路径一致）。
   const handleNlReschedule = async () => {
     const text = nlInput.trim();
     if (!text) return;
     setLoading(true);
     setNlMsg('');
     try {
-      const r = await rescheduleApi.chat(text);
+      // 教师身份直接取"当前选中的身份"：教秘已经点了吴琳，不必再打一遍"我是吴琳"。
+      // 文本里显式说了别的老师时，后端本轮解析到的值会覆盖它（覆盖逻辑在服务端）。
+      const base: NlSlotContext = { teacher_name: currentTeacher, ...(nlContext || {}) };
+      const r = await rescheduleApi.chat(text, true, base);
       const data = r.data.data;
-      // 需要追问（信息缺失）
+      const ctx: NlSlotContext = { ...base, ...(data.context || {}) };
+      // 需要追问（信息缺失）→ 记住已确认的槽位，下一轮带回
       if (data.need_info && data.followup_questions?.length) {
+        setNlContext(ctx);
         setFollowupQ(data.followup_questions);
         setNlMsg(`🤔 ${r.data.message}`);
         return;
       }
       setFollowupQ([]);
+      setNlContext(null);
       // 有可用时段 → 展示结果
       if (data.available_slots?.length) {
+        const course = pickCourseFromContext(ctx);
+        setSelectedCourse(course);
+        // 课程名认出来了、但同名跨班无法唯一确定 → 用课程名收窄下拉（2 个班里挑，
+        // 而不是 13 门里挑）；其余情况清空，免得把旧提示带到下一轮
+        setCourseHint(!course && ctx.course_name ? ctx.course_name : '');
+        if (ctx.target_week) setTargetWeek(ctx.target_week);
         setAvailable(data.available_slots);
         setExcluded(data.excluded_slots || []);
+        setImpact(null);
+        setRequestStatus('');
+        setAiPlans([]);
+        setPlansLoading(false);
         setNlMsg(`✅ ${r.data.message.split('\n')[0]}`);
         setView('reschedule');
+        // 课程识别不出来（同名跨班/没提课程）时沙盘照常打开，由教秘在下拉里补选
+        if (course && ctx.target_week) scheduleAiPlans(course, ctx.target_week);
         return;
       }
       setNlMsg(r.data.message);
@@ -610,6 +674,10 @@ function App() {
     plansSeqRef.current += 1;
     setAiPlans([]);
     setPlansLoading(false);
+    setNlContext(null);
+    setFollowupQ([]);
+    setNlMsg('');
+    setCourseHint('');
     setView('identity');
     setCurrentTeacher('');
     setCourses([]);
@@ -974,6 +1042,7 @@ function App() {
               nlInput={nlInput}
               nlMsg={nlMsg}
               followupQ={followupQ}
+              nlContext={nlContext}
               onNlInputChange={setNlInput}
               onNlSubmit={handleNlReschedule}
               onReschedule={handleReschedule}
@@ -981,9 +1050,11 @@ function App() {
           )}
 
           {/* 页面3：调课结果（F3/F4） */}
-          {view === 'reschedule' && selectedCourse && (
+          {view === 'reschedule' && (
             <RescheduleView
               selectedCourse={selectedCourse}
+              courseOptions={courses.filter((c) => c.adjustable && (!courseHint || c.course_name === courseHint))}
+              onSelectCourse={handlePickCourse}
               currentTeacher={currentTeacher}
               targetWeek={targetWeek}
               available={available}

@@ -171,6 +171,108 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     rec(false, '🔐 未登录提交守卫', `点提交后没看到登录弹窗（疑似静默失败）：${String(e).slice(0, 100)}`);
   }
 
+  // ⑦ 自然语言调课（B1/B2）—— PRD 主打的"说人话就能调课"，此前零覆盖
+  //
+  // 为什么单独开一页：上面这页已经弹了登录遮罩，状态不干净。
+  //
+  // 这一项卡的是"解析成功但界面空白"：`handleNlReschedule` 里 `setView('reschedule')`
+  // 而沙盘的渲染条件是 `view === 'reschedule' && selectedCourse`，自然语言路径
+  // **从来没设置过 selectedCourse** ⇒ 后端算出了几十个可用时段，教秘看到的是一片空白。
+  try {
+    const p2 = await ctx.newPage();
+    p2.on('pageerror', (e) => jsErrors.push('[nl] ' + String(e).slice(0, 150)));
+    p2.on('response', (r) => {
+      const u = r.url();
+      if (u.includes('/api/') && r.status() >= 400) failedReq.push(`[nl] ${r.status()} ${u.slice(0, 80)}`);
+    });
+    await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
+    await p2.locator('button', { hasText: TEACHER }).first().click();
+    await p2.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+
+    const t4 = Date.now();
+    await p2.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第3周`);
+    await p2.getByRole('button', { name: /^发送$/ }).click();
+    // 等"沙盘真的画出来"：周次标题 + 可用时段计数都出现才算数
+    await p2.waitForFunction(
+      () => /周课表沙盘（第3周）/.test(document.body.innerText) && /可用时段（\d+）/.test(document.body.innerText),
+      { timeout: 30000 },
+    );
+    const nlMs = Date.now() - t4;
+    const t = await p2.evaluate(() => document.body.innerText);
+    const mAvail = t.match(/可用时段（(\d+)）/);
+    const hasCourse = new RegExp(`课程：声速测量`).test(t);
+    // 课程没能唯一确定时（同名实验挂在多个班下），沙盘必须给出下拉让教秘补选 ——
+    // "画出来但没法提交"和"白屏"只是同一件事的两个版本。
+    const courseOpts = await p2.evaluate(() => {
+      const sel = [...document.querySelectorAll('select')]
+        .find((s) => (s.options[0]?.textContent || '').includes('选择课程'));
+      return sel ? sel.options.length - 1 : 0;
+    });
+    // 阈值 3s：自然语言这条链路本身要过规则解析（厘秒级）；若误传 fast=false，
+    // 会白等一次 LLM 候选生成（7.6s）—— 而候选在这条路径上根本没被渲染。
+    rec(
+      Boolean(mAvail) && (hasCourse || courseOpts > 0) && nlMs < 3000,
+      '💬 自然语言调课进沙盘',
+      `${nlMs}ms：可用 ${mAvail ? mAvail[1] : '?'} 个；` +
+        (hasCourse ? '课程「声速测量」已自动带入' : `课程同名跨班无法唯一确定 → 提供 ${courseOpts} 门可选`),
+    );
+    await p2.screenshot({ path: path.join(SHOT_DIR, 'nl-reschedule.png'), fullPage: true });
+  } catch (e) {
+    const body = await ctx.pages().at(-1)?.evaluate(() => document.body.innerText).catch(() => '');
+    rec(
+      false,
+      '💬 自然语言调课进沙盘',
+      `解析成功后没渲染出沙盘（界面可能空白）：${String(e).slice(0, 100)}｜当前可见：${String(body).replace(/\s+/g, ' ').slice(0, 120)}`,
+    );
+  }
+
+  // ⑧ 多轮追问（B2）—— 教秘按提示回答后，系统不许把刚说过的话再问一遍
+  //
+  // 这一项用"帮我调课"起手：规则解析拿不到周次、无论 LLM 在不在都会走追问分支，
+  // 所以它不是一条依赖外部服务的检查。历史上服务端每轮从零解析，"我是吴琳"那轮
+  // 会把"您是哪位老师"原样再问一遍（实测），界面上却写着"我会继续为您处理"。
+  try {
+    const p3 = await ctx.newPage();
+    p3.on('pageerror', (e) => jsErrors.push('[nl2] ' + String(e).slice(0, 150)));
+    p3.on('response', (r) => {
+      const u = r.url();
+      if (u.includes('/api/') && r.status() >= 400) failedReq.push(`[nl2] ${r.status()} ${u.slice(0, 80)}`);
+    });
+    await p3.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await p3.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
+    await p3.locator('button', { hasText: TEACHER }).first().click();
+    await p3.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+
+    const input = p3.locator('input[placeholder="输入大白话调课需求..."]');
+    await input.fill('帮我调课');
+    await p3.getByRole('button', { name: /^发送$/ }).click();
+    await p3.waitForFunction(() => /需要补充信息/.test(document.body.innerText), { timeout: 45000 });
+    await p3.waitForTimeout(300);
+    const t1 = await p3.evaluate(() => document.body.innerText);
+    const remembered = (t1.match(/已记住：([^\n]*)/) || [])[1] || '';
+    // 教师身份界面上已经选过了 ⇒ 追问里再问"哪位老师"就是复读
+    const reAskedTeacher = /哪位老师/.test(t1);
+    rec(
+      remembered.includes('教师') && !reAskedTeacher,
+      '🧠 多轮追问记住上下文',
+      `追问已记住「${remembered.slice(0, 40)}」，且不再重复问教师${reAskedTeacher ? '（又问了！）' : ''}`,
+    );
+
+    // 第二轮只补周次 —— 应当直接出沙盘，而不是再来一次追问
+    const t5 = Date.now();
+    await input.fill('我要调到第3周');
+    await p3.getByRole('button', { name: /^发送$/ }).click();
+    await p3.waitForFunction(
+      () => /周课表沙盘（第3周）/.test(document.body.innerText) && /可用时段（\d+）/.test(document.body.innerText),
+      { timeout: 45000 },
+    );
+    rec(true, '🧠 第二轮补一句就出结果', `${Date.now() - t5}ms 出沙盘（教秘只说了"我要调到第3周"）`);
+    await p3.screenshot({ path: path.join(SHOT_DIR, 'nl-multiturn.png'), fullPage: true });
+  } catch (e) {
+    rec(false, '🧠 多轮追问记住上下文', `追问后没走通第二轮：${String(e).slice(0, 110)}`);
+  }
+
   rec(jsErrors.length === 0, '全程 JS 错误', `${jsErrors.length} 条${jsErrors.length ? '：' + jsErrors[0] : ''}`);
   rec(failedReq.length === 0, '全程失败请求', `${failedReq.length} 条${failedReq.length ? '：' + failedReq[0] : ''}`);
 

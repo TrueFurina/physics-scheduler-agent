@@ -11,6 +11,12 @@ from app.agent.llm_intent_parser import LLMIntentParser
 SEMESTER_START = date(2025, 2, 24)
 WEEKDAY_OFFSET = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
 
+# 多轮追问要填的槽位（B2）。后端不存会话，只把已确认的槽位随响应回传，
+# 由前端在下一轮原样带回，服务端做无状态合并 —— 进程被回收也不丢上下文。
+# `class_name` 也在里面：同一门实验（课程名相同）会挂在不同班级下，
+# 只按课程名回找课程卡片会撞车（实测"扭摆法测物体转动惯量"就有两个班）。
+SLOT_KEYS = ("teacher_name", "course_name", "class_name", "target_week", "source_week")
+
 
 def week_to_date(week: int, weekday: str, start: Optional[date] = None) -> str:
     """周次 + 星期 → 具体日期（MM月DD日），start 为学期起始日（第1周周一）"""
@@ -133,10 +139,24 @@ class RescheduleAgent:
                 class_name = c
                 break
 
+        # 课程名（F2 里 course_name 就是实验名）——拿教师名下课程做匹配，
+        # **长名优先**：否则"声速"会先吃掉"声速测量"、"分光计"会吃掉
+        # "分光计测量光栅常数及光波波长"这类超集关系，匹配出一门错课。
+        course_name = None
+        if teacher_name:
+            names = {c.get("course_name") for c in self.db.get_teacher_courses(teacher_name)}
+        else:
+            names = {e.experiment for e in self.db.entries}
+        for n in sorted((x for x in names if x), key=len, reverse=True):
+            if n.lower() in text:
+                course_name = n
+                break
+
         return {
             "target_week": target_week,
             "source_week": source_week,
             "teacher_name": teacher_name,
+            "course_name": course_name,
             "class_name": class_name,
             "original_text": text,
         }
@@ -304,54 +324,94 @@ class RescheduleAgent:
 
         return {"available": available, "excluded": excluded}
 
-    def process_request(self, text: str, with_ai: bool = True) -> dict:
+    def _slot_context(self, parsed: dict) -> Dict:
+        """把本轮"已确认的槽位"抽出来回传给前端，供下一轮合并（B2 多轮追问）。
+
+        后端**刻意不存会话状态**：上下文放在教秘的浏览器里，服务端只做无状态合并。
+        这样进程被沙箱回收、或多实例轮转，多轮对话都不会凭空丢一半。
+        """
+        return {k: parsed.get(k) for k in SLOT_KEYS if parsed.get(k)}
+
+    def _missing_slot_questions(self, parsed: dict) -> List[str]:
+        """按"还缺哪个槽位"生成追问，而不复用 LLM 的自由文案。
+
+        两个理由，都是实测出来的：
+        ① 合并上下文之后不能再问已知的信息 —— 否则教秘答完"我是吴琳"，
+           系统下一秒又问"您是哪位老师"，多轮对话就成了笑话；
+        ② LLM 会同时给出"调哪周的课"和"调到哪一周"两条同义问题（实测），
+           槽位驱动不会产生重复。
+        """
+        questions = []
+        if not parsed.get("teacher_name"):
+            questions.append("请问是哪位老师需要调课？")
+        if not parsed.get("target_week"):
+            questions.append("请问要把课调到第几周？（例如：第5周、下周、下下周）")
+        return questions
+
+    def _need_info(self, parsed: dict, llm_questions: List[str]) -> dict:
+        """信息不足 → 追问。槽位驱动优先；槽位都齐了才退回 LLM 的问题。"""
+        questions = self._missing_slot_questions(parsed)
+        if not questions:
+            questions = [q for q in llm_questions if q][:2] or ["请补充调课信息"]
+        msg = "需要补充信息才能为您调课：\n" + "".join(f"  • {q}\n" for q in questions)
+        return {
+            "success": False,
+            "need_info": True,
+            "message": msg,
+            "followup_questions": questions,
+            "context": self._slot_context(parsed),
+            "target_week": parsed.get("target_week"),
+            "available_slots": [],
+            "excluded_slots": [],
+        }
+
+    def process_request(self, text: str, with_ai: bool = True,
+                        context: Optional[Dict] = None) -> dict:
         """处理调课请求，返回可用时段 + 被排除时段（含原因）
 
         解析策略：规则解析优先；规则失败时降级到 LLM 解析；
-        LLM 判定信息不全时返回追问问题（B2 多轮追问）。
+        信息不足时返回追问问题（B2 多轮追问）。
+        `context` 是上一轮响应回传的槽位，用于补全本轮没说的话。
         with_ai=False 时跳过 LLM 候选方案生成（fast 模式，秒回）。
         """
         parsed = self.parse_request(text)
+
+        # 槽位合并（B2）：本轮没解析出来的，沿用上一轮已确认的。
+        # 没有这一步，"多轮追问"是假的 —— 每一轮都从零开始解析，教秘按提示
+        # 回答"我是吴琳"，系统会把"您是哪位老师"原样再问一遍（实测）。
+        for k in SLOT_KEYS:
+            if not parsed.get(k) and (context or {}).get(k):
+                parsed[k] = context[k]
 
         # 规则解析失败 → 尝试 LLM 解析（B1）
         if not parsed["target_week"] and self.llm_parser:
             llm_result = self.llm_parser.parse(text)
             if not llm_result.get("error"):
-                # LLM 判定信息不全 → 返回追问问题（B2）
-                if llm_result.get("needs_followup"):
-                    questions = llm_result.get("followup_questions", [])
-                    msg = "需要补充信息才能为您调课：\n"
-                    for q in questions:
-                        msg += f"  • {q}\n"
-                    return {
-                        "success": False,
-                        "need_info": True,
-                        "message": msg,
-                        "followup_questions": questions,
-                        "available_slots": [],
-                        "excluded_slots": [],
-                    }
-                # LLM 解析出目标周次 → 合并到 parsed
-                if llm_result.get("target_week"):
+                # 先把 LLM 解析到的槽位并进来，再判断要不要追问：
+                # 原来是一看到 needs_followup 就立刻返回，于是 LLM 同时给出的
+                # 教师/源周次被丢掉，追问里又把这些再问一遍。
+                if not parsed["target_week"] and llm_result.get("target_week"):
                     parsed["target_week"] = llm_result["target_week"]
-                    if not parsed.get("teacher_name") and llm_result.get("teacher"):
-                        parsed["teacher_name"] = llm_result["teacher"]
-                    if not parsed.get("source_week") and llm_result.get("source_week"):
-                        parsed["source_week"] = llm_result["source_week"]
+                for src, dst in (("teacher", "teacher_name"),
+                                 ("source_week", "source_week"),
+                                 ("course", "course_name")):
+                    if not parsed.get(dst) and llm_result.get(src):
+                        parsed[dst] = llm_result[src]
+                if llm_result.get("needs_followup") and (
+                        not parsed["target_week"] or not parsed.get("teacher_name")):
+                    return self._need_info(parsed, llm_result.get("followup_questions") or [])
 
-        if not parsed["target_week"]:
-            return {
-                "success": False,
-                "need_info": True,
-                "message": "无法确定您要调到哪一周，请明确说明（如：下周、第5周），或告诉我您是哪位老师、要调哪门课",
-                "available_slots": [],
-                "excluded_slots": [],
-            }
+        # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
+        # 靠它判断"教师本人在这个时段有没有课"。不给教师就直出时段，等于跳过
+        # 这一重冲突检查，把可能撞课的时段当成可用来推荐（实测直接返回 94 个）。
+        if not parsed["target_week"] or not parsed.get("teacher_name"):
+            return self._need_info(parsed, [])
 
         if not self.db.loaded:
             return {
                 "success": False,
                 "message": "排课数据尚未加载，请先上传实验安排表",
+                "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": [],
             }
@@ -364,6 +424,8 @@ class RescheduleAgent:
             return {
                 "success": True,
                 "message": f"第{parsed['target_week']}周没有空闲时段，请尝试其他周次",
+                "target_week": parsed["target_week"],
+                "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": excluded,
             }
@@ -429,6 +491,7 @@ class RescheduleAgent:
             "success": True,
             "message": "\n".join(summary_lines),
             "target_week": parsed["target_week"],
+            "context": self._slot_context(parsed),
             "available_slots": slots,
             "excluded_slots": excluded,
             "ai_plans": ai_plans,

@@ -1,4 +1,5 @@
 import type { TeacherCourse } from '../api/client';
+import type { NlSlotContext } from '../types';
 
 interface Props {
   currentTeacher: string;
@@ -7,6 +8,8 @@ interface Props {
   nlInput: string;
   nlMsg: string;
   followupQ: string[];
+  /** 多轮追问中"已确认的槽位"——摊在界面上，教秘才敢相信系统记住了 */
+  nlContext?: NlSlotContext | null;
   onNlInputChange: (v: string) => void;
   onNlSubmit: () => void;
   onReschedule: (course: TeacherCourse) => void;
@@ -14,7 +17,7 @@ interface Props {
 
 /** 页面2：我的课程（F2）—— 可调/不可调分组 + 自然语言调课入口。 */
 export default function CoursesView({
-  currentTeacher, courses, loading, nlInput, nlMsg, followupQ,
+  currentTeacher, courses, loading, nlInput, nlMsg, followupQ, nlContext,
   onNlInputChange, onNlSubmit, onReschedule,
 }: Props) {
   const adjustable = courses.filter((c) => c.adjustable);
@@ -103,6 +106,17 @@ export default function CoursesView({
             {followupQ.map((q, i) => (
               <div key={i} className="text-sm text-amber-700 ml-2">• {q}</div>
             ))}
+            {/* 已记住的槽位要看得见：否则"多轮对话"在教秘眼里就是随机行为 */}
+            {nlContext && (nlContext.teacher_name || nlContext.course_name || nlContext.target_week) && (
+              <div className="mt-2 text-xs text-emerald-700">
+                ✅ 已记住：
+                {[
+                  nlContext.teacher_name && `教师 ${nlContext.teacher_name}`,
+                  nlContext.course_name && `课程 ${nlContext.course_name}`,
+                  nlContext.target_week && `第 ${nlContext.target_week} 周`,
+                ].filter(Boolean).join(' · ')}
+              </div>
+            )}
             <p className="text-xs text-amber-500 mt-2">请在上方输入框补充回答，我会继续为您处理</p>
           </div>
         )}

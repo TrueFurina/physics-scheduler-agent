@@ -103,6 +103,8 @@ DEFAULT_SCHEDULE_PATH = _resolve_default_schedule_path()
 class ChatRequest(BaseModel):
     message: str
     fast: bool = False  # 快速模式：跳过 LLM 候选方案生成（沙盘秒回）
+    # 上一轮响应回传的槽位（B2 多轮追问）。前端原样带回，服务端无状态合并。
+    context: Optional[dict] = None
 
 
 class ConsultRequest(BaseModel):
@@ -216,7 +218,7 @@ async def reschedule_chat(req: ChatRequest):
         return ChatResponse(success=False, message="请输入调课请求")
 
     result = await run_in_threadpool(_agent.process_request, req.message,
-                                     with_ai=not req.fast)
+                                     not req.fast, req.context)
     return ChatResponse(
         success=result["success"],
         message=result["message"],
@@ -228,6 +230,7 @@ async def reschedule_chat(req: ChatRequest):
             "total": result.get("total", 0),
             "need_info": result.get("need_info", False),
             "followup_questions": result.get("followup_questions", []),
+            "context": result.get("context") or {},
         },
     )
 

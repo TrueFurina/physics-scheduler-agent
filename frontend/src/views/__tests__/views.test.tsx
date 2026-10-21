@@ -163,6 +163,28 @@ describe('CoursesView', () => {
     expect(screen.getByText(/需要补充信息/)).toBeTruthy();
     expect(screen.getByText(/要调到第几周/)).toBeTruthy();
   });
+
+  // 多轮追问修好之前，教秘答完"我是吴琳"，系统下一轮又问"您是哪位老师"。
+  // 已确认的槽位必须摊在界面上——否则"系统记住了"这件事没有任何可见证据。
+  it('追问时展示已记住的槽位（教师/课程/周次）', () => {
+    render(
+      <CoursesView
+        currentTeacher="吴琳"
+        courses={[]}
+        loading={false}
+        nlInput=""
+        nlMsg=""
+        followupQ={['请问要把课调到第几周？']}
+        nlContext={{ teacher_name: '吴琳', target_week: 3 }}
+        onNlInputChange={() => {}}
+        onNlSubmit={() => {}}
+        onReschedule={() => {}}
+      />,
+    );
+    const line = screen.getByText(/已记住/).textContent || '';
+    expect(line).toContain('教师 吴琳');
+    expect(line).toContain('第 3 周');
+  });
 });
 
 describe('RescheduleView', () => {
@@ -196,6 +218,41 @@ describe('RescheduleView', () => {
     render(<RescheduleView {...baseProps} onTargetWeekChange={onTargetWeekChange} />);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '9' } });
     expect(onTargetWeekChange).toHaveBeenCalledWith(9);
+  });
+
+  // 自然语言路径过去只 `setView('reschedule')` 不设课程，而视图的渲染条件里带着
+  // `selectedCourse &&` ⇒ 解析成功却整页空白（实测只剩导航条）。
+  // 沙盘只依赖"教师 + 周次"，课程是提交时才需要的，所以没有课程也要能画出来。
+  it('没有确定课程时沙盘照常渲染，并给出课程下拉与禁用提交', () => {
+    render(
+      <RescheduleView
+        {...baseProps}
+        selectedCourse={null}
+        courseOptions={[course(), course({ course_name: '分光计的调节', class_name: '2024级2班' })]}
+      />,
+    );
+    expect(screen.getByText(/周课表沙盘（第5周）/)).toBeTruthy();
+    // 影响分析说明和提交确认条都会写上课程占位名，故用 getAllByText
+    expect(screen.getAllByText(/未指定课程/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/请确认要调整的课程/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /提交调课申请/ })).toHaveProperty('disabled', true);
+    expect(screen.getByText(/请先在上方选择要调整的课程/)).toBeTruthy();
+  });
+
+  it('沙盘里选中课程会回传整张课程卡片（同名跨班不能靠猜）', () => {
+    const onSelectCourse = vi.fn();
+    const c2 = course({ course_name: '分光计的调节', class_name: '2024级2班' });
+    render(
+      <RescheduleView
+        {...baseProps}
+        selectedCourse={null}
+        courseOptions={[course(), c2]}
+        onSelectCourse={onSelectCourse}
+      />,
+    );
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[0], { target: { value: '分光计的调节|2024级2班' } });
+    expect(onSelectCourse).toHaveBeenCalledWith(c2);
   });
 
   it('已提交后不再显示提交按钮（防重复提交）', () => {

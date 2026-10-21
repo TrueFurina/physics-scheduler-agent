@@ -44,6 +44,20 @@ export interface AiPlan {
   reason?: string;
 }
 
+/**
+ * 多轮追问的槽位（B2）。
+ *
+ * 后端**不存会话**，只把"这一轮已确认的槽位"随响应回传；下一轮原样带回，
+ * 服务端再做无状态合并。所以它必须留在前端 —— 进程被回收也不会丢上下文。
+ */
+export interface NlSlotContext {
+  teacher_name?: string | null;
+  course_name?: string | null;
+  class_name?: string | null;
+  target_week?: number | null;
+  source_week?: number | null;
+}
+
 /** `/parallel/overview` 里的一门课。 */
 export interface ParallelCourse {
   class_name: string;

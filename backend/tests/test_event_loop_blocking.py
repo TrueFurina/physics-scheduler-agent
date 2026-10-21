@@ -46,20 +46,25 @@ def test_chat_dispatches_llm_work_off_event_loop(monkeypatch):
     """`/chat` 的阻塞主体必须跑在线程池，不能跑在事件循环线程上。"""
     seen = {}
 
-    def fake_process(text, with_ai=True):
+    def fake_process(text, with_ai=True, context=None):
         seen["thread"] = threading.current_thread()
         seen["with_ai"] = with_ai
+        seen["context"] = context
         return _fake_chat_result()
 
     monkeypatch.setattr(api._agent, "process_request", fake_process)
 
-    resp, loop_thread = _run(api.reschedule_chat(api.ChatRequest(message="调到第3周", fast=False)))
+    resp, loop_thread = _run(api.reschedule_chat(api.ChatRequest(
+        message="第3周", fast=False, context={"teacher_name": "吴琳"},
+    )))
 
     assert resp.success is True
     assert "thread" in seen, "process_request 没被调用"
     assert seen["thread"] is not loop_thread, \
         "LLM 调用跑在事件循环线程上 —— 一个慢请求会冻住全站"
     assert seen["with_ai"] is True, "fast=False 应透传成 with_ai=True"
+    assert seen["context"] == {"teacher_name": "吴琳"}, \
+        "多轮追问的 context 没透传到 agent（位置参数错位？）"
 
 
 def test_course_select_consult_off_event_loop(monkeypatch):
