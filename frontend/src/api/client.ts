@@ -199,6 +199,21 @@ export const rescheduleApi = {
   approveRequest: (id: number, approve: boolean, comment: string) =>
     api.post<{ success: boolean; message: string; request: RescheduleRequest }>(`/reschedule/requests/${id}/approve`, { approve, comment }),
 
+  // 把一条已批准的调课落到排课数据上（审批台闭环）
+  //
+  // 审批台的主数据在云表，云表只存状态；排课数据在服务端进程内存里。
+  // 不做这一步，教秘点完"同意"之后课表一个字节都不会变 —— 沙盘、我的课程、
+  // 数据体检全都看不见这次调课，而这套能移记录、能检冲突、能持久化重放的逻辑
+  // 原本只挂在 `/requests/{id}/approve` 上，前端一行都没调用。
+  // `key` 用云端工单 id 做幂等键：重复点不会连着撬动更早的周次。
+  applyMove: (data: {
+    teacher: string; course_name: string; class_name: string;
+    original_time: string; target_week: number; source_week?: number; key: string;
+  }) => api.post<{
+    success: boolean; message: string;
+    data: { applied: number; skipped: number; details: string[] };
+  }>('/reschedule/apply-move', data),
+
   // 选课咨询（四大模块之一）
   courseSelect: (question: string) =>
     api.post<{ success: boolean; message: string; reply: string }>('/reschedule/course-select', { question }),

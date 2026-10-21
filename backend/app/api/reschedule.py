@@ -881,6 +881,23 @@ class RescheduleRequestApprove(BaseModel):
     comment: str = ""
 
 
+class ApplyMoveRequest(BaseModel):
+    """把一条已批准的调课落到排课数据上（云端审批台专用）。
+
+    为什么单独开一个接口，而不是让前端去调 `/requests/{id}/approve`：
+    审批台的主数据在**云表** `reschedule_requests`（工单可跨设备、跨会话），
+    本地 SQLite 的 `/requests` 前端一行都没调用。两边 id 体系不同，硬接会串号。
+    所以这里只做"应用"这一件事：脱离任何工单表，按调课内容移动排课记录。
+    """
+    teacher: str = ""
+    course_name: str = ""
+    class_name: str = ""
+    original_time: str = ""
+    target_week: int
+    source_week: int = 0
+    key: str = ""  # 幂等键，建议直接传云端工单 id（如 "cloud-123"）
+
+
 # SQLite 存储（重启不丢数据）
 import sqlite3
 
@@ -921,6 +938,13 @@ def _init_db():
             applied_at TEXT DEFAULT ''
         )
     """)
+    try:
+        # 幂等键：同一张云端工单可能被重复应用（网络重试、手滑点两次、审批台刷新）。
+        # `_apply_reschedule` 的源周是"目标周之前最近的那个匹配周"，重复执行时目标周
+        # 那条已被移走，它会去移**更早一周**的那条 —— 一张工单能连着撬动好几周。
+        conn.execute("ALTER TABLE applied_moves ADD COLUMN idem_key TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在
     conn.commit()
     conn.close()
 
@@ -955,13 +979,31 @@ def _parse_original_time(text: str) -> dict:
     return out
 
 
-def _apply_reschedule(record: dict, persist: bool = True) -> dict:
+def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") -> dict:
     """审批通过后自动应用调课：把匹配的排课记录移动到目标周
 
     匹配条件：教师 + （班级或课程名模糊匹配）+ original_time 解析出的 星期/时段/教室（非空才校验）。
     源周：record.source_week > 0 时用之；否则自动选目标周之前最近的一个匹配周。
     目标周该时段被其他班/教师占用 → 跳过并说明。
+
+    `idem_key` 非空时先查重：同一个键只应用一次。云端审批台是**前端直接写云表**，
+    没有服务端事务替它挡重复提交，所以幂等必须落在这一步。
     """
+    if idem_key:
+        conn = _get_db()
+        try:
+            hit = conn.execute(
+                "SELECT applied_at FROM applied_moves WHERE idem_key = ? AND idem_key != '' LIMIT 1",
+                (idem_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if hit:
+            return {
+                "applied": 0, "skipped": 0,
+                "details": [f"该申请已于 {hit['applied_at']} 应用过，本次未重复移动"],
+            }
+
     parsed = _parse_original_time(record.get("original_time", ""))
     target_week = record.get("target_week")
     teacher = record.get("teacher", "")
@@ -1017,8 +1059,9 @@ def _apply_reschedule(record: dict, persist: bool = True) -> dict:
     if persist and applied > 0:
         conn = _get_db()
         conn.execute(
-            "INSERT INTO applied_moves (request_data, applied_at) VALUES (?, ?)",
-            (json.dumps(record, ensure_ascii=False), datetime.now().isoformat(timespec="seconds")),
+            "INSERT INTO applied_moves (request_data, applied_at, idem_key) VALUES (?, ?, ?)",
+            (json.dumps(record, ensure_ascii=False), datetime.now().isoformat(timespec="seconds"),
+             idem_key or ""),
         )
         conn.commit()
         conn.close()
@@ -1120,3 +1163,52 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
     record = dict(conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone())
     conn.close()
     return {"success": True, "message": message, "request": record}
+
+
+@router.post("/apply-move", summary="把已批准的调课应用到排课数据（审批台闭环）",
+             dependencies=_ADMIN_ONLY)
+async def apply_move(req: ApplyMoveRequest):
+    """把一条已批准的调课真正落到排课数据上。
+
+    为什么需要它：审批台改的是**云表** status，而排课数据在本地进程内存里。
+    在此之前，教秘点"同意"之后排课数据一个字节都没变 —— 沙盘、我的课程、数据体检
+    全都看不见这次调课，而这套能移动记录、能检冲突、能持久化重放的逻辑（
+    `_apply_reschedule` + `applied_moves`）只挂在 `/requests/{id}/approve` 上，
+    而那个接口前端一行都没调用。审批成了纯标记。
+
+    所以这里把"应用"单独暴露出来，由前端在云端审批成功后调用。语义：
+      · 不碰任何工单表，只按调课内容移动排课记录；
+      · `key` 做幂等（建议传云端工单 id），重复调用不会连着撬动更早的周次；
+      · 移动失败/冲突跳过一律如实返回，不假装成功（"同意但没生效"必须让教秘看见）。
+    """
+    if not _db.loaded:
+        _ensure_loaded()
+
+    record = {
+        "teacher": req.teacher,
+        "course_name": req.course_name,
+        "class_name": req.class_name,
+        "original_time": req.original_time,
+        "target_week": req.target_week,
+        "source_week": req.source_week,
+    }
+    result = await run_in_threadpool(_apply_reschedule, record, True, req.key or "")
+
+    applied = result.get("applied", 0)
+    skipped = result.get("skipped", 0)
+    if applied:
+        message = f"✅ 已移动 {applied} 条排课记录到第{req.target_week}周"
+        if skipped:
+            message += f"，{skipped} 条因冲突跳过"
+    elif skipped:
+        message = (f"⚠️ 调课已批准，但目标周该时段已有安排，{skipped} 条记录未自动移动"
+                   f"（请人工协调）")
+    else:
+        message = "⚠️ 调课已批准，但未找到可自动移动的排课记录（请在教务系统中人工修改）"
+
+    details = result.get("details") or []
+    if details:
+        message += "\n" + "\n".join(details[:6])
+
+    return {"success": True, "data": {"applied": applied, "skipped": skipped,
+                                      "details": details}, "message": message}

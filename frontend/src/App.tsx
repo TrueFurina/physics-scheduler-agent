@@ -762,12 +762,39 @@ function App() {
     }
   };
 
-  // F6: 管理员审批（云端更新状态）
+  // F6: 管理员审批（云端更新状态 → 再落地到排课数据）
+  //
+  // 云端只存工单状态；"调课真的生效"是另一件事，必须由服务端把排课记录移过去。
+  // 这两步没法合成一个请求（前端写云表、后端改内存，两条通道），所以第一步成功后
+  // 立刻做第二步，并把第二步的结果原样告诉教秘。
+  // "批了但没生效"是最坏的一种静默失败：审批台显示已同意，课表却没动，谁都不会再查。
   const handleApprove = async (id: number, approve: boolean, comment: string) => {
     setLoading(true);
     try {
-      await approveCloudRequest(id, approve, comment, userName);
+      const row = await approveCloudRequest(id, approve, comment, userName);
       await loadCloudRequests('pending');
+      if (!approve) {
+        setMsg(`已驳回：${row.course_name || '该申请'}`);
+        return;
+      }
+      if (!getAdminToken()) {
+        setMsg('⚠️ 已同意，但本机没有管理员会话，排课表没有自动更新。请重新登录审批台后再处理。');
+        return;
+      }
+      try {
+        const r = await rescheduleApi.applyMove({
+          teacher: row.teacher || '',
+          course_name: row.course_name || '',
+          class_name: row.class_name || '',
+          original_time: row.original_time || '',
+          target_week: row.target_week,
+          key: `cloud-${row.id}`,
+        });
+        setMsg(r.data.message);
+      } catch (err: any) {
+        // 审批已经写进云表了，这一步失败只影响"自动落地"，必须说清楚哪个成了哪个没成
+        setMsg(`⚠️ 审批已记录，但排课表未自动更新：${describeApiError(err)}（需人工调整）`);
+      }
     } catch (err: any) {
       setMsg(`审批失败：${describeCloudError(err)}`);
     } finally {
