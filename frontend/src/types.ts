@@ -14,7 +14,8 @@ export type View =
   | 'course_select'
   | 'tutor'
   | 'parallel'
-  | 'dashboard';
+  | 'dashboard'
+  | 'master';
 
 /** `/impact-analysis` 返回：调课后的冲突影响面。 */
 export interface ImpactResult {
@@ -139,4 +140,16 @@ export interface StatsData {
   busiest_room?: { room: string; utilization: number };
   top_rooms: Array<{ room: string; sessions: number; utilization: number }>;
   top_teachers: Array<{ teacher: string; sessions: number; experiments: number }>;
+}
+
+/** `/master/overview` 返回：主数据五张实体表（导师一号行动项"重构数据库"）。 */
+export interface MasterOverview {
+  initialized: boolean;
+  courses: Array<{ name: string; experiments: string[] }>;
+  experiments: Array<{
+    name: string; course: string; teachers: string[]; rooms: string[]; classes: string[];
+  }>;
+  teachers: Array<{ name: string; projects: string[] }>;
+  rooms: Array<{ name: string; capacity: number | null }>;
+  classes: Array<{ name: string; groups: string[] }>;
 }

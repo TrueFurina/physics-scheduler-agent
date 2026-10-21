@@ -5,7 +5,7 @@ import json
 import re
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from pydantic import BaseModel
@@ -14,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.reschedule_agent import RescheduleAgent
 from app.agent.student_schedule import StudentSchedule
+from app.master_data import MasterData
 from app.security import check_admin_credentials, issue_admin_token, require_admin
 from app.ratelimit import rate_limit
 
@@ -51,6 +52,9 @@ _student = StudentSchedule()
 # 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表 —— 这是
 # 导师座谈后换轨的核心（见 docs/战略复盘-20261022.md）。
 _master_tasks: List = []
+# 主数据实体库（课程/实验项目/教师/场地/班级）：导师一号行动项"重构数据库"的落地。
+# 与 _db.entries 同构为内存态，进程重启后从安排表反推恢复（见 _ensure_master_data）。
+_master_data = MasterData()
 _agent = RescheduleAgent(_db, student=_student)
 
 # 默认实验安排表路径解析
@@ -265,6 +269,149 @@ async def master_status():
     }
 
 
+# ---------------------------------------------------------------------------
+# 主数据（课程/实验项目/教师/场地/班级）CRUD —— 导师一号行动项「重构数据库」
+#
+# 只读总览免鉴权（它只是把安排表反推成实体，不含学生 PII）；写操作挂 require_admin。
+# 每个写接口都先 `_ensure_master_data()`：主数据从安排表反推，教秘的增删改在其上
+# 叠加 —— 若在空主数据上直接增删，会把反推基线整个丢掉。
+# ---------------------------------------------------------------------------
+
+class _CourseIn(BaseModel):
+    name: str
+
+
+class _ExperimentIn(BaseModel):
+    name: str
+    course: Optional[str] = ""
+    teachers: Optional[List[str]] = None
+    rooms: Optional[List[str]] = None
+    classes: Optional[List[str]] = None
+
+
+class _TeacherIn(BaseModel):
+    name: str
+    projects: Optional[List[str]] = None
+
+
+class _RoomIn(BaseModel):
+    name: str
+    capacity: Optional[int] = None
+
+
+class _ClassIn(BaseModel):
+    name: str
+    groups: Optional[List[str]] = None
+
+
+@router.get("/master/overview", summary="主数据五张实体表总览")
+async def master_overview():
+    """五张实体表（课程/实验项目/教师/场地/班级）的完整状态。免鉴权：纯实体清单。"""
+    _ensure_loaded()
+    _ensure_master_data()
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_ADMIN_ONLY)
+async def master_init():
+    """幂等：清空主数据后从当前安排表重新反推。"""
+    _ensure_loaded()
+    _master_data.build_from_entries(_db.entries)
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/courses", summary="新建课程", dependencies=_ADMIN_ONLY)
+async def master_upsert_course(req: _CourseIn):
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        _master_data.upsert_course(req.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.delete("/master/courses/{name}", summary="删除课程", dependencies=_ADMIN_ONLY)
+async def master_delete_course(name: str):
+    _ensure_master_data()
+    _master_data.delete_course(name)
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/experiments", summary="新建/更新实验项目", dependencies=_ADMIN_ONLY)
+async def master_upsert_experiment(req: _ExperimentIn):
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        _master_data.upsert_experiment(
+            req.name, course=req.course or "", teachers=req.teachers,
+            rooms=req.rooms, classes=req.classes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.delete("/master/experiments/{name}", summary="删除实验项目", dependencies=_ADMIN_ONLY)
+async def master_delete_experiment(name: str):
+    _ensure_master_data()
+    _master_data.delete_experiment(name)
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/teachers", summary="新建/更新教师", dependencies=_ADMIN_ONLY)
+async def master_upsert_teacher(req: _TeacherIn):
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        _master_data.upsert_teacher(req.name, projects=req.projects)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.delete("/master/teachers/{name}", summary="删除教师", dependencies=_ADMIN_ONLY)
+async def master_delete_teacher(name: str):
+    _ensure_master_data()
+    _master_data.delete_teacher(name)
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/rooms", summary="新建/更新场地", dependencies=_ADMIN_ONLY)
+async def master_upsert_room(req: _RoomIn):
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        _master_data.upsert_room(req.name, capacity=req.capacity)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.delete("/master/rooms/{name}", summary="删除场地", dependencies=_ADMIN_ONLY)
+async def master_delete_room(name: str):
+    _ensure_master_data()
+    _master_data.delete_room(name)
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/classes", summary="新建/更新班级", dependencies=_ADMIN_ONLY)
+async def master_upsert_class(req: _ClassIn):
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        _master_data.upsert_class(req.name, groups=req.groups)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _master_data.overview()}
+
+
+@router.delete("/master/classes/{name}", summary="删除班级", dependencies=_ADMIN_ONLY)
+async def master_delete_class(name: str):
+    _ensure_master_data()
+    _master_data.delete_class(name)
+    return {"success": True, "data": _master_data.overview()}
+
+
 @router.post("/chat", response_model=ChatResponse, summary="教师调课咨询",
              dependencies=[Depends(rate_limit("chat"))])
 async def reschedule_chat(req: ChatRequest):
@@ -422,15 +569,60 @@ def _load_default_schedule() -> tuple[str, int]:
     return msg, len(_db.entries)
 
 
+def _ensure_master_data() -> None:
+    """主数据未初始化时，从已加载的安排表反推填充（幂等，进程重启后自愈）。
+
+    与 `_ensure_loaded` 同族：不引入第二套持久化，主数据永远从安排表派生，
+    教秘的增删改在会话内有效，重启后回到「安排表反推」的基线。
+    """
+    if _master_data.initialized:
+        return
+    if _db.loaded:
+        _master_data.build_from_entries(_db.entries)
+
+
+def _master_derived_tasks() -> List:
+    """从主数据派生「某班未排的新增项目」为待排任务。
+
+    主数据反推自安排表，所以其中的项目基本都已排；只有教秘通过 CRUD **新增**的
+    项目（或给已有项目新增了适用班级）才会在这里被补成待排任务 —— 这正是
+    「新增实验项目不必伪造旧课表行」的完整闭环（R-48 之后，导师一号行动项的收尾）。
+
+    判据按 **(班级, 项目)** 粒度：只要该班排过该项目（无论哪个组），就不派生。
+    若按 (班级, 项目, 组) 粒度，真实表里组名写法不一致（如 `24软工2_1` 上过别的
+    项目却没上「扭摆法」）会被误当成"漏排"，反推基线会凭空多出待排任务。
+    """
+    _ensure_master_data()
+    if not _master_data.initialized:
+        return []
+    from app.utils.excel_parser import PendingTask
+
+    scheduled_pairs = {(e.class_name or "", e.experiment or "") for e in _db.entries}
+    pending_pairs = {(t.class_name, t.experiment) for t in list(_db.pending) + list(_master_tasks)}
+    derived: List = []
+    for exp_name, ex in _master_data.experiments.items():
+        for cls in ex.get("classes", set()):
+            if (cls, exp_name) in scheduled_pairs or (cls, exp_name) in pending_pairs:
+                continue
+            for g in _master_data.groups_of(cls):
+                derived.append(PendingTask(
+                    class_name=cls, experiment=exp_name, group=g,
+                    teacher=(sorted(ex["teachers"])[0] if ex["teachers"] else ""),
+                    room=(sorted(ex["rooms"])[0] if ex["rooms"] else ""),
+                    course=ex.get("course") or "", source="master",
+                ))
+    return derived
+
+
 def _schedulable_extra_tasks() -> List:
-    """可排的待排任务 = 表里没排时间的行 + 上传的大纲清单，**去掉考试/考核类**。
+    """可排的待排任务 = 表里没排时间的行 + 上传的大纲清单 + 主数据新增项目，**去掉考试/考核类**。
 
     考试类（真实表里 3 行「大物实验B/C 考试」）仍留在 `db.pending` 里被报出来，
     只是不参与排课 —— 不静默丢弃的原则同样适用于它们。
     """
     from app.utils.excel_parser import looks_like_exam
 
-    raw = list(getattr(_db, "pending", None) or []) + list(_master_tasks)
+    raw = list(getattr(_db, "pending", None) or []) + list(_master_tasks) + _master_derived_tasks()
     return [t for t in raw if not looks_like_exam(getattr(t, "experiment", "") or "")]
 
 

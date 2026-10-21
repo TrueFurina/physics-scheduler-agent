@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan, NlSlotContext } from '../types';
+import type { AiPlan, MasterOverview, NlSlotContext } from '../types';
 
 const API_BASE = '/api';
 
@@ -290,6 +290,33 @@ export const rescheduleApi = {
   // （教务第一号行动项"梳理实验课程属性、重构数据库"的起始材料）
   exportMasterData: () =>
     api.get('/reschedule/export/master-data', { responseType: 'blob' }),
+
+  // 主数据五张实体表（课程/实验项目/教师/场地/班级）—— 导师一号行动项"重构数据库"。
+  // 读免鉴权（纯实体清单，不含学生 PII）；写（增删改）挂 require_admin，凭 admin 会话令牌放行。
+  masterOverview: () =>
+    api.get<{ success: boolean; data: MasterOverview }>('/reschedule/master/overview'),
+  masterInit: () =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/init'),
+  masterUpsertCourse: (payload: { name: string }) =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/courses', payload),
+  masterDeleteCourse: (name: string) =>
+    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/courses/${encodeURIComponent(name)}`),
+  masterUpsertExperiment: (payload: { name: string; course?: string; teachers?: string[]; rooms?: string[]; classes?: string[] }) =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/experiments', payload),
+  masterDeleteExperiment: (name: string) =>
+    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/experiments/${encodeURIComponent(name)}`),
+  masterUpsertTeacher: (payload: { name: string; projects?: string[] }) =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/teachers', payload),
+  masterDeleteTeacher: (name: string) =>
+    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/teachers/${encodeURIComponent(name)}`),
+  masterUpsertRoom: (payload: { name: string; capacity?: number }) =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/rooms', payload),
+  masterDeleteRoom: (name: string) =>
+    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/rooms/${encodeURIComponent(name)}`),
+  masterUpsertClass: (payload: { name: string; groups?: string[] }) =>
+    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/classes', payload),
+  masterDeleteClass: (name: string) =>
+    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/classes/${encodeURIComponent(name)}`),
 
   // 数据体检报告（扫描现有安排表冲突）
   dataAudit: () =>

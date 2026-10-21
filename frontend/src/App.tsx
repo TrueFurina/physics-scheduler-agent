@@ -23,6 +23,7 @@ import AdminView from './views/AdminView';
 const ParallelView = lazy(() => import('./views/ParallelView'));
 const DashboardView = lazy(() => import('./views/DashboardView'));
 const ConsultView = lazy(() => import('./views/ConsultView'));
+const MasterDataView = lazy(() => import('./views/MasterDataView'));
 
 /** 懒加载视图的占位：与视图等高的骨架，避免切换时页面高度塌陷导致跳动。 */
 function ViewFallback() {
@@ -940,6 +941,14 @@ function App() {
               📊 数据看板
             </button>
             <button
+              onClick={() => setView('master')}
+              className={`px-4 py-2 rounded-lg transition-colors ${
+                view === 'master' ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              🗂️ 主数据
+            </button>
+            <button
               onClick={() => handleOpenModule('course_select')}
               className={`px-4 py-2 rounded-lg transition-colors ${
                 view === 'course_select' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
@@ -1219,6 +1228,13 @@ function App() {
                 onExportRoom={() => handleExportStandard('room')}
                 onExportMaster={() => handleExportStandard('master')}
               />
+            </Suspense>
+          )}
+
+          {/* 页面6.5：🗂️ 主数据管理（导师一号行动项：可增删改的实体库） */}
+          {view === 'master' && (
+            <Suspense fallback={<ViewFallback />}>
+              <MasterDataView adminAuthed={adminAuthed} onRequireLogin={handleOpenAdmin} />
             </Suspense>
           )}
 
