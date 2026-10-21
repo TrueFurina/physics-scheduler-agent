@@ -1121,15 +1121,45 @@ def _write_sheet(ws, headers, widths):
         ws.column_dimensions[col].width = w
 
 
+def _course_gap_note(cov: dict) -> str:
+    """项目不在主数据里的那部分记录：它们的课程是**回落默认**，不是查出来的。
+
+    真实表就有：主数据只建了 22 个项目，而安排表有 25 个项目名 —— 3 个绪论类
+    项目（共 17 条）不在主数据里。教秘在台账里看不到它们，也就无法给它们指定
+    课程；若哪天把绪论课改归另一门课，这 17 条不会跟着变。这必须说出口 ——
+    沉默地让一部分记录"查不出课程"，比报一个假冲突更危险（R-35 同族）。
+    """
+    if not cov.get("master_ready"):
+        return ""
+    gap = cov.get("total_entries", 0) - cov.get("project_in_master", 0)
+    if gap <= 0:
+        return ""
+    return (f"（⚠️ 有 {gap} 条记录的项目不在主数据中 —— 多为绪论课，其课程按默认课处理，"
+            f"并非查得；台账里也看不到它们，无法单独指定课程）")
+
+
 @router.get("/export/class-schedule", summary="导出班级课表（教务标准课表之一）",
             dependencies=[Depends(rate_limit("standard-export"))])
 async def export_class_schedule(class_name: Optional[str] = None):
     """按班级导出课表：每个班一个 sheet，行=该班全部实验安排（按周次/星期/节次排序）。
 
     `class_name` 留空 = 导出全部班级（每班一页）。
+
+    课程维度（R-57，导师点名的后续难点）
+    -----------------------------------
+    安排表行**不带课程**，课程只存在于主数据的 `experiment.course` 上，靠项目名
+    反推 —— 所以这里的「课程」列是查主数据补上的，不是表里抄来的。
+
+    - 一个班只有一门课时：直接平铺，不多一个标题行（当前真实表就是这样）。
+    - 一个班跨多门课程时：**按课程分块**，块首加「【课程名】」标题行 ——
+      否则 17 页班级课表会变成一堆无法归因的行，教秘分不清哪行属于哪门课。
+    - 该班若出现**跨课程撞车**（同一组在两门课被排进同一格），在表尾单独列出：
+      两门课的任课教师互不知情，谁都不会觉得自己排错了，这是最难自发发现的一类。
     """
     _ensure_loaded()
+    _ensure_master_data()
     import openpyxl
+    from app.course_bridge import group_by_course, scan_cross_course
 
     entries = [e for e in _db.entries if (not class_name or e.class_name == class_name)]
     if class_name and not entries:
@@ -1139,16 +1169,36 @@ async def export_class_schedule(class_name: Optional[str] = None):
     for e in sorted(entries, key=_entry_sort_key):
         grouped.setdefault(e.class_name or "未标注班级", []).append(e)
 
+    # 跨课程撞车按班归堆（只扫导出范围：单班导出时不必惊动全表）
+    cross_by_class: dict = {}
+    for c in scan_cross_course(entries, _master_data)["conflicts"]:
+        cross_by_class.setdefault((c["place"].split("/")[0]), []).append(c)
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     used: set = set()
     for cls in sorted(grouped, key=str):
         ws = wb.create_sheet(_safe_sheet_name(cls, used))
-        _write_sheet(ws, ["周次", "星期", "节次", "上课时间", "实验项目", "学生组", "教师", "场地"],
-                     [8, 7, 8, 14, 30, 12, 10, 12])
-        for e in grouped[cls]:
-            ws.append([f"第{e.week}周", e.weekday, e.time_slot, _slot_text(e),
-                       e.experiment, e.group, e.teacher, e.room or "（未填场地）"])
+        _write_sheet(ws, ["周次", "星期", "节次", "上课时间", "课程", "实验项目",
+                          "学生组", "教师", "场地"],
+                     [8, 7, 8, 14, 16, 30, 12, 10, 12])
+        blocks = group_by_course(grouped[cls], _master_data)
+        multi_course = len(blocks) > 1
+        for course, items in blocks:
+            if multi_course:
+                ws.append([f"【{course}】"])
+                ws.cell(row=ws.max_row, column=1).font = openpyxl.styles.Font(bold=True)
+            for e in items:
+                ws.append([f"第{e.week}周", e.weekday, e.time_slot, _slot_text(e),
+                           course, e.experiment, e.group, e.teacher, e.room or "（未填场地）"])
+        # 该班的跨课程撞车：放在表尾，空一行隔开，别混进行列表里
+        for c in cross_by_class.get(cls, []):
+            ws.append([])
+            ws.append([f"⚠️ 跨课程撞车：第{c['week']}周 {c['weekday']} {c['time_slot']}"
+                       f" {c['place']}"])
+            ws.cell(row=ws.max_row, column=1).font = openpyxl.styles.Font(bold=True, color="C00000")
+            for d in c["detail"]:
+                ws.append(["", d])
     if not grouped:
         ws = wb.create_sheet("无数据")
         ws.append(["当前安排表里没有可导出的记录"])
@@ -1344,6 +1394,21 @@ async def data_audit():
     teacher_conflicts = scan["teacher_conflicts"]
     group_conflicts = scan["group_conflicts"]
 
+    # 跨课程撞车（导师点名的后续难点）：同一班同一组同一格却分属两门课程。
+    # ⚠️ 它是 group 冲突的**子集** —— 同班同组同格必然已被 group 维度抓到，
+    # 所以这里**不并入 core_total**（否则同一处冲突被数两遍），只给 group 冲突
+    # 打 `cross_course` 标记并单独计数：跨课程的两门课任课教师互不知情，
+    # 谁都不会觉得自己排错了，比同学科内的撞格更难被发现。
+    _ensure_master_data()
+    from app.course_bridge import scan_cross_course
+    cross = scan_cross_course(_db.entries, _master_data)
+    cross_conflicts = cross["conflicts"]
+    course_cov = cross["coverage"]
+    cross_keys = {(c["week"], c["weekday"], str(c["time_slot"]), c["place"])
+                  for c in cross_conflicts}
+    for c in group_conflicts:
+        c["cross_course"] = (c["week"], c["weekday"], str(c["time_slot"]), c["place"]) in cross_keys
+
     # 数据缺口（不是冲突）：这些条目没填场地，教室冲突扫描覆盖不到它们。
     # 单独报出来 —— 沉默地少扫 16 条，比报一个假冲突更危险。
     missing_samples = [
@@ -1383,6 +1448,21 @@ async def data_audit():
                 f"另有 {scan['parallel_groups']} 处「同班级不同组同一时段」属正常分批教学"
                 f"（如 1 组在 A504 做扭摆法、2 组在 A516 做声速测量），不计入冲突"
                 if scan["parallel_groups"] else ""),
+            # 跨课程口径：**必须说清它是子集**，否则教秘看到「整组 5 处 + 跨课程 3 处」
+            # 会以为一共 8 处。同时把「查没查得出来」摊开 —— 课程是项目名反推的，
+            # 主数据没初始化时全部回落默认课，跨课程恒 0 处，那是「没查」不是「没问题」
+            # （R-35「时段看不懂就整行静默丢弃」同族错误）。
+            "cross_course_conflict_count": len(cross_conflicts),
+            "cross_course_note": (
+                f"整组冲突中有 {len(cross_conflicts)} 处属跨课程撞车（同一班同一组在两门"
+                f"课程的安排撞车；已含在上面的整组计数里，不重复计）。两门课的任课教师"
+                f"互不知情，需协同改时间"
+                if cross_conflicts else
+                f"当前共 {course_cov['distinct_courses']} 门课程，未出现同班同组跨课程撞车"
+                + ("" if course_cov["master_ready"]
+                   else "（⚠️ 主数据未初始化，课程归属全部回落默认课，跨课程维度未真正生效）")
+                + _course_gap_note(course_cov)),
+            "course_coverage": course_cov,
             "missing_room_count": len(missing_room),
             "missing_room_samples": missing_samples,
             "unparsed_slot_count": len(unparsed),
@@ -1390,6 +1470,7 @@ async def data_audit():
             "room_conflicts": room_conflicts[:30],
             "teacher_conflicts": teacher_conflicts[:30],
             "group_conflicts": group_conflicts[:30],
+            "cross_course_conflicts": cross_conflicts[:30],
         },
     }
 

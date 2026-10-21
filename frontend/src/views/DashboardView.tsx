@@ -135,6 +135,27 @@ export default function DashboardView({
                 {auditData.parallel_note}
               </div>
             )}
+            {/* 跨课程口径：0 处时更要显示 —— 要区分「没出现」和「没查」。
+                课程由项目名反推，主数据未初始化时全部回落默认课，跨课程维度并未真正生效。 */}
+            {!!auditData.cross_course_note && (
+              <div className="mb-4 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
+                {auditData.cross_course_note}
+                {auditData.course_coverage && (
+                  <span className="block mt-1 text-indigo-500">
+                    课程归属：共 {auditData.course_coverage.distinct_courses} 门课，
+                    {auditData.course_coverage.explicit_course} 条记录已明确归属，
+                    {auditData.course_coverage.fallback_default} 条回落默认课
+                    {auditData.course_coverage.master_ready ? '' : '（⚠️ 主数据未初始化，课程维度未生效）'}
+                    {auditData.course_coverage.total_entries - auditData.course_coverage.project_in_master > 0 && (
+                      <>
+                        ；其中 {auditData.course_coverage.total_entries - auditData.course_coverage.project_in_master} 条
+                        的项目不在主数据里，课程按默认课处理
+                      </>
+                    )}
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* 教室冲突清单 */}
             {(auditData.room_conflicts || []).length > 0 && (
@@ -193,6 +214,9 @@ export default function DashboardView({
                         第{c.week}周 {c.weekday} {timeSlotLabels[c.time_slot] || c.time_slot} · {c.place}
                         {c.severity === 'core' && (
                           <span className="ml-2 px-1.5 py-0.5 bg-violet-600 text-white rounded text-[10px] font-normal align-middle">必须调整</span>
+                        )}
+                        {c.cross_course && (
+                          <span className="ml-1 px-1.5 py-0.5 bg-indigo-600 text-white rounded text-[10px] font-normal align-middle">跨课程撞车</span>
                         )}
                       </div>
                       {!!c.fix_hint && <div className="text-xs text-violet-600 ml-4">→ {c.fix_hint}</div>}

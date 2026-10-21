@@ -114,6 +114,8 @@ export interface AuditConflict {
   label?: string;
   /** 该怎么改，如「换一间教室即可解决」。 */
   fix_hint?: string;
+  /** 该处整组冲突是否属**跨课程撞车**（同一班同一组在两门课程的安排撞车）。 */
+  cross_course?: boolean;
 }
 
 /** `/data-audit` 返回：安排表体检报告。 */
@@ -133,6 +135,20 @@ export interface AuditData {
   /** 同班级**不同组**同一时段的条数：正常的分批教学，不是冲突，但要把口径说出来。 */
   parallel_group_count?: number;
   parallel_note?: string;
+  /** 整组冲突中属**跨课程撞车**的处数（是整组的子集，不重复计入 core）。 */
+  cross_course_conflict_count?: number;
+  /** 跨课程口径说明：0 处时也要显示 —— 要说清是"没出现"还是"没查"（主数据未初始化）。 */
+  cross_course_note?: string;
+  /** 课程归属的可信度：课程由项目名反推，反推不出来会回落默认课。 */
+  course_coverage?: {
+    total_entries: number;
+    /** 项目能在主数据里查到、课程是**查得**而非回落默认的条数。 */
+    project_in_master: number;
+    distinct_courses: number;
+    explicit_course: number;
+    fallback_default: number;
+    master_ready: boolean;
+  };
   /** 没填场地的记录数：这些条不参与教室冲突判定，属于数据缺口而非冲突。 */
   missing_room_count?: number;
   missing_room_samples?: string[];
