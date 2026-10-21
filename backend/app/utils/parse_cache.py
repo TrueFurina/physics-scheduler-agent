@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # 解析逻辑变更时 +1：旧缓存自动失效，避免"代码改了但读到旧结构"
-CACHE_VERSION = 1
+# v2：时段别名统一（"78"/15:50-18:05 → 678）+ 新增 skipped（时段无法识别的行）
+CACHE_VERSION = 2
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
 _DEFAULT_DIR = _APP_DIR / "data" / "cache"

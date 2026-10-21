@@ -11,15 +11,26 @@ TIME_SLOTS = {
     "567": "13:30-15:45",
     "678": "15:45-18:00",
     "91011": "18:30-20:45",
-    "78": "15:50-18:05",
+    "78": "15:50-18:05",  # 仅历史缓存里可能残留，新解析一律归一为 678
 }
 
 # 反查：实际时间 → 标准节次标记（Excel 里时间格式不统一，需归一化）
+#
+# ⚠️ 这里的原则是"宁可合并，不可分裂"：所有落在大致同一时段的不同写法，
+# 必须归到**同一个标签**上。冲突检查用的是标签相等（`e.week == w and
+# e.time_slot == ts`），标签一分裂，两类记录就互相看不见 —— 教室已经被占，
+# 沙盘却显示空闲，而且不报任何错。
+#
+# "78"/"15:50-18:05"（下午 7-8 节）与 "678"/"15:45-18:00"（下午 6-7-8 节）
+# 真实时间重叠 2 小时 10 分，属于同一位老师排表时的两种写法。
+# 原先它被单独留成 "78"，而沙盘/求解器/体检只枚举 567/678/91011 ——
+# 真实表里 7 条这样写法的记录（第1/3/5/7/9/13/15 周 周四）因此**完全隐形**
+# （实测：吴琼第7周周四 A502 有课，沙盘仍把该教室列为可用）。
 TIME_SLOT_NORMALIZE = {
     "13:30-15:45": "567",
     "15:45-18:00": "678",
     "18:30-20:45": "91011",
-    "15:50-18:05": "78",
+    "15:50-18:05": "678",  # 原映射到 "78"，与 678 重叠却互不可见
     "18:00-21:00": "91011",
     "14:00-17:00": "567",
     "9:00-11:15": "MORNING",
@@ -27,7 +38,7 @@ TIME_SLOT_NORMALIZE = {
     "567": "567",
     "678": "678",
     "91011": "91011",
-    "78": "78",
+    "78": "678",  # 同上
 }
 
 WEEKDAY_MAP = {
@@ -111,6 +122,8 @@ class ScheduleDatabase:
         self._by_teacher: Dict[str, List[ScheduleEntry]] = {}
         # 索引：class_name → 该班级的所有排课
         self._by_class: Dict[str, List[ScheduleEntry]] = {}
+        # 时段无法识别而被剔除的行（原样保留，用于"整日按占用处理"和体检提示）
+        self.skipped: List[Dict] = []
         self.loaded = False
 
     def load_from_excel(self, filepath: str):
@@ -124,6 +137,7 @@ class ScheduleDatabase:
         cached = parse_cache.load(filepath)
         if cached is not None:
             self.entries = [ScheduleEntry(*row) for row in cached["entries"]]
+            self.skipped = list(cached.get("skipped") or [])
             self._build_index()
             self.loaded = True
             print(f"✅ 已加载 {len(self.entries)} 条排课记录（解析缓存命中）")
@@ -134,6 +148,7 @@ class ScheduleDatabase:
         # 读取"大学物理实验安排表 (周) "工作表
         sheet = wb["大学物理实验安排表 (周) "]
         self.entries = []
+        self.skipped = []
 
         for row in sheet.iter_rows(min_row=3, values_only=True):
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
@@ -153,7 +168,23 @@ class ScheduleDatabase:
             time_str = TIME_SLOT_NORMALIZE.get(time_raw, "")
 
             if not time_str:
-                continue  # 无效或无法识别的时间段，跳过
+                # 时段看不懂就整行丢掉 —— 但**不能悄悄丢**。
+                # 丢掉的是"这间教室这个人在这一天有课"这一事实，而沙盘照样会把
+                # 这间教室推荐成空闲（实测：第3周周五 A504，翁铭华本人在上"扭摆法"，
+                # 沙盘却把"A504 周五567"列为他自己的可用时段，因为是他就更荒唐）。
+                # 所以原样记进 self.skipped，下游按"该教室/该教师当天整日占用"处理，
+                # 并在数据体检里单列出来，让教秘回原表把这格改对。
+                if room_str or teacher_str:
+                    self.skipped.append({
+                        "week": int(week),
+                        "weekday": str(weekday).strip(),
+                        "raw_ts": time_raw,
+                        "class_name": str(class_name).strip(),
+                        "experiment": str(experiment).strip() if experiment else "",
+                        "room": room_str,
+                        "teacher": teacher_str,
+                    })
+                continue  # 无效或无法识别的时间段
 
             entry = ScheduleEntry(
                 week=int(week),
@@ -176,6 +207,7 @@ class ScheduleDatabase:
         semester_start = _parse_semester_start(wb)
         parse_cache.save(filepath, {
             "entries": parse_cache.entries_to_rows(self.entries),
+            "skipped": self.skipped,
             "roles": _parse_teacher_roles(wb),
             "semester_start": semester_start.isoformat() if semester_start else None,
         })

@@ -269,6 +269,27 @@ class RescheduleAgent:
                             "teacher": e.teacher or teacher_name,
                         }
 
+        # 时段看不懂、已被剔除的行：只知道"这一天这间教室/这个人在上课"，
+        # 不知道具体节次 ⇒ **整天按占用处理**。宁可少推荐三个时段，
+        # 也不能把教秘推到一个已知有人在用的教室里。
+        unparsed_here = [
+            s for s in (getattr(self.db, "skipped", None) or [])
+            if s.get("week") == target_week
+        ]
+        for s in unparsed_here:
+            wd, rm, te = s.get("weekday"), s.get("room"), s.get("teacher")
+            info = {
+                "class_name": s.get("class_name") or "",
+                "experiment": s.get("experiment") or "",
+                "teacher": te or "",
+                "unparsed_ts": s.get("raw_ts") or "",
+            }
+            for ts in time_slots:
+                if rm:
+                    occupied_info.setdefault(f"{wd}_{ts}_{rm}", {**info, "unparsed": True})
+                if teacher_name and te and teacher_name in te:
+                    teacher_occupied.setdefault(f"{wd}_{ts}", {**info, "unparsed": True})
+
         # 学生忙碌时段：{weekday: {time_slot: 课程名文案}}
         # 优先用"带课程名"的查询（教秘要拿课程名去跟教师解释）；取不到时退回占位文案，
         # 但**绝不因为取不到名字就放行**——冲突判定仍然以 get_busy_slots 为准。
@@ -295,6 +316,13 @@ class RescheduleAgent:
                 # 检查0：教师自身该时段是否有课
                 if teacher_name and f"{wd}_{ts}" in teacher_occupied:
                     info = teacher_occupied[f"{wd}_{ts}"]
+                    if info.get("unparsed"):
+                        why = (f"您（{info['teacher']}）当天已有课（{info['class_name']} "
+                               f"{info['experiment']}），该行时段填的是「{info['unparsed_ts']}」"
+                               f"无法识别，已按整日占用处理")
+                    else:
+                        why = (f"您（{info['teacher']}）该时段已有课："
+                               f"{info['class_name']} {info['experiment']}")
                     excluded.append({
                         "weekday": wd, "time_slot": ts, "room": "",
                         "date": week_to_date(target_week, wd, self._get_semester_start()),
@@ -304,14 +332,18 @@ class RescheduleAgent:
                         "class_name": info["class_name"],
                         "experiment": info["experiment"],
                         "teacher": info["teacher"],
-                        "reason": f"您（{info['teacher']}）该时段已有课："
-                                  f"{info['class_name']} {info['experiment']}",
+                        "reason": why,
                     })
                     continue
                 for rm in rooms:
                     # 检查1：教室空闲
                     if f"{wd}_{ts}_{rm}" in occupied_info:
                         info = occupied_info[f"{wd}_{ts}_{rm}"]
+                        if info.get("unparsed"):
+                            why = (f"教室已被占用（{info['class_name']} {info['experiment']}），"
+                                   f"该行时段填的是「{info['unparsed_ts']}」无法识别，已按整日占用处理")
+                        else:
+                            why = f"教室已被占用（{info['class_name']} {info['experiment']}）"
                         excluded.append({
                             "weekday": wd, "time_slot": ts, "room": rm,
                             "date": week_to_date(target_week, wd, self._get_semester_start()),
@@ -319,7 +351,7 @@ class RescheduleAgent:
                             "class_name": info["class_name"],
                             "experiment": info["experiment"],
                             "teacher": info["teacher"],
-                            "reason": f"教室已被占用（{info['class_name']} {info['experiment']}）",
+                            "reason": why,
                         })
                         continue
                     # 检查2：学生没课（567/678 归入 567 检查）

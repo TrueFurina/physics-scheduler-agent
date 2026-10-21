@@ -609,6 +609,16 @@ async def data_audit():
         for e in missing_room[:5]
     ]
 
+    # 时段看不懂、已被剔除的行：它们没进冲突图（不知道具体节次），
+    # 但只要它们占着教室，那个教室当天其实不空 —— 沙盘按"整日占用"处理了，
+    # 体检这里必须把原文摊出来，否则教秘会以为冲突扫描覆盖了全表。
+    unparsed = list(getattr(_db, "skipped", None) or [])
+    unparsed_samples = [
+        f"第{s['week']}周 {s['weekday']} {s.get('class_name') or ''} @ {s.get('room') or '未填场地'}"
+        f"（时段原文「{s.get('raw_ts')}」）"
+        for s in unparsed[:5]
+    ]
+
     return {
         "success": True,
         "data": {
@@ -622,6 +632,8 @@ async def data_audit():
             "teacher_conflict_count": len(teacher_conflicts),
             "missing_room_count": len(missing_room),
             "missing_room_samples": missing_samples,
+            "unparsed_slot_count": len(unparsed),
+            "unparsed_slot_samples": unparsed_samples,
             "room_conflicts": room_conflicts[:30],
             "teacher_conflicts": teacher_conflicts[:30],
         },

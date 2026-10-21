@@ -112,6 +112,17 @@ class ParallelScheduler:
             if e.teacher:
                 teacher_occupied.add((e.week, e.time_slot, e.teacher))
 
+        # 时段无法识别的行：不知道具体节次 ⇒ 当天三个时段全按占用算。
+        # 少了这一步，求解器会把这些教室当成全天空闲（实测真实表里有 1 条）。
+        for s in (getattr(self.db, "skipped", None) or []):
+            if s.get("weekday") != wd:
+                continue
+            for ts in TIME_SLOTS:
+                if s.get("room"):
+                    room_occupied.add((s["week"], ts, s["room"]))
+                if s.get("teacher"):
+                    teacher_occupied.add((s["week"], ts, s["teacher"]))
+
         # 4. CP-SAT 建模（资源不足自动加周重试一次）
         for attempt_weeks in (weeks, weeks + 4):
             week_list = list(range(start_week, start_week + attempt_weeks))
@@ -167,11 +178,15 @@ class ParallelScheduler:
                     for i in range(n_u):
                         u = units[i]
                         te = unit_teacher.get((u["project"], u["group"]))
+                        teacher_busy_here = bool(te) and (wk, ts, te) in teacher_occupied
                         for r in range(n_r):
                             if (wk, ts, rooms[r]) in room_occupied:
                                 model.Add(x[(i, w, t, r)] == 0)
-                        if te and (wk, ts, te) in teacher_occupied:
-                            model.Add(x[(i, w, t, r)] == 0)
+                            # 教师占用必须**逐个教室**禁用。原先这一句写在 `for r` 循环之外，
+                            # 于是 `r` 停在 n_r-1，只有最后一个教室被禁 —— 教师互斥实际只覆盖
+                            # 1/10 的教室（实测 17 个班里 7 个班共 48 处教师双排）。
+                            if teacher_busy_here:
+                                model.Add(x[(i, w, t, r)] == 0)
 
             # 目标：尽早完成
             model.Maximize(sum((n_w - w) * x[(i, w, t, r)]

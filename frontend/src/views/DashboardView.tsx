@@ -15,6 +15,14 @@ interface Props {
 export default function DashboardView({
   auditLoading, auditData, auditError = '', statsData, statsError = '', onRetry,
 }: Props) {
+  // "没发现冲突"有两种：真干净，和"有一部分根本没检查"。后者不能标绿色。
+  const noRoom = auditData?.missing_room_count ?? 0;
+  const noSlot = auditData?.unparsed_slot_count ?? 0;
+  const hasGap = noRoom > 0 || noSlot > 0;
+  const gapText = '有 ' + [noRoom > 0 ? `${noRoom} 条记录没填场地` : '', noSlot > 0 ? `${noSlot} 条时段无法识别` : '']
+    .filter(Boolean)
+    .join('、');
+
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-6">
@@ -43,22 +51,41 @@ export default function DashboardView({
           <>
             {/* 健康总览 —— 三态：有冲突 / 无冲突但有数据缺口 / 全干净。
                 "无冲突但有缺口"不能报成绿色「整体健康」：那 N 条根本没被检查过。 */}
-            <div className={`rounded-xl p-4 mb-4 ${auditData.healthy && !(auditData.missing_room_count ?? 0)
+            <div className={`rounded-xl p-4 mb-4 ${auditData.healthy && !hasGap
               ? 'bg-green-50 border border-green-200'
               : 'bg-amber-50 border border-amber-200'}`}>
               <div className="text-lg font-medium">
                 {!auditData.healthy
                   ? '⚠️ 发现潜在冲突，建议核查'
-                  : (auditData.missing_room_count ?? 0) > 0
-                    ? `🟡 未发现资源冲突，但有 ${auditData.missing_room_count} 条记录没填场地`
+                  : hasGap
+                    ? `🟡 未发现资源冲突，但${gapText}`
                     : '✅ 安排表整体健康，未发现资源冲突'}
               </div>
               <div className="text-sm text-gray-600 mt-1">
                 共 {auditData.total_entries} 条安排 ｜ {auditData.teacher_count} 位教师 ｜ {auditData.room_count} 间场地
                 ｜ 覆盖第 {auditData.week_min}~{auditData.week_max} 周
                 {(auditData.missing_room_count ?? 0) > 0 && `｜ ${auditData.missing_room_count} 条未填场地`}
+                {(auditData.unparsed_slot_count ?? 0) > 0 && `｜ ${auditData.unparsed_slot_count} 条时段待确认`}
               </div>
             </div>
+
+            {/* 数据缺口：时段填了看不懂的内容，不知道具体节次 ⇒ 该教室当天按整日占用处理。
+                这条不能只写在后端日志里 —— 教秘得知道去哪张表改哪一格。 */}
+            {(auditData.unparsed_slot_count ?? 0) > 0 && (
+              <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <div className="text-sm font-medium text-amber-800 mb-1">
+                  ⚠️ {auditData.unparsed_slot_count} 条记录的「时段」无法识别，已按整日占用处理
+                </div>
+                <div className="text-xs text-amber-700">
+                  {(auditData.unparsed_slot_samples || []).map((s, i) => (
+                    <div key={i}>· {s}</div>
+                  ))}
+                </div>
+                <div className="text-xs text-amber-600 mt-2">
+                  这些教室当天不会再被推荐为可调时段（宁可少推荐，也不推荐一个已知有人在用的教室）。请回原表把时段一格改成「567/678/91011」或具体时间
+                </div>
+              </div>
+            )}
 
             {/* 数据缺口：没场地的条目扫不了教室冲突，必须说出来 */}
             {(auditData.missing_room_count ?? 0) > 0 && (

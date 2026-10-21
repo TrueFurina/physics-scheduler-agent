@@ -110,6 +110,9 @@ export interface AuditData {
   /** 没填场地的记录数：这些条不参与教室冲突判定，属于数据缺口而非冲突。 */
   missing_room_count?: number;
   missing_room_samples?: string[];
+  /** 时段列填了无法识别的内容而被剔除的行数：该教室当天按整日占用处理。 */
+  unparsed_slot_count?: number;
+  unparsed_slot_samples?: string[];
   room_conflicts?: AuditConflict[];
   teacher_conflicts?: AuditConflict[];
 }
