@@ -3,25 +3,26 @@
  * 覆盖：首屏 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板 → 选课咨询(懒加载)
  *      → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
  */
-const { chromium } = require('playwright-core');
+const { launch } = require('./_browser.cjs');
 const path = require('path');
 
 const SITE = process.env.SITE || 'https://physics-scheduler.app.workbuddy.host/';
-const CHROME = 'C:\\Users\\Lenovo\\AppData\\Local\\ms-playwright\\chromium-1243\\chrome-win64\\chrome.exe';
-const SHOT_DIR = 'C:\\Users\\Lenovo\\AppData\\Local\\Temp\\psprobe';
+const SHOT_DIR = process.env.PROBE_SHOT_DIR || path.join(require('os').tmpdir(), 'psprobe');
 
 const results = [];
-function rec(ok, name, detail) {
-  results.push({ ok, name, detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  — ${detail}`);
+/**
+ * 三态记录：PASS / FAIL / SKIP。
+ * SKIP 用来表达"当前产物不具备被测条件"，**绝不能**退化成 PASS ——
+ * 把没测到的写成通过，是让整套探针失去可信度的最快方式。
+ */
+function rec(ok, name, detail, opts = {}) {
+  const status = opts.skip ? 'SKIP' : ok ? 'PASS' : 'FAIL';
+  results.push({ ok, skip: !!opts.skip, name, detail });
+  console.log(`${status}  ${name}  — ${detail}`);
 }
 
 (async () => {
-  const browser = await chromium.launch({
-    executablePath: CHROME,
-    headless: true,
-    args: ['--no-proxy-server', '--disable-gpu'],
-  });
+  const browser = await launch();
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await ctx.newPage();
 
@@ -133,10 +134,11 @@ function rec(ok, name, detail) {
   // 要证明的是：`import()` 失败不会导致整页白屏。没有错误边界时，React 18 会把整棵树
   // 卸载 —— 连顶部导航一起消失，用户只能干瞪眼。有了边界，内容区出提示卡、导航还在，
   // 教秘可以立刻切到别的功能继续干活。
+  let chunkAborted = 0;   // 是否真的掐到了按需 chunk：单包旧产物没有这个文件，掐不到
   try {
     const ctx2 = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const p2 = await ctx2.newPage();
-    await p2.route('**/ParallelView-*.js', (route) => route.abort());
+    await p2.route('**/ParallelView-*.js', (route) => { chunkAborted += 1; return route.abort(); });
     await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
     await p2.getByRole('button', { name: /并行排课/ }).first().click();
@@ -148,20 +150,32 @@ function rec(ok, name, detail) {
     // 顶部导航是边界的兄弟节点，必须仍然可用 —— 这才是"降级"与"白屏"的区别
     const navAlive = /数据看板/.test(txt2) && /选课咨询/.test(txt2);
     const hasCard = /重新加载|重试/.test(txt2);
-    rec(navAlive && hasCard, '🛟 懒加载失败降级', `chunk 中断后显示提示卡（${hasCard ? '有' : '无'}）且顶部导航仍可用（${navAlive ? '是' : '否'}=非白屏）`);
+    if (!chunkAborted) {
+      rec(true, '🛟 懒加载失败降级', '当前产物是单包（没有 ParallelView-*.js），本项不适用', { skip: true });
+    } else {
+      rec(navAlive && hasCard, '🛟 懒加载失败降级', `chunk 中断 ${chunkAborted} 次，显示提示卡（${hasCard ? '有' : '无'}）且顶部导航仍可用（${navAlive ? '是' : '否'}=非白屏）`);
+    }
     await p2.screenshot({ path: path.join(SHOT_DIR, 'flow-chunk-fallback.png') });
     await ctx2.close();
   } catch (e) {
-    rec(false, '🛟 懒加载失败降级', `chunk 被中断后未出现降级提示（疑似白屏）：${String(e).slice(0, 100)}`);
+    // 没掐到 chunk 说明当前产物根本没有这个按需文件（旧单包），本项无从测起 → SKIP。
+    // 不能记 FAIL（会误导成"降级坏了"），更不能记 PASS（等于假绿）。
+    if (!chunkAborted) {
+      rec(true, '🛟 懒加载失败降级', '当前产物是单包（没有 ParallelView-*.js），本项不适用', { skip: true });
+    } else {
+      rec(false, '🛟 懒加载失败降级', `chunk 被中断 ${chunkAborted} 次后未出现降级提示（疑似白屏）：${String(e).slice(0, 100)}`);
+    }
   }
 
   rec(jsErrors.length === 0, '全程 JS 错误', `${jsErrors.length} 条${jsErrors.length ? '：' + jsErrors[0] : ''}`);
   rec(failedReq.length === 0, '全程失败请求', `${failedReq.length} 条${failedReq.length ? '：' + failedReq[0] : ''}`);
 
   await browser.close();
-  const pass = results.filter((r) => r.ok).length;
-  console.log(`\n=== 汇总：${pass}/${results.length} 通过 ===`);
-  process.exit(pass === results.length ? 0 : 1);
+  const skipped = results.filter((r) => r.skip).length;
+  const pass = results.filter((r) => r.ok && !r.skip).length;
+  const total = results.length - skipped;
+  console.log(`\n=== 汇总：${pass}/${total} 通过${skipped ? `（另有 ${skipped} 项跳过）` : ''} ===`);
+  process.exit(pass === total ? 0 : 1);
 })().catch((e) => {
   console.error('探针异常：', e);
   process.exit(2);

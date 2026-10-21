@@ -13,21 +13,17 @@
  * 退出码：0 = 全部关键断言通过；1 = 通过但不完整（如微信未接通）；2 = 运行失败
  * ------------------------------------------------------------------
  */
-const { chromium } = require('playwright-core');
+const { launch } = require('./_browser.cjs');
 const fs = require('fs');
 const path = require('path');
 
 const SITE = process.env.PROBE_URL || 'https://physics-scheduler.app.workbuddy.host/';
-const EXE = process.env.PROBE_CHROME ||
-  'C:/Users/Lenovo/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe';
 const SHOT_DIR = process.env.PROBE_SHOT_DIR || path.join(require('os').tmpdir(), 'psprobe');
 const TEACHERS = ['吴琳', '吴琼', '张妹玉', '林晨', '林珠云', '柯达', '洪锦泉', '翁铭华', '肖刚', '郑辉', '鄢仁文', '钟蔚', '陈胜钰'];
 
 (async () => {
-  const browser = await chromium.launch({
-    executablePath: EXE, headless: true,
-    args: ['--no-proxy-server', '--ignore-certificate-errors'],
-  });
+  // --ignore-certificate-errors：演示路径要去请求云端登录域，个别环境有企业证书拦截
+  const browser = await launch(['--ignore-certificate-errors']);
   const ctx = await browser.newContext({ locale: 'zh-CN', viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
 
@@ -96,5 +92,14 @@ const TEACHERS = ['吴琳', '吴琼', '张妹玉', '林晨', '林珠云', '柯�
   await browser.close();
   const failed = checks.filter((c) => !c.pass);
   console.log('\n=== 汇总：' + (checks.length - failed.length) + '/' + checks.length + ' 通过 ===');
+  // 本地地址跑这个探针时，云端 OAuth 两项**必然**失败：云端会校验 callback 域名，
+  // 127.0.0.1 不在白名单里（表现为 authorize 返回 400、二维码拉不出来）。
+  // 这属于环境限制，不是回归 —— 必须显式说明，否则下一个看到 8/10 的人会去白抓 bug。
+  if (/127\.0\.0\.1|localhost/.test(SITE)) {
+    console.log(
+      'ℹ️  当前是本地地址：涉及云端 OAuth 的两项（qrconnect / 扫码界面）预期失败，' +
+        '因为云端只信任正式发布域名。要验证登录链路请不设 PROBE_URL（默认打线上）。',
+    );
+  }
   process.exit(failed.length === 0 ? 0 : 1);
 })().catch((e) => { console.error('PROBE FAILED:', e); process.exit(2); });
