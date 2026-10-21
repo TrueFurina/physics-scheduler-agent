@@ -102,7 +102,11 @@ def test_conflict_is_skipped_not_forced(db):
 
     assert r["applied"] == 0, r
     assert r["skipped"] == 1, r
-    assert any("已有安排" in d for d in r["details"]), r
+    # 2026-10-22 冲突分级后文案从笼统的「已有安排」升级为「撞上什么 + 怎么改」，
+    # 这里断言的是**分级本身**（有 kind / 有处理建议），不再锚死旧措辞。
+    assert any("核心冲突" in d for d in r["details"]), r
+    assert r["conflicts"] and r["conflicts"][0]["kind"] == "room", r
+    assert "换一间教室" in r["conflicts"][0]["fix_hint"], r
     # 第 5 周那条原地不动（源周是第5周，它没被移走）
     assert _weeks(db) == [3, 4, 5], f"冲突时不该动任何记录，实际 {_weeks(db)}"
 

@@ -1317,8 +1317,6 @@ async def data_audit():
 
     from collections import defaultdict
 
-    room_map = defaultdict(list)     # (week, weekday, slot, room) -> entries
-    teacher_map = defaultdict(list)  # (week, weekday, slot, teacher) -> entries
     weeks, teachers, rooms = set(), set(), set()
     missing_room = []                # 无场地条目：不能参与"同室"判定，但要作为数据缺口报出来
 
@@ -1328,37 +1326,23 @@ async def data_audit():
             teachers.add(e.teacher)
         if (e.room or '').strip():
             rooms.add(e.room)
-            # 按 blocked 落图：一条 `14:00-17:00` 的记录同时占 567 和 678，
-            # 只按主标签落图会漏掉 678 那一半（R-40）。
-            for slot in getattr(e, "blocked", None) or [e.time_slot]:
-                room_map[(e.week, e.weekday, slot, e.room)].append(e)
         else:
             # ⚠️ 曾经无条件放进 room_map：于是一堆"空场地"被归到同一个 key
             # (week, weekday, slot, '')，凡两条以上就报"教室冲突（同室同段多班）"，
             # 而 place 是空串 —— 界面上显示成"第1周 周五 18:30-20:45 ·"，场地空着。
             # 没填场地不可能撞场地，这是纯假阳性；真正该说的是"这些条没场地"。
+            # 冲突扫描本身已移到 `conflict_model.scan_table`（空场地同样不进图）。
             missing_room.append(e)
-        if e.teacher:
-            for slot in getattr(e, "blocked", None) or [e.time_slot]:
-                teacher_map[(e.week, e.weekday, slot, e.teacher)].append(e)
 
-    def _find_conflicts(source):
-        found = []
-        for key, entries in source.items():
-            parties = {f"{e.class_name}/{e.group}" for e in entries if e.class_name}
-            if len(parties) > 1:  # 同一时段同一资源被多个班级/组使用
-                found.append({
-                    "week": key[0], "weekday": key[1], "time_slot": key[2],
-                    "place": key[3],
-                    "involved": sorted(parties),
-                    "detail": [f"{e.class_name}/{e.group} {e.experiment}（{e.teacher or '未指派教师'}）"
-                               for e in entries],
-                })
-        found.sort(key=lambda c: (c["week"], c["weekday"], str(c["time_slot"])))
-        return found
+    from app.conflict_model import scan_table
 
-    room_conflicts = _find_conflicts(room_map)
-    teacher_conflicts = _find_conflicts(teacher_map)
+    # 冲突分级（2026-10-22，导师业务规则）：三类核心冲突场地/教师/**整组**分别扫描，
+    # 每条带 severity + 处理建议。整组维度此前完全没查 —— 调课把 A 组的课挪到
+    # 该组已有课的格子时，系统会一声不吭地制造"一个组分身两处"。
+    scan = scan_table(_db.entries)
+    room_conflicts = scan["room_conflicts"]
+    teacher_conflicts = scan["teacher_conflicts"]
+    group_conflicts = scan["group_conflicts"]
 
     # 数据缺口（不是冲突）：这些条目没填场地，教室冲突扫描覆盖不到它们。
     # 单独报出来 —— 沉默地少扫 16 条，比报一个假冲突更危险。
@@ -1377,10 +1361,11 @@ async def data_audit():
         for s in unparsed[:5]
     ]
 
+    core_total = len(room_conflicts) + len(teacher_conflicts) + len(group_conflicts)
     return {
         "success": True,
         "data": {
-            "healthy": not room_conflicts and not teacher_conflicts,
+            "healthy": core_total == 0,
             "total_entries": len(_db.entries),
             "teacher_count": len(teachers),
             "room_count": len(rooms),
@@ -1388,12 +1373,23 @@ async def data_audit():
             "week_max": max(weeks) if weeks else 0,
             "room_conflict_count": len(room_conflicts),
             "teacher_conflict_count": len(teacher_conflicts),
+            "group_conflict_count": len(group_conflicts),
+            "core_conflict_count": core_total,
+            # 同班**不同组**同格并行：正常的分批教学（真实表 47 处），不是冲突。
+            # 必须说出来 —— 教秘自己按班级一数会看到重叠，若体检只报"0 冲突"
+            # 而不解释这 47 处，他就不会再信这个体检。
+            "parallel_group_count": scan["parallel_groups"],
+            "parallel_note": (
+                f"另有 {scan['parallel_groups']} 处「同班级不同组同一时段」属正常分批教学"
+                f"（如 1 组在 A504 做扭摆法、2 组在 A516 做声速测量），不计入冲突"
+                if scan["parallel_groups"] else ""),
             "missing_room_count": len(missing_room),
             "missing_room_samples": missing_samples,
             "unparsed_slot_count": len(unparsed),
             "unparsed_slot_samples": unparsed_samples,
             "room_conflicts": room_conflicts[:30],
             "teacher_conflicts": teacher_conflicts[:30],
+            "group_conflicts": group_conflicts[:30],
         },
     }
 
@@ -1881,21 +1877,31 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
             ],
         }
 
-    applied, skipped, details = 0, 0, []
+    applied, skipped, details, conflicts = 0, 0, [], []
     for e in src_entries:
         # 目标周该格是否已有人：按**真实占住的节次**比，而不是主标签相等。
         # 源记录是 `14:00-17:00`（主标签 567）时，目标周的 678 若已有课，
         # 主标签比较会判"不冲突"，于是把两条课叠在同一间教室里（R-40）。
-        e_blocks = set(getattr(e, "blocked", None) or [e.time_slot])
-        conflict = any(
-            o is not e and o.week == target_week and o.weekday == e.weekday
-            and not e_blocks.isdisjoint(set(getattr(o, "blocked", None) or [o.time_slot]))
-            and (o.room == e.room or (o.teacher and o.teacher == e.teacher))
-            for o in _db.entries
-        )
-        if conflict:
+        #
+        # 2026-10-22 升级为**分级**：旧逻辑只回一个布尔 + 一句"已有安排"，
+        # 教秘分不清是教室被占（换一间就行）还是老师本人有课（必须改时间）。
+        # 顺带补上原先完全没查的**整组冲突**，并修掉一个潜在假阳性：
+        # 旧写法 `o.room == e.room` 在两条都无场地（绪论课）时恒真 ⇒ 凭空报冲突。
+        from app.conflict_model import classify_move
+
+        hits = classify_move(
+            _db.entries, week=target_week, weekday=e.weekday,
+            slots=set(getattr(e, "blocked", None) or [e.time_slot]),
+            room=e.room, teacher=e.teacher, class_name=e.class_name,
+            group=e.group, exclude=e)
+        if hits:
             skipped += 1
-            details.append(f"第{e.week}周 {e.weekday} {e.time_slot} {e.group or e.class_name}：目标周该时段已有安排，跳过")
+            kinds = "；".join(dict.fromkeys(
+                f"{h['label']}（{h['fix_hint']}）" for h in hits))
+            details.append(
+                f"第{e.week}周 {e.weekday} {e.time_slot} {e.group or e.class_name}："
+                f"目标周该时段撞上核心冲突 —— {kinds}，本次未移动（必须调整后再申请）")
+            conflicts.extend(hits)
             continue
         details.append(f"{e.weekday} {e.time_slot} {e.room} {e.experiment}（{e.class_name}/{e.group}）：第{e.week}周 → 第{target_week}周")
         e.week = target_week
@@ -1911,7 +1917,8 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
         conn.commit()
         conn.close()
 
-    return {"applied": applied, "skipped": skipped, "details": details}
+    return {"applied": applied, "skipped": skipped, "details": details,
+            "conflicts": conflicts}
 
 
 @router.post("/requests", summary="教师提交调课申请（F6）", dependencies=_ADMIN_ONLY)
@@ -2039,15 +2046,17 @@ async def apply_move(req: ApplyMoveRequest):
     }
     result = await run_in_threadpool(_apply_reschedule, record, True, req.key or "")
 
+    conflicts = result.get("conflicts") or []
     applied = result.get("applied", 0)
     skipped = result.get("skipped", 0)
     if applied:
         message = f"✅ 已移动 {applied} 条排课记录到第{req.target_week}周"
         if skipped:
-            message += f"，{skipped} 条因冲突跳过"
+            message += f"，{skipped} 条因核心冲突未移动"
     elif skipped:
-        message = (f"⚠️ 调课已批准，但目标周该时段已有安排，{skipped} 条记录未自动移动"
-                   f"（请人工协调）")
+        kinds = "、".join(dict.fromkeys(c["label"] for c in conflicts)) or "已有安排"
+        message = (f"⚠️ 调课已批准，但目标周撞上**核心冲突**（{kinds}），"
+                   f"{skipped} 条记录未自动移动 —— 核心冲突必须调整，不能强制通过")
     else:
         message = "⚠️ 调课已批准，但未找到可自动移动的排课记录（请在教务系统中人工修改）"
 
@@ -2055,5 +2064,7 @@ async def apply_move(req: ApplyMoveRequest):
     if details:
         message += "\n" + "\n".join(details[:6])
 
-    return {"success": True, "data": {"applied": applied, "skipped": skipped,
-                                      "details": details}, "message": message}
+    return {"success": True,
+            "data": {"applied": applied, "skipped": skipped, "details": details,
+                     "conflicts": conflicts},
+            "message": message}

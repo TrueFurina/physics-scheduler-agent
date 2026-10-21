@@ -106,6 +106,14 @@ export interface AuditConflict {
   time_slot: string;
   place: string;
   detail: string[];
+  /** 冲突分级（2026-10-22）：core=必须调整，不可强制通过。 */
+  severity?: 'core';
+  /** 冲突类型：room 场地 / teacher 教师 / group 同一班级同一组。 */
+  kind?: 'room' | 'teacher' | 'group';
+  /** 人类可读的类型名，如「场地被占」。 */
+  label?: string;
+  /** 该怎么改，如「换一间教室即可解决」。 */
+  fix_hint?: string;
 }
 
 /** `/data-audit` 返回：安排表体检报告。 */
@@ -118,6 +126,13 @@ export interface AuditData {
   week_max: number;
   room_conflict_count: number;
   teacher_conflict_count: number;
+  /** 同一班级同一组在同一时段被排了两次 —— 此前完全没查（2026-10-22 补上）。 */
+  group_conflict_count?: number;
+  /** 三类核心冲突合计。 */
+  core_conflict_count?: number;
+  /** 同班级**不同组**同一时段的条数：正常的分批教学，不是冲突，但要把口径说出来。 */
+  parallel_group_count?: number;
+  parallel_note?: string;
   /** 没填场地的记录数：这些条不参与教室冲突判定，属于数据缺口而非冲突。 */
   missing_room_count?: number;
   missing_room_samples?: string[];
@@ -126,6 +141,7 @@ export interface AuditData {
   unparsed_slot_samples?: string[];
   room_conflicts?: AuditConflict[];
   teacher_conflicts?: AuditConflict[];
+  group_conflicts?: AuditConflict[];
 }
 
 /** `/stats` 返回：利用率与工作量统计。 */
