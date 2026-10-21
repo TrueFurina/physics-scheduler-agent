@@ -39,7 +39,7 @@ export default function IdentityView({
         <div className="flex items-center justify-between">
           <div>
             <h3 className="font-medium text-gray-900">🤖 排课自动生成</h3>
-            <p className="text-sm text-gray-500 mt-1">基于约束求解器，自动生成完整排课方案（教室/教师/学生三重不冲突）</p>
+            <p className="text-sm text-gray-500 mt-1">基于约束求解器生成排课初稿：教室/教师/班级互斥，并逐周避开现有安排表已占用的时段</p>
           </div>
           <button
             onClick={onAutoSchedule}
@@ -50,7 +50,7 @@ export default function IdentityView({
           </button>
         </div>
         {autoScheduleMsg && (
-          <div className="mt-4 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 whitespace-pre-wrap max-h-64 overflow-y-auto">
+          <div className="mt-4 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 whitespace-pre-wrap max-h-96 overflow-y-auto">
             {autoScheduleMsg}
           </div>
         )}

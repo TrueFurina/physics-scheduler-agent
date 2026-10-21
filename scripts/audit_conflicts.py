@@ -24,6 +24,11 @@
 ----
     D:/miniconda3_new/python.exe scripts/audit_conflicts.py [--site URL] [--week 7]
 
+覆盖三条"承诺"：
+    沙盘     /chat 给出的每个「可用时段」都不撞已排的课
+    自动排课 /auto-schedule 给出的每条方案都带周次、且该周该格不撞已排的课
+    一键排课 /parallel/solve 的方案内部不自撞、也不撞别的班
+
 退出码：0 = 未发现冲突；1 = 发现冲突（可直接挂 CI）。
 """
 
@@ -176,6 +181,69 @@ def audit_sandbox(site: str, rows: List[Dict], weeks: List[int]) -> Tuple[List[s
     return problems, stat
 
 
+def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
+    """验"一键自动排课"（首屏第一个按钮）。
+
+    这一路原本不在校验范围内，因为它**不返回周次** —— 没有周次就没法跟原始表对。
+    R-37 修好后方案带 `week`，于是"推荐的每一格都不撞"这条承诺也能被独立核对了。
+    在旧实现上跑本函数会直接报"方案条目不周日次"，这本身就是回归信号。
+    """
+    problems: List[str] = []
+    try:
+        resp = http_json(f"{site}/api/reschedule/auto-schedule", {})
+    except Exception as e:
+        return [f"[自动排课] 请求失败：{e}"]
+
+    sched = (resp.get("data") or {}).get("schedule") or []
+    if not sched:
+        return ["[自动排课] 没有返回任何排课条目"]
+
+    weeks_in_table = sorted({r["week"] for r in rows})
+    lo, hi = weeks_in_table[0], weeks_in_table[-1]
+    missing_week = [s for s in sched if not isinstance(s.get("week"), int)]
+    if missing_week:
+        problems.append(
+            f"[自动排课] {len(missing_week)} 条方案没有周次 —— 教秘不知道该用到哪一周，"
+            f"也无法与已有安排表比对"
+        )
+
+    # ① 与原始表逐条对：同周、同天、真实时钟区间重叠 ⇒ 教室/教师不得撞
+    for u in sched:
+        if not isinstance(u.get("week"), int):
+            continue
+        if not (lo <= u["week"] <= hi):
+            problems.append(f"[自动排课] 第{u['week']}周超出表范围（第{lo}–{hi}周）")
+            continue
+        for e in rows:
+            if e["week"] != u["week"] or e["weekday"] != u["weekday"]:
+                continue
+            if not overlap(u["time_slot"], e["slot"]):
+                continue
+            if e["room"] and e["room"] == u.get("room"):
+                problems.append(
+                    f"[自动排课] 第{u['week']}周 {u['weekday']} {u['time_slot']} 排进教室 {u['room']}，"
+                    f"但 {e['class']} 当天 {e['slot']}({e['raw_ts']}) 已在该教室"
+                )
+            if u.get("teacher") and teacher_hits(e["teacher"], u["teacher"]):
+                problems.append(
+                    f"[自动排课] 第{u['week']}周 {u['weekday']} {u['time_slot']} 排了 {u['teacher']}，"
+                    f"但此人当天 {e['slot']}({e['raw_ts']}) 在 {e['class']} 有课"
+                )
+
+    # ② 方案内部：同一周同一时段，教室/教师/班级都不得重复
+    for field, label in (("room", "教室"), ("teacher", "教师"), ("class_name", "班级")):
+        seen: Dict[Tuple, List[str]] = defaultdict(list)
+        for u in sched:
+            if not isinstance(u.get("week"), int) or not u.get(field):
+                continue
+            seen[(u["week"], u["weekday"], u["time_slot"], u[field])].append(u.get("course", ""))
+        for k, courses in seen.items():
+            if len(courses) > 1:
+                problems.append(f"[自动排课] 方案自撞：第{k[0]}周 {k[1]} {k[2]} {label} {k[3]} 同时排了 {courses}")
+
+    return problems
+
+
 def audit_solver(site: str, rows: List[Dict]) -> List[str]:
     """验"一键排课"：方案内部不得自撞，也不得撞别的班已排的课。"""
     problems = []
@@ -229,6 +297,7 @@ def main() -> int:
     ap.add_argument("--site", default=os.getenv("SITE", "http://127.0.0.1:8023"))
     ap.add_argument("--week", default="")
     ap.add_argument("--skip-sandbox", action="store_true")
+    ap.add_argument("--skip-auto", action="store_true")
     args = ap.parse_args()
     site = args.site.rstrip("/")
 
@@ -246,6 +315,10 @@ def main() -> int:
             f"沙盘：校验 {stat['teachers']} 位教师 × {len(weeks)} 个周次 = {stat['queries']} 次请求，"
             f"逐条核对 {stat['slots']} 个「可用时段」（失败 {stat['failed']} 次）"
         )
+    if not args.skip_auto:
+        auto = audit_auto_schedule(site, rows)
+        all_problems += auto
+        print(f"自动排课：一键自动排课方案逐条核对（{len(auto)} 处问题）")
     plans = audit_solver(site, rows)
     all_problems += plans
 

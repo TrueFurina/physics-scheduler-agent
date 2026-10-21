@@ -1,7 +1,7 @@
 /**
  * 线上主流程 UI 点测（只读，不改任何数据）
- * 覆盖：首屏 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板 → 选课咨询(懒加载)
- *      → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
+ * 覆盖：首屏 → 一键自动排课 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板
+ *      → 选课咨询(懒加载) → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
  */
 const { launch } = require('./_browser.cjs');
 const path = require('path');
@@ -56,6 +56,31 @@ function rec(ok, name, detail, opts = {}) {
     rec(teacherCount >= 13, '首屏教师列表', `渲染 ${teacherCount}/13 位真实教师，首屏 ${loadMs}ms`);
   } catch (e) {
     rec(false, '首屏教师列表', `45s 内未渲染出教师列表：${String(e).slice(0, 80)}`);
+  }
+
+  // 🤖 一键自动排课 —— 首屏第一个按钮，也是全项目唯一没有正确性测试的引擎（R-37）。
+  // 旧实现的返回值里**没有周次**：教秘拿到一份"不知道属于哪一周"的课表，
+  // 而且它从不读已有安排表。这里断言三件事，缺一不可：
+  //   ① 结果里出现「第N周：」——方案落地到具体周次；
+  //   ② 明确写出未校验项——没校验就别声称三重不冲突；
+  //   ③ 成功数 = 任务数（否则说明又被编造的约束判死了）。
+  try {
+    const tA = Date.now();
+    await page.getByRole('button', { name: /一键自动排课/ }).first().click();
+    // 等待条件必须是"只在结果出现后才有"的串：页面别处没有「个教学任务」
+    await page.waitForFunction(() => /个教学任务/.test(document.body.innerText), { timeout: 120000 });
+    await page.waitForTimeout(500);
+    const txt = await page.evaluate(() => document.body.innerText);
+    const m = txt.match(/成功\s*(\d+)\/(\d+)\s*个教学任务/);
+    const hasWeek = /第\d+周：/.test(txt);
+    const honest = /未校验/.test(txt);
+    const ok = !!m && hasWeek && honest && m[1] === m[2];
+    rec(ok, '🤖 一键自动排课（带周次）',
+      `${Date.now() - tA}ms 返回，${m ? `${m[1]}/${m[2]} 个教学任务` : '未见结果摘要'}`
+      + `，周次${hasWeek ? '有' : '缺'}，未校验声明${honest ? '有' : '缺'}`);
+    await page.screenshot({ path: path.join(SHOT_DIR, 'flow-auto-schedule.png') });
+  } catch (e) {
+    rec(false, '🤖 一键自动排课（带周次）', String(e).slice(0, 100));
   }
 
   // F2：点第一位教师 → 我的课程
@@ -196,7 +221,16 @@ function rec(ok, name, detail, opts = {}) {
     await p2.route('**/ParallelView-*.js', (route) => { chunkAborted += 1; return route.abort(); });
     await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
-    await p2.getByRole('button', { name: /并行排课/ }).first().click();
+    // 点一次可能"没掐到"：动态 import 还没发起就被判定结束，会让本项退化成 SKIP。
+    // SKIP 本身诚实，但**偶发的 SKIP 等于把这一项长期漏测**（实测三次里漏一次）。
+    // 所以重载后允许再点一次，两次都没发起请求才认定为"单包产物，本项不适用"。
+    for (let attempt = 0; attempt < 2 && !chunkAborted; attempt++) {
+      await p2.getByRole('button', { name: /并行排课/ }).first().click();
+      await p2.waitForTimeout(1200);
+      if (chunkAborted) break;
+      await p2.reload({ waitUntil: 'domcontentloaded' });
+      await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
+    }
     await p2.waitForFunction(
       () => /页面资源已更新|这个模块遇到了问题/.test(document.body.innerText),
       { timeout: 30000 },

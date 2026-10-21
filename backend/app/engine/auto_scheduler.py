@@ -1,65 +1,196 @@
-"""排课自动生成——OR-Tools CP-SAT 求解器（P0 升级版）
+"""排课自动生成 —— OR-Tools CP-SAT 求解器
 
-用 Google OR-Tools 的 CP-SAT 求解器处理真实约束（433 条数据）：
-- 硬约束：教室/教师/学生 三重不冲突 + 教室容量 + 实验课必须在实验室
-- 优化目标：最大化排课数量 + 教师周课时均衡
+本文件在第十三批里被整体重写。原实现有四个"自述与事实不符"的问题：
 
-相比贪心：能处理真实规模、保证全局最优（或接近最优）。
+1. **没有周次维度**（R-37）。决策变量只有 (星期, 时段, 教室)，返回的方案里
+   没有 `week` 字段 —— 教秘拿到一份"不知道属于哪一周"的课表。用真实表实测：
+   同一份方案落到第 2 周有 7/15 条撞课，第 8–10 周有 10/15 条。
+2. **不与现有安排表做任何冲突检查**（R-37）。约束只在"本次新生成的任务之间"
+   生效，完全不知道学校已经排定的 433 条记录。note 却写着"教室/教师/学生三重不冲突"。
+3. **容量是编的**（R-38）。房间容量按"名字里有没有'大'字"近似（120 / 否则 60），
+   班级人数按"名字里有没有'、'或','"近似（85 / 否则 60）。真实表 10 间教室
+   （A410…A516）没有一个含"大"字 ⇒ 全部按 60 人 ⇒ 所有合班任务永久不可排，
+   实测 30 个任务里 15 个排不进，而原因统一写成"资源不足或约束过紧"。
+   安排表里**根本没有容量字段**，这两个数字都是凭空造的。
+4. **学生维度只是名义上的**（R-39）。`self.student` 默认空对象（上传学生课表是
+   管理员接口，前端从不调用），`get_busy_slots(1)` 恒为空 ⇒ 学生冲突从未生效。
+
+现在：
+  决策：任务 i → (第 w 周, 星期 d, 时段 t)；教室在求解后按可用清单分配
+  硬约束（全部逐周生效）
+    1. 每个任务最多排一次
+    2. 同一周、同一星期、同一时段的**教室并发数**不超过该格可用教室数
+       （等价于"同一教室同时段最多一个任务"，但不逐教室建变量）
+    3. 同一教师、同一周、同一星期、同一时段最多一个任务
+    4. 同一班级、同一周、同一星期、同一时段最多一个任务
+    5. 与**现有安排表**对齐：该周该天该时段教室/教师已被占 → 该格不进候选域
+    6. 学生课表（已上传才生效）：该周该天该时段有课 → 该格不进候选域
+  目标：最大化排入数量
+
+为什么教室只做"并发数"约束：10 间教室对任务是可互换的，逐教室建变量会让
+CP-SAT 面对 10! 量级的对称解，实测 30 个任务 5.2 万个布尔变量跑满 10 秒
+连可行解都拿不到（status=UNKNOWN、solved=0）。改成"每格能塞几个班"的聚合
+约束后剩 5.9 千个变量，1.3 秒拿到 OPTIMAL 30/30。教室在求解后按可用清单
+顺序分配 —— 对教学任务而言，选哪间同类实验室没有业务差别。
+
+口径说明
+--------
+- 时段按**真实时钟区间**判重叠，不按标签字符串相等：标签体系里历史出现过
+  `78` / `15:50-18:05` 这类写法（R-34），别处已统一映射，这里再独立判一次，
+  与 `scripts/audit_conflicts.py`（独立 oracle）同一口径。
+- 时段无法识别的行（`db.skipped`）按**整日占用**处理，与
+  `reschedule_agent.find_slots_with_reasons` 一致（R-35）。
+- 绪论课不参与自动排课：这类记录的实验名本身就写着"教室已安排，请查系统"
+  或"教室自己申请"，教室不在安排表里，硬排进实验室是错的。
+  这条与 `parallel_scheduler._is_intro` 同一口径。
 """
 
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Set, Tuple
 
 from ortools.sat.python import cp_model
 
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.student_schedule import StudentSchedule
 
-# 可排课时段（工作日 3 个时段）
+# 可排课时段（工作日 3 个下午时段）
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 TIME_SLOTS = ["567", "678", "91011"]
 
+# 时段标签 → 真实时钟区间（分钟）。`567` 与 `678` 在 15:45 首尾相接但**不重叠**。
+_SLOT_SPAN = {
+    "567": (13 * 60 + 30, 15 * 60 + 45),
+    "678": (15 * 60 + 45, 18 * 60),
+    "78": (15 * 60 + 50, 18 * 60 + 5),
+    "91011": (18 * 60 + 30, 20 * 60 + 45),
+    "MORNING": (9 * 60, 11 * 60 + 15),
+}
+
+# 教师字段可能是"吴琳、张三"这类多名共用
+_TEACHER_SEPS = "、，,/ "
+
+
+def _spans_overlap(a: str, b: str) -> bool:
+    """两个时段标签的真实时钟区间是否相交。未知标签一律视为"整天占用"。"""
+    sa, sb = _SLOT_SPAN.get(a), _SLOT_SPAN.get(b)
+    if sa is None or sb is None:
+        return True
+    return max(sa[0], sb[0]) < min(sa[1], sb[1])
+
+
+def _teacher_names(raw: Optional[str]) -> List[str]:
+    """把"吴琳、张三"切成姓名列表。不按子串匹配（"李明"不该命中"李明华"）。"""
+    if not raw:
+        return []
+    out, buf = set(), raw
+    for sep in _TEACHER_SEPS:
+        buf = buf.replace(sep, "\n")
+    for part in buf.split("\n"):
+        p = part.strip()
+        if p:
+            out.add(p)
+    return sorted(out)
+
+
+def _is_intro(project: str) -> bool:
+    """绪论课已单独安排（教室已定/自申请），不参与自动排课"""
+    return "绪论" in (project or "")
+
 
 class AutoScheduler:
-    """排课自动生成器（CP-SAT 求解）"""
+    """排课自动生成器（CP-SAT 求解，带周次维度）"""
 
     def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None):
         self.db = db
         self.student = student
 
+    # ------------------------------------------------------------------ 取数
     def _get_rooms(self) -> List[str]:
         return self.db.get_all_rooms()
 
-    def _get_course_sections(self) -> List[Dict]:
-        """提取需要排课的教学任务（教师 + 课程 + 班级 + 人数）"""
-        sections = []
-        seen = set()
+    def _get_course_sections(self) -> Tuple[List[Dict], int]:
+        """提取需要排课的教学任务（教师 + 课程 + 班级）。
+
+        返回 (任务列表, 被排除的绪论任务数)。
+        """
+        sections, seen = [], set()
+        excluded_intro = 0
         for e in self.db.entries:
+            if _is_intro(e.experiment or ""):
+                key = (e.teacher, e.experiment, e.class_name)
+                if key not in seen:
+                    seen.add(key)
+                    excluded_intro += 1
+                continue
             key = (e.teacher, e.experiment, e.class_name)
             if key in seen:
                 continue
             seen.add(key)
-            # 人数估算：合班（含"、"或"，"）≈ 85，单班 ≈ 60
-            class_size = 85 if (e.class_name and ("、" in e.class_name or "," in e.class_name)) else 60
             sections.append({
-                "teacher": e.teacher,
+                "teacher": e.teacher or "",
                 "course": e.experiment or "未知实验",
-                "class_name": e.class_name,
-                "size": class_size,
+                "class_name": e.class_name or "",
             })
-        return sections
+        return sections, excluded_intro
 
-    def solve(self, max_sections: int = 30) -> Dict:
-        """用 CP-SAT 求解排课方案
+    def _get_weeks(self) -> List[int]:
+        """表中出现的周次区间（不用 `get_week_range()`：它对未加载/空表返回 (0,0)，
+        而元组是真值，很容被当成"有效范围"继续用 —— R-32 踩过这个坑）。"""
+        ws = sorted({int(e.week) for e in self.db.entries
+                     if getattr(e, "week", None) and int(e.week) > 0})
+        if not ws:
+            return [1]
+        return list(range(ws[0], ws[-1] + 1))
 
-        变量：每个教学任务 → (weekday, time_slot, room) 组合的布尔选择
-        硬约束：
-          1. 同一教室同一时段最多一个班
-          2. 同一教师同一时段最多一个班
-          3. 教室容量 >= 班人数
-          4. 实验课必须在实验室（is_lab）
-        目标：最大化排课数量
+    def _occupancy(self) -> Tuple[Set[Tuple], Set[Tuple]]:
+        """现有安排表已经占住的格子。
+
+        返回 (room_busy, teacher_busy)：
+            room_busy    = {(week, weekday, time_slot, room), ...}
+            teacher_busy = {(week, weekday, time_slot, teacher), ...}
         """
-        sections = self._get_course_sections()
+        room_busy: Set[Tuple] = set()
+        teacher_busy: Set[Tuple] = set()
+        for e in self.db.entries:
+            for ts in TIME_SLOTS:
+                if not _spans_overlap(e.time_slot, ts):
+                    continue
+                if e.room:
+                    room_busy.add((int(e.week), e.weekday, ts, e.room))
+                for tn in _teacher_names(e.teacher):
+                    teacher_busy.add((int(e.week), e.weekday, ts, tn))
+
+        # 时段看不懂、已被剔除的行：只知道"这天这间教室/这个人在上课"，
+        # 不知道具体节次 ⇒ 三个时段全按占用算（宁可少推荐，不可推荐到占用中）。
+        for s in (getattr(self.db, "skipped", None) or []):
+            try:
+                wk, wd = int(s.get("week")), s.get("weekday")
+            except (TypeError, ValueError):
+                continue
+            if not wd:
+                continue
+            for ts in TIME_SLOTS:
+                if s.get("room"):
+                    room_busy.add((wk, wd, ts, s["room"]))
+                for tn in _teacher_names(s.get("teacher")):
+                    teacher_busy.add((wk, wd, ts, tn))
+        return room_busy, teacher_busy
+
+    def _student_busy(self, weeks: List[int]) -> Optional[Dict[int, Dict[str, Set[str]]]]:
+        """学生占用（按周）。**没有学生数据时返回 None**，并在响应里如实标注
+        未校验 —— 而不是假装"三重不冲突"。"""
+        if not self.student:
+            return None
+        if not getattr(self.student, "students", None):
+            return None
+        try:
+            return {w: (self.student.get_busy_slots(w) or {}) for w in weeks}
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------ 求解
+    def solve(self, max_sections: int = 30) -> Dict:
+        sections, intro_excluded = self._get_course_sections()
         if not sections:
             return {"success": False, "error": "没有可排课的教学任务"}
 
@@ -67,142 +198,216 @@ class AutoScheduler:
         if not rooms:
             return {"success": False, "error": "没有可用教室"}
 
-        # 限制规模保证求解速度（真实 433 条 → 按需截取前 N 个任务）
-        sections = sections[:max_sections]
+        total_all = len(sections)
+        weeks = self._get_weeks()
+        room_busy, teacher_busy = self._occupancy()
+        student_busy = self._student_busy(weeks)
 
-        # 房间类型信息：从排课记录推断 is_lab
-        lab_rooms = set()
-        for e in self.db.entries:
-            if "实验室" in (e.experiment or "") or e.room and "实" in str(e.room):
-                lab_rooms.add(e.room)
+        # 限制规模保证求解速度（全表 171 个任务 × 16 周 × 15 时段 × 10 教室过重）
+        sections = sections[:max(1, int(max_sections))]
+
+        # ---- 候选域：先按"现有表占用"剪掉不可用的格子，模型只建可行格 ----
+        # `free_rooms[(w,d,t)]` = 该格当前还空着的教室（顺序稳定，用于求解后分配）
+        free_rooms: Dict[Tuple, List[str]] = {}
+        for w in weeks:
+            for d in WEEKDAYS:
+                for t in TIME_SLOTS:
+                    idle = []
+                    for r in rooms:
+                        if (w, d, t, r) in room_busy:
+                            continue
+                        if student_busy is not None:
+                            # 学生课表只标到 567：567 与 678 相邻，宁可一起避让
+                            check_ts = "567" if t in ("567", "678") else t
+                            busy = (student_busy.get(w) or {}).get(d) or set()
+                            if check_ts in busy:
+                                continue
+                        idle.append(r)
+                    free_rooms[(w, d, t)] = idle
+
+        domains: Dict[int, List[Tuple]] = {}
+        empty_reason: Dict[int, str] = {}
+        for i, sec in enumerate(sections):
+            cells = []
+            for w in weeks:
+                for d in WEEKDAYS:
+                    for t in TIME_SLOTS:
+                        if not free_rooms[(w, d, t)]:
+                            continue
+                        if sec["teacher"] and (w, d, t, sec["teacher"]) in teacher_busy:
+                            continue
+                        cells.append((w, d, t))
+            domains[i] = cells
+            if not cells:
+                empty_reason[i] = (
+                    "整学期（第%d–%d周）该教师的所有时段都已被现有安排表占满" % (weeks[0], weeks[-1])
+                    if sec["teacher"] else
+                    "整学期（第%d–%d周）所有教室在可排时段都已被占满" % (weeks[0], weeks[-1])
+                )
 
         model = cp_model.CpModel()
-
-        # 变量：x[i][w][t][r] = 任务 i 是否安排在 (星期w, 时段t, 教室r)
-        x = {}
+        x: Dict[Tuple, cp_model.IntVar] = {}
+        cell_groups = defaultdict(list)      # (w,d,t) → 全部落在该格的任务变量
+        teacher_groups = defaultdict(list)
+        class_groups = defaultdict(list)
         for i, sec in enumerate(sections):
-            for w in range(len(WEEKDAYS)):
-                for t in range(len(TIME_SLOTS)):
-                    for r in range(len(rooms)):
-                        x[(i, w, t, r)] = model.NewBoolVar(f"x_{i}_{w}_{t}_{r}")
+            for (w, d, t) in domains[i]:
+                v = model.NewBoolVar(f"x_{i}_{w}_{d}_{t}")
+                x[(i, w, d, t)] = v
+                cell_groups[(w, d, t)].append(v)
+                if sec["teacher"]:
+                    teacher_groups[(w, d, t, sec["teacher"])].append(v)
+                if sec["class_name"]:
+                    class_groups[(w, d, t, sec["class_name"])].append(v)
 
-        # 约束 1：每个任务最多安排一次（0 或 1 次）
+        # 每个任务最多排一次
         for i in range(len(sections)):
-            model.Add(
-                sum(x[(i, w, t, r)] for w in range(len(WEEKDAYS))
-                    for t in range(len(TIME_SLOTS)) for r in range(len(rooms)))
-                <= 1
-            )
+            vs = [x[(i,) + cell] for cell in domains[i]]
+            if vs:
+                model.Add(sum(vs) <= 1)
 
-        # 约束 2：同一教室同一时段最多一个任务
-        for w in range(len(WEEKDAYS)):
-            for t in range(len(TIME_SLOTS)):
-                for r in range(len(rooms)):
-                    model.Add(
-                        sum(x[(i, w, t, r)] for i in range(len(sections))) <= 1
-                    )
+        # 教室并发上限：同一格最多塞 len(free_rooms) 个任务（见文件头"为什么"）
+        for cell, vs in cell_groups.items():
+            cap = len(free_rooms[cell])
+            if len(vs) > cap:
+                model.Add(sum(vs) <= cap)
 
-        # 约束 3：同一教师同一时段最多一个任务
-        for w in range(len(WEEKDAYS)):
-            for t in range(len(TIME_SLOTS)):
-                for teacher_idx in set(s["teacher"] for s in sections):
-                    idxs = [i for i, s in enumerate(sections) if s["teacher"] == teacher_idx]
-                    model.Add(
-                        sum(x[(i, w, t, r)] for i in idxs
-                            for r in range(len(rooms))) <= 1
-                    )
+        # 教师 / 班级 互斥（同一周、同一星期、同一时段）
+        for groups in (teacher_groups, class_groups):
+            for vs in groups.values():
+                if len(vs) > 1:
+                    model.Add(sum(vs) <= 1)
 
-        # 约束 4：教室容量 >= 班人数
-        for i, sec in enumerate(sections):
-            for r in range(len(rooms)):
-                # 容量近似：从排课记录无法精确取容量，按房间字符长度近似（有"大"字的教室容量大）
-                room_cap = 120 if "大" in rooms[r] else 60
-                if room_cap < sec["size"]:
-                    for w in range(len(WEEKDAYS)):
-                        for t in range(len(TIME_SLOTS)):
-                            model.Add(x[(i, w, t, r)] == 0)
-
-        # 约束 5：学生课表冲突（该周该时段学生有课则不可排）
-        # 用第 1 周学生课表代表（简化），可扩展为逐周
-        if self.student:
-            student_busy = self.student.get_busy_slots(1)
-            for w in range(len(WEEKDAYS)):
-                wd = WEEKDAYS[w]
-                for t in range(len(TIME_SLOTS)):
-                    ts = TIME_SLOTS[t]
-                    check_ts = "567" if ts in ("567", "678") else ts
-                    if wd in student_busy and check_ts in student_busy[wd]:
-                        for i in range(len(sections)):
-                            for r in range(len(rooms)):
-                                model.Add(x[(i, w, t, r)] == 0)
-
-        # 目标：最大化排课数量
         model.Maximize(sum(x.values()))
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 10.0
+        solver.parameters.max_time_in_seconds = 6.0
         status = solver.Solve(model)
+        ok = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
-        # 提取结果
-        result = []
-        solved = 0
-        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            for i, sec in enumerate(sections):
-                placed = False
-                for w in range(len(WEEKDAYS)):
-                    for t in range(len(TIME_SLOTS)):
-                        for r in range(len(rooms)):
-                            if solver.Value(x[(i, w, t, r)]) == 1:
-                                result.append({
-                                    "teacher": sec["teacher"],
-                                    "course": sec["course"],
-                                    "class_name": sec["class_name"],
-                                    "weekday": WEEKDAYS[w],
-                                    "time_slot": TIME_SLOTS[t],
-                                    "room": rooms[r],
-                                })
-                                solved += 1
-                                placed = True
-                                break
-                        if placed:
+        # 第二步：数量已经拉满后，把周次摊平。
+        #
+        # 只做"最大化排入数量"的话，CP-SAT 会把 30 个任务全塞进前 3–4 周
+        # （第 1 周 12 个、后面几周空着）—— 数量没错，但这不是一份能交给教秘的
+        # 学期初稿：真实表每周 27–69 条，是摊开的。所以补一个 min-max：
+        # 固定住已求得的最大数量 K，再最小化"单周任务数"的上界 z。
+        chosen: Dict[int, Tuple] = {}
+        if ok and x:
+            total_placed = int(round(solver.ObjectiveValue()))
+            if total_placed:
+                model.Add(sum(x.values()) == total_placed)
+                z = model.NewIntVar(0, total_placed, "max_week_load")
+                for w in weeks:
+                    in_week = [v for (i, ww, d, t), v in x.items() if ww == w]
+                    if in_week:
+                        model.Add(z >= sum(in_week))
+                model.Minimize(z)
+
+                solver2 = cp_model.CpSolver()
+                solver2.parameters.max_time_in_seconds = 4.0
+                status2 = solver2.Solve(model)
+                if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    solver, status = solver2, status2
+                # 第二步超时/失败就退回第一步的解（`solver` 仍指第一步的结果）
+                for i in range(len(sections)):
+                    for cell in domains[i]:
+                        if solver.Value(x[(i,) + cell]) == 1:
+                            chosen[i] = cell
                             break
-                    if placed:
-                        break
+            else:
+                ok = False
 
-        conflicts = [s for s in sections if not any(
-            r["teacher"] == s["teacher"] and r["course"] == s["course"] and r["class_name"] == s["class_name"]
-            for r in result)]
+        schedule: List[Dict] = []
+        if chosen:
+            # 按格分配具体教室：同格任务数已被约束 ≤ 该格空教室数，按清单顺序取即可。
+            picked: Dict[Tuple, List[int]] = defaultdict(list)
+            for i, cell in chosen.items():
+                picked[cell].append(i)
+            for cell in sorted(picked):
+                idxs = sorted(picked[cell],
+                              key=lambda i: (sections[i]["class_name"], sections[i]["teacher"]))
+                for k, i in enumerate(idxs):
+                    w, d, t = cell
+                    sec = sections[i]
+                    schedule.append({
+                        "week": w,
+                        "weekday": d,
+                        "time_slot": t,
+                        "room": free_rooms[cell][k],
+                        "teacher": sec["teacher"],
+                        "course": sec["course"],
+                        "class_name": sec["class_name"],
+                    })
+        schedule.sort(key=lambda s: (s["week"], WEEKDAYS.index(s["weekday"]),
+                                     TIME_SLOTS.index(s["time_slot"]),
+                                     s["class_name"], s["teacher"]))
+
+        placed = {(s["teacher"], s["course"], s["class_name"]) for s in schedule}
+        conflicts = []
+        for i, sec in enumerate(sections):
+            if (sec["teacher"], sec["course"], sec["class_name"]) in placed:
+                continue
+            conflicts.append({
+                "teacher": sec["teacher"],
+                "course": sec["course"],
+                "class_name": sec["class_name"],
+                "reason": empty_reason.get(i) or "CP-SAT 在时限内未排入（资源不足或约束过紧）",
+            })
 
         return {
-            "success": status in (cp_model.OPTIMAL, cp_model.FEASIBLE),
+            "success": ok and bool(schedule),
             "status": solver.StatusName(status),
-            "total_sections": len(sections),
-            "solved": solved,
-            "conflicts": [{"teacher": c["teacher"], "course": c["course"],
-                           "class_name": c["class_name"],
-                           "reason": "CP-SAT 在时限内未排入（资源不足或约束过紧）"} for c in conflicts],
-            "schedule": result,
-            "note": "OR-Tools CP-SAT 约束求解（教室/教师/学生三重不冲突 + 容量 + 实验室约束）",
+            "weeks": [weeks[0], weeks[-1]],
+            "total_sections": len(sections),          # 本次参与求解的任务数
+            "total_sections_all": total_all,          # 全表任务数（未截断）
+            "intro_excluded": intro_excluded,         # 绪论课（不参与自动排课）
+            "solved": len(schedule),
+            "conflicts": conflicts,
+            "schedule": schedule,
+            "student_checked": student_busy is not None,
+            "capacity_checked": False,
+            "note": (
+                "OR-Tools CP-SAT 约束求解：教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
+                + ("；学生课表已校验" if student_busy is not None else "；学生维度未校验（未上传学生课表）")
+                + "；容量未校验（安排表无容量字段）"
+            ),
         }
 
+    # ------------------------------------------------------------------ 文案
     def summary(self, result: Dict) -> str:
         """生成可读的排课方案摘要"""
         if not result.get("success"):
             return result.get("error", "排课失败")
 
-        lines = [f"📋 自动排课结果（CP-SAT）：成功 {result['solved']}/{result['total_sections']} 个教学任务"]
+        lo, hi = result["weeks"]
+        lines = [
+            f"📋 自动排课结果（CP-SAT）：成功 {result['solved']}/{result['total_sections']} 个教学任务"
+            f"（第{lo}–{hi}周）",
+        ]
+        unchecked = []
+        if not result.get("student_checked"):
+            unchecked.append("学生冲突（未上传学生课表）")
+        if not result.get("capacity_checked"):
+            unchecked.append("教室容量（安排表无容量字段）")
+        if unchecked:
+            lines.append("⚠️ 未校验：" + "、".join(unchecked))
+
         if result["conflicts"]:
             lines.append(f"⚠️ 未排上 {len(result['conflicts'])} 个：")
-            for c in result["conflicts"]:
-                lines.append(f"  - {c['teacher']} {c['course']}：{c['reason']}")
+            for c in result["conflicts"][:8]:
+                lines.append(f"  - {c['teacher']} {c['course']}（{c['class_name']}）：{c['reason']}")
+            if len(result["conflicts"]) > 8:
+                lines.append(f"  …… 另有 {len(result['conflicts']) - 8} 个")
 
-        by_day: Dict[str, List[Dict]] = {}
+        by_week: Dict[int, List[Dict]] = defaultdict(list)
         for s in result["schedule"]:
-            by_day.setdefault(s["weekday"], []).append(s)
+            by_week[s["week"]].append(s)
 
-        for wd in WEEKDAYS:
-            if wd in by_day:
-                lines.append(f"\n{wd}：")
-                for s in by_day[wd][:6]:
-                    lines.append(f"  {s['time_slot']} {s['room']} | {s['teacher']} {s['course']}")
+        for week in sorted(by_week):
+            lines.append(f"\n第{week}周：")
+            for s in by_week[week]:
+                lines.append(
+                    f"  {s['weekday']} {s['time_slot']} {s['room']} | "
+                    f"{s['teacher']} {s['course']}（{s['class_name']}）"
+                )
         return "\n".join(lines)

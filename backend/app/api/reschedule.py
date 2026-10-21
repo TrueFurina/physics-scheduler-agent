@@ -796,19 +796,23 @@ async def impact_analysis(req: ChatRequest):
 @router.post("/auto-schedule", summary="排课自动生成（P1）",
              dependencies=[Depends(rate_limit("auto-schedule"))])
 async def auto_schedule():
-    """用约束求解器基于现有数据自动生成完整排课方案"""
+    """用约束求解器基于现有数据自动生成排课初稿（带周次，避开现有安排表）"""
     _ensure_loaded()
 
     from app.engine.auto_scheduler import AutoScheduler
     scheduler = AutoScheduler(_db, student=_student)
     result = await run_in_threadpool(scheduler.solve, max_sections=30)
 
-    # 定位说明：自动排课是"辅助初稿生成"，非替代学校已排定的完整安排表
+    # 定位说明：自动排课是"辅助初稿生成"，非替代学校已排定的完整安排表。
+    # 原文案写"本次简化演示 12 个教学任务"，而实际 `max_sections=30` —— 文案与事实不符，
+    # 同一份方案下方就列着 30 条。这里改成用真实数字拼，避免再漂。
     real_entries = len(_db.entries)
     note = (
-        f"📌 定位说明：自动排课为辅助初稿生成（本次简化演示 12 个教学任务），\n"
-        f"    学校已排定的完整实验安排表共 {real_entries} 条（含多学院轮转、教师/教室/设备约束），"
-        f"可在「我的课程」中查看使用。"
+        f"📌 定位说明：自动排课为辅助初稿生成。全表共 {result.get('total_sections_all', 0)} 个实验教学任务"
+        f"（另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"
+        f"    本次取前 {result.get('total_sections', 0)} 个求解。方案已逐周避开现有安排表"
+        f"（共 {real_entries} 条记录）占用的教室与教师。\n"
+        f"    生成结果仅供教秘做初稿参考，落地前请按「我的课程 / 数据体检」复核。"
     )
     result["summary_text"] = note + "\n\n" + scheduler.summary(result)
 
@@ -817,9 +821,14 @@ async def auto_schedule():
         "message": result.get("summary_text", result.get("error", "排课失败")),
         "data": {
             "total_sections": result.get("total_sections", 0),
+            "total_sections_all": result.get("total_sections_all", 0),
+            "intro_excluded": result.get("intro_excluded", 0),
             "solved": result.get("solved", 0),
+            "weeks": result.get("weeks", []),
             "conflicts": result.get("conflicts", []),
             "schedule": result.get("schedule", []),
+            "student_checked": result.get("student_checked", False),
+            "capacity_checked": result.get("capacity_checked", False),
             "real_entries": real_entries,
         },
     }

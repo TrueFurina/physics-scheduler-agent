@@ -42,3 +42,4 @@ schedule.xlsx
 # Scratch
 server.log
 server.err.log
+.tmp/

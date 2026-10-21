@@ -223,9 +223,15 @@ export const rescheduleApi = {
     api.post<{ success: boolean; message: string; reply: string }>('/reschedule/experiment-tutor', { question }),
 
   // 排课自动生成（P1）
+  //
+  // 方案条目现在带 `week`：不带周次的课表教秘不知道该用到哪一周，也无法跟
+  // 已有安排表比对（R-37）。`student_checked / capacity_checked` 是"没校验
+  // 就别声称校验过"的显式交代，界面上直接由 message 呈现。
   autoSchedule: () =>
     api.post<{ success: boolean; message: string; data: {
-      total_sections: number; solved: number; conflicts: any[]; schedule: any[];
+      total_sections: number; total_sections_all: number; intro_excluded: number;
+      solved: number; weeks: number[]; conflicts: any[]; schedule: any[];
+      student_checked: boolean; capacity_checked: boolean; real_entries: number;
     } }>('/reschedule/auto-schedule'),
 
   // 管理员登录（审批台）：口令由服务端校验，成功返回会话令牌
