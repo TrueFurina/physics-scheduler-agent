@@ -439,6 +439,70 @@ async def master_delete_class(name: str):
     return {"success": True, "data": _master_data.overview()}
 
 
+@router.post("/master/import", summary="导入主数据台账（Excel 批量维护五张表）",
+             dependencies=_ADMIN_ONLY)
+async def master_import(file: UploadFile = File(...)):
+    """把 `/export/master-workbook` 导出的台账改完传回来，批量写入主数据。
+
+    这是 P2 的最后一块闭环：教秘在 Excel 里一次性补几十个项目/教师/班级，
+    比在界面上一个个点快得多。语义上**只做新增与补充，不做删除** ——
+    在表里删掉一行不会删掉实体（删请用上面的 delete 接口），理由写在
+    `master_workbook` 的填写说明里：Excel 里的"空"可能是"没填"，
+    也可能就是"没变"，导入端不猜这个意图。
+
+    返回体一定带 `report`：认出哪些页、哪些列没认出、跳过了哪些行、
+    哪些列被判为统计列而忽略 —— 静默导入一半比报错危险得多（R-34）。
+    """
+    save_path = _upload_target(file.filename, _EXCEL_SUFFIXES, prefix="master_")
+    content = await file.read()
+    with open(save_path, "wb") as f:
+        f.write(content)
+
+    try:
+        from app.master_workbook import apply_tables, parse_workbook
+
+        tables, report = parse_workbook(save_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"台账解析失败：{str(e)}")
+
+    _ensure_loaded()
+    _ensure_master_data()
+    try:
+        stats = apply_tables(_master_data, tables)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"台账写入失败：{str(e)}")
+    _persist_master_state()
+
+    total = sum(s.get("rows", 0) for s in stats.values())
+    added = sum(s.get("added", 0) for s in stats.values())
+    if total == 0:
+        msg = ("⚠️ 台账里没读到任何可导入的行 —— "
+               + ("；".join(report["warnings"]) or "请确认文件里有「实验项目/教师/场地/班级/课程」页且有表头"))
+    else:
+        msg = f"✅ 已导入 {total} 行（新建实体 {added} 个）；导入只增补，不删除已有实体"
+
+    return {"success": total > 0, "message": msg,
+            "data": _master_data.overview(), "stats": stats, "report": report}
+
+
+@router.get("/export/master-workbook", summary="导出可编辑主数据台账（改完可导回）",
+            dependencies=[Depends(rate_limit("standard-export"))])
+async def export_master_workbook():
+    """五张实体表（课程/实验项目/教师/场地/班级）的可编辑台账，改完可导回。
+
+    与 `/export/master-data` 的区别：那份是**统计台账**（课次/覆盖率，给教务核对），
+    这份是**实体台账**（行=实体，列=可编辑字段，给教秘批量维护）。
+    两份各司其职 —— 统计表的「班级数」这类数值列如果拿去导入，会被判为统计列
+    并显式忽略（见 `master_workbook._is_stat_column`），不会变成名叫「5」的班级。
+    """
+    _ensure_loaded()
+    _ensure_master_data()
+    from app.master_workbook import build_workbook
+
+    wb = build_workbook(_master_data)
+    return _xlsx_response(wb, "主数据台账（可编辑，可导回）.xlsx")
+
+
 @router.post("/chat", response_model=ChatResponse, summary="教师调课咨询",
              dependencies=[Depends(rate_limit("chat"))])
 async def reschedule_chat(req: ChatRequest):

@@ -318,6 +318,19 @@ export const rescheduleApi = {
   masterDeleteClass: (name: string) =>
     api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/classes/${encodeURIComponent(name)}`),
 
+  // 可编辑主数据台账：导出后在 Excel 里批量维护，改完导回（导回只增补，不删实体）。
+  // 与 exportMasterData 的区别：那份是统计台账（核对用），这份是实体台账（维护用）。
+  exportMasterWorkbook: () =>
+    api.get('/reschedule/export/master-workbook', { responseType: 'blob' }),
+  masterImport: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post<{
+      success: boolean; message: string; data: MasterOverview;
+      report: { warnings: string[] };
+    }>('/reschedule/master/import', fd);
+  },
+
   // 数据体检报告（扫描现有安排表冲突）
   dataAudit: () =>
     api.get<{ success: boolean; data: {

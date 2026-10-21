@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { rescheduleApi } from '../api/client';
 import type { MasterOverview } from '../types';
 
@@ -10,6 +10,9 @@ import type { MasterOverview } from '../types';
  *
  * 反推基线：初次进入从安排表自动反推（后端 `_ensure_master_data`），"一键反推"
  * 按钮用于教秘手动重置到安排表基线（撤销本会话内的增删改）。
+ *
+ * 批量维护：导出可编辑台账 → Excel 里改 → 导回。导回**只增补不删除**（Excel 里的
+ * "空"可能是"没填"也可能是"没变"，后端不猜这个意图），删实体用列表里的删除按钮。
  */
 
 type TabKey = 'experiments' | 'teachers' | 'rooms' | 'classes' | 'courses';
@@ -40,6 +43,8 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [importReport, setImportReport] = useState<{ message: string; warnings: string[] } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
     setLoading(true);
@@ -75,6 +80,36 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       setError(err?.response?.data?.detail || '反推失败');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const doExportWorkbook = async () => {
+    try {
+      const r = await rescheduleApi.exportMasterWorkbook();
+      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '主数据台账（可编辑，可导回）.xlsx';
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || '导出台账失败');
+    }
+  };
+
+  const doImportWorkbook = async (file: File) => {
+    if (!guard()) return;
+    setBusy(true);
+    setImportReport(null);
+    try {
+      const r = await rescheduleApi.masterImport(file);
+      refresh(r.data.data);
+      setImportReport({ message: r.data.message, warnings: r.data.report?.warnings || [] });
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || '导入台账失败');
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';   // 允许连续导入同一个文件
     }
   };
 
@@ -171,6 +206,28 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
         </div>
         <div className="flex gap-2">
           <button
+            onClick={doExportWorkbook}
+            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium"
+            title="导出五张实体表的可编辑台账，改完可导回"
+          >
+            ⬇ 导出台账
+          </button>
+          <button
+            onClick={() => { if (guard()) fileRef.current?.click(); }}
+            disabled={busy || !adminAuthed}
+            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium disabled:opacity-40"
+            title="把改过的台账导回（只增补，不删除）"
+          >
+            ⬆ 导入台账
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) doImportWorkbook(f); }}
+          />
+          <button
             onClick={doInit}
             disabled={busy || !adminAuthed}
             className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium disabled:opacity-40"
@@ -195,6 +252,16 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       )}
       {error && (
         <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{error}</div>
+      )}
+      {importReport && (
+        <div className="mb-3 px-3 py-2 bg-teal-50 border border-teal-200 text-teal-800 text-sm rounded-lg">
+          <div>{importReport.message}</div>
+          {importReport.warnings.length > 0 && (
+            <ul className="mt-1.5 list-disc pl-5 text-xs text-amber-700 space-y-0.5">
+              {importReport.warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          )}
+        </div>
       )}
 
       {/* Tab */}
