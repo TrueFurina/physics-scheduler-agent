@@ -8,13 +8,15 @@
 
 ## What is this?
 
-A **four-module intelligent system** for university physics experiment teaching:
+A **multi-module intelligent system** for university physics experiment teaching:
 
 | Module | Capability |
 |--------|-----------|
 | 📅 **Scheduling** | Constraint-based auto-scheduling, conflict detection, candidate plan recommendation |
+| ⚡ **Parallel batch scheduling** | CP-SAT solves one class's *all experiments × student groups* in one shot (the #1 pain point from the advisor interview); missing teacher/room info is auto-completed with every assumption surfaced |
+| 🗂️ **Master data** | Courses / experiments / teachers / rooms / classes as first-class CRUD entities, reverse-derived from the schedule, persisted across restarts, exportable to Excel and importable back |
+| 🔄 **Rescheduling** | Template + natural language flow, graded conflict detection (room / teacher / whole-group), admin approval that actually lands in the schedule |
 | 🎓 **Course Selection** | AI-powered Q&A on prerequisites, credits, eligibility |
-| 🔄 **Rescheduling** | Template + natural language flow, conflict filtering, admin approval |
 | 🔬 **Lab Tutoring** | AI-powered Q&A on experiment principles, data processing, error analysis |
 
 **Design principle**: rule engine guarantees correctness (conflict filtering), LLM enhances experience (intent parsing, candidate plans, consultation).
@@ -72,12 +74,15 @@ Open **http://localhost:5173**
 
 ## Key Features
 
-- ✅ **Three-way conflict filtering**: classroom / student timetable / teacher time
+- ✅ **Graded conflict detection**: core conflicts (room / teacher / same class+group) say *what* is hit and *how to fix it* — whole-group clashes are judged per (class, group), so 47 legitimate parallel-teaching slots in the real table cause zero false positives
+- ✅ **Master data as first-class citizens**: five entity tables, reverse-derived then editable; survives restarts (versioned JSON store, invalidated when the schedule changes); intro/exam projects are visible in the ledger but **never scheduled**
+- ✅ **Parallel batch scheduling**: CP-SAT over the whole class; gray-box mode fills missing teachers (least-loaded first) / rooms / weeks and reports every assumption it made
+- ✅ **Ledger round-trip**: export the five tables to Excel, edit offline, import back — with guards against stat-column masquerade and sharded class names
 - ✅ **Reason transparency**: every excluded slot shows why
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **13 unit tests** covering scheduling logic
+- ✅ **308 backend tests + 60 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -87,14 +92,18 @@ physics-scheduler-agent/
 │   ├── app/
 │   │   ├── main.py                 # FastAPI entry
 │   │   ├── api/reschedule.py       # API endpoints
+│   │   ├── master_data.py          # Five-table master data (reverse-derived, CRUD)
+│   │   ├── master_store.py         # Versioned JSON persistence for master data
+│   │   ├── master_workbook.py      # Excel ledger export / import (round-trip)
+│   │   ├── conflict_model.py       # Graded conflict classification (core 3 kinds)
+│   │   ├── course_bridge.py        # Course attribution + cross-course clash scan
 │   │   ├── agent/                  # RescheduleAgent, LLM parser, student schedule
-│   │   ├── engine/                 # Constraint-based auto scheduler
+│   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel/PDF parsers
-│   ├── tests/test_reschedule.py    # pytest unit tests
-│   └── requirements.txt
+│   └── tests/                      # 308 pytest tests
 ├── frontend/
-│   └── src/                        # React UI (4 modules)
-├── scripts/prepare_demo.py         # One-click demo data prep
+│   └── src/                        # React UI (dashboard, master data, parallel, …)
+├── scripts/                        # Independent auditors + release preflight
 ├── docs/                           # PRD, architecture, user guide, reflection
 └── start.ps1 / start.bat           # One-click launcher
 ```
@@ -109,7 +118,15 @@ physics-scheduler-agent/
 | POST | `/api/reschedule/auto-schedule` | Scheduling | Auto schedule generation |
 | POST | `/api/reschedule/chat` | Rescheduling | Reschedule query (available + excluded + AI plans) |
 | POST | `/api/reschedule/requests` | Rescheduling | Submit reschedule request |
-| POST | `/api/reschedule/requests/{id}/approve` | Rescheduling | Admin approval |
+| POST | `/api/reschedule/requests/{id}/approve` | Rescheduling | Admin approval (applies to schedule via /apply-move) |
+| GET | `/api/reschedule/parallel/overview` | Parallel | Course overview (experiments × groups) |
+| POST | `/api/reschedule/parallel/solve` | Parallel | One-shot CP-SAT solve for a whole class |
+| POST | `/api/reschedule/upload-master` | Master data | Upload syllabus/task list (from-zero input) |
+| GET | `/api/reschedule/master/overview` | Master data | Five-table master data (read-only) |
+| GET | `/api/reschedule/export/master-workbook` | Master data | Export editable ledger (importable back) |
+| GET | `/api/reschedule/data-audit` | Dashboard | Graded conflict audit + parallel-teaching note |
+| GET | `/api/reschedule/export/class-schedule` | Export | Per-class timetables (course column + cross-course clashes) |
+| GET | `/api/reschedule/export/room-schedule` | Export | Per-room timetables |
 | POST | `/api/reschedule/admin-login` | Auth | Admin login (approval desk) |
 | POST | `/api/reschedule/course-select` | Selection | Course selection Q&A (LLM) |
 | POST | `/api/reschedule/experiment-tutor` | Tutoring | Lab tutoring Q&A (LLM) |
@@ -124,7 +141,10 @@ python -m pytest tests/ -v
 
 ## Roadmap
 
-- [ ] Conflict impact analysis ("who will this adjustment affect")
+- [x] Conflict grading (core conflicts must-adjust / light per-student conflicts blocked on student-timetable PII)
+- [x] Master data CRUD + persistence + Excel ledger round-trip
+- [x] Parallel batch scheduling with gray-box completion
+- [x] Multi-course consolidation in class timetables (course column + cross-course clash marking)
 - [ ] Visual schedule grid (weekly timetable view)
 - [ ] Data import wizard (field mapping for different schools)
 - [ ] Multi-school data isolation

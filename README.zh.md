@@ -1,6 +1,6 @@
 # 物理学科智能排课选课智能体系统
 
-> 面向高校物理实验教学的智能辅助系统：排课、选课咨询、调课、实验辅导四大模块。
+> 面向高校物理实验教学的智能辅助系统：排课、并行批量排课、主数据管理、调课、选课咨询、实验辅导。
 
 [English README](README.md)
 
@@ -8,13 +8,15 @@
 
 ## 项目简介
 
-面向大学物理实验教学场景的**四大模块智能体系统**：
+面向大学物理实验教学场景的**多模块智能体系统**：
 
 | 模块 | 能力 |
 |------|------|
 | 📅 **排课** | 约束求解自动排课、冲突检测、候选方案推荐 |
+| ⚡ **并行批量排课** | CP-SAT 一次求解一个班的「全部实验项目 × 学生组别」（导师座谈一号痛点）；缺教师/场地信息自动灰箱补全，且每个代做决定都说出口 |
+| 🗂️ **主数据管理** | 课程/实验项目/教师/场地/班级五张实体表可增删改，从安排表反推、重启不丢（版本化落盘）、可导出 Excel 台账并导回 |
+| 🔄 **调课** | 模板 + 自然语言双入口，冲突分级（场地/教师/整班同组），管理员审批真正落到课表 |
 | 🎓 **选课咨询** | AI 回答先修课、学分、选课资格问题 |
-| 🔄 **调课** | 模板 + 自然语言双入口，冲突筛选，管理员审批 |
 | 🔬 **实验辅导** | AI 回答实验原理、数据处理、误差分析、报告规范 |
 
 **设计原则**：规则引擎保证排课正确（冲突筛选），LLM 增强体验（意图解析、候选方案、咨询问答）。
@@ -72,12 +74,15 @@ npm run dev
 
 ## 核心功能
 
-- ✅ **三重冲突筛选**：教室占用 / 学生课表 / 教师时间
+- ✅ **冲突分级**：核心冲突（场地/教师/同班同组）说清「撞了什么、该怎么改」——整组判据按 (班级, 组) 粒度，真实表 47 处并行教学零误报
+- ✅ **主数据一等公民**：五张实体表反推后可编辑，重启自愈（版本化落盘，换表自动失效）；绪论/考试类登记在册但**绝不进求解器**
+- ✅ **并行批量排课**：整班 CP-SAT 一次求解；灰箱模式自动补全缺教师（负载最轻优先）/场地/周次，并逐条报告假设
+- ✅ **台账往返**：五张表导出 Excel → 离线维护 → 导回，带统计列伪装与班名切碎两道防线
 - ✅ **原因透传**：每个被排除时段说明原因
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **13 个单元测试**覆盖排课逻辑
+- ✅ **后端 308 个测试 + 前端 60 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`，用独立解析器从原始 Excel 重算一切）
 
 ## 项目结构
 
@@ -87,14 +92,18 @@ physics-scheduler-agent/
 │   ├── app/
 │   │   ├── main.py                 # FastAPI 入口
 │   │   ├── api/reschedule.py       # API 端点
+│   │   ├── master_data.py          # 五表主数据（反推 + CRUD）
+│   │   ├── master_store.py         # 主数据版本化落盘
+│   │   ├── master_workbook.py      # 台账导出/导回（往返）
+│   │   ├── conflict_model.py       # 冲突分级（核心三类）
+│   │   ├── course_bridge.py        # 课程归属 + 跨课程撞车扫描
 │   │   ├── agent/                  # 调课智能体、LLM 解析、学生课表
-│   │   ├── engine/                 # 约束求解自动排课
+│   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel/PDF 解析器
-│   ├── tests/test_reschedule.py    # pytest 单元测试
-│   └── requirements.txt
+│   └── tests/                      # 308 个 pytest 测试
 ├── frontend/
-│   └── src/                        # React 界面（四大模块）
-├── scripts/prepare_demo.py         # 演示数据一键准备
+│   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
+├── scripts/                        # 独立审计器 + 发布预检
 ├── docs/                           # PRD、架构、使用指南、总结反思
 └── start.ps1 / start.bat           # 一键启动
 ```
@@ -109,7 +118,15 @@ physics-scheduler-agent/
 | POST | `/api/reschedule/auto-schedule` | 排课 | 自动排课 |
 | POST | `/api/reschedule/chat` | 调课 | 调课查询（可用+被排除+AI方案） |
 | POST | `/api/reschedule/requests` | 调课 | 提交调课申请 |
-| POST | `/api/reschedule/requests/{id}/approve` | 调课 | 管理员审批 |
+| POST | `/api/reschedule/requests/{id}/approve` | 调课 | 管理员审批（经 /apply-move 真正落到课表） |
+| GET | `/api/reschedule/parallel/overview` | 并行排课 | 课程总览（项目 × 组别） |
+| POST | `/api/reschedule/parallel/solve` | 并行排课 | 整班 CP-SAT 一键求解 |
+| POST | `/api/reschedule/upload-master` | 主数据 | 上传教学大纲/任务清单（从零排课输入） |
+| GET | `/api/reschedule/master/overview` | 主数据 | 五表主数据（只读） |
+| GET | `/api/reschedule/export/master-workbook` | 主数据 | 导出可编辑台账（可导回） |
+| GET | `/api/reschedule/data-audit` | 数据看板 | 分级冲突体检 + 并行教学口径说明 |
+| GET | `/api/reschedule/export/class-schedule` | 导出 | 班级课表（课程列 + 跨课程撞车） |
+| GET | `/api/reschedule/export/room-schedule` | 导出 | 场地课表 |
 | POST | `/api/reschedule/admin-login` | 认证 | 管理员登录 |
 | POST | `/api/reschedule/course-select` | 选课 | 选课咨询（LLM） |
 | POST | `/api/reschedule/experiment-tutor` | 辅导 | 实验辅导（LLM） |
@@ -124,7 +141,10 @@ python -m pytest tests/ -v
 
 ## 后续规划
 
-- [ ] 冲突影响分析（"这一改会影响谁"）
+- [x] 冲突分级（核心冲突必须调整；个别学生轻微冲突阻塞于学生课表 PII，按边界不做）
+- [x] 主数据增删改 + 持久化 + 台账 Excel 往返
+- [x] 并行批量排课 + 灰箱补全
+- [x] 班级课表跨课程合并（课程列 + 跨课程撞车标记）
 - [ ] 排课结果可视化（周课表网格）
 - [ ] 数据上传向导（字段映射，适配不同学校）
 - [ ] 多校数据隔离

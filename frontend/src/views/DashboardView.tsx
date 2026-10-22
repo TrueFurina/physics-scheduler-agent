@@ -16,6 +16,13 @@ interface Props {
   onExportMaster?: () => void;
 }
 
+/** 体检明细标题：接口的 count 是全量、列表截前 30 —— 截断时必须说出口，
+ *  否则教秘看到「冲突 47」配「明细 30 条」会以为只有 30 处（口径不一 = 不被信任）。 */
+const detailTitle = (total: number | undefined, shown: number) =>
+  total !== undefined && total > shown
+    ? `（共 ${total} 处，仅列出前 ${shown} 条）`
+    : `（${shown} 条）`;
+
 /** 📊 数据看板：安排表体检报告 + 利用率/工作量统计。 */
 export default function DashboardView({
   auditLoading, auditData, auditError = '', statsData, statsError = '', onRetry,
@@ -160,7 +167,7 @@ export default function DashboardView({
             {/* 教室冲突清单 */}
             {(auditData.room_conflicts || []).length > 0 && (
               <div className="mb-4">
-                <h3 className="text-sm font-medium text-gray-800 mb-2">🏫 教室冲突明细（前 {auditData.room_conflicts!.length} 条）</h3>
+                <h3 className="text-sm font-medium text-gray-800 mb-2">🏫 教室冲突明细{detailTitle(auditData.room_conflict_count, auditData.room_conflicts!.length)}</h3>
                 <div className="space-y-2">
                   {auditData.room_conflicts!.map((c, i) => (
                     <div key={i} className="bg-red-50 border border-red-100 rounded-lg p-3 text-sm">
@@ -183,7 +190,7 @@ export default function DashboardView({
             {/* 教师冲突清单 */}
             {(auditData.teacher_conflicts || []).length > 0 && (
               <div className="mb-4">
-                <h3 className="text-sm font-medium text-gray-800 mb-2">👨‍🏫 教师冲突明细（前 {auditData.teacher_conflicts!.length} 条）</h3>
+                <h3 className="text-sm font-medium text-gray-800 mb-2">👨‍🏫 教师冲突明细{detailTitle(auditData.teacher_conflict_count, auditData.teacher_conflicts!.length)}</h3>
                 <div className="space-y-2">
                   {auditData.teacher_conflicts!.map((c, i) => (
                     <div key={i} className="bg-orange-50 border border-orange-100 rounded-lg p-3 text-sm">
@@ -206,7 +213,7 @@ export default function DashboardView({
             {/* 整组冲突清单（2026-10-22 新增维度：此前完全没查） */}
             {(auditData.group_conflicts || []).length > 0 && (
               <div className="mb-4">
-                <h3 className="text-sm font-medium text-gray-800 mb-2">👥 整组冲突明细（前 {auditData.group_conflicts!.length} 条）</h3>
+                <h3 className="text-sm font-medium text-gray-800 mb-2">👥 整组冲突明细{detailTitle(auditData.group_conflict_count, auditData.group_conflicts!.length)}</h3>
                 <div className="space-y-2">
                   {auditData.group_conflicts!.map((c, i) => (
                     <div key={i} className="bg-violet-50 border border-violet-100 rounded-lg p-3 text-sm">
