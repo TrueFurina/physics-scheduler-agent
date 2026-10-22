@@ -35,3 +35,22 @@ os.environ.setdefault("LLM_DISABLED", "1")
 os.environ.setdefault(
     "PARSE_CACHE_DIR", os.path.join(tempfile.gettempdir(), "physics-scheduler-test-cache")
 )
+
+
+import pytest
+
+from app import master_store as _master_store
+
+
+@pytest.fixture(autouse=True)
+def _isolate_master_store(tmp_path, monkeypatch):
+    """所有测试的主数据落盘一律重定向到临时目录。
+
+    不加这层时，个别触发 `_persist_master_state` 的用例会把 v2 落盘写进真实
+    `backend/app/data/master_store.json`（实测发生过：全量跑完发现落盘文件
+    mtime 刚好是 pytest 时间）—— 内容虽然等于当前基线所以无害，但测试绝不该
+    有写真实数据目录的副作用。
+    """
+    monkeypatch.setattr(
+        _master_store, "STORE_PATH", str(tmp_path / "master_store.json")
+    )

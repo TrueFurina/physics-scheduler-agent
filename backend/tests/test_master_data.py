@@ -207,6 +207,30 @@ def test_master_derived_tasks_skip_intro_and_exam(monkeypatch):
     assert names == set(), names  # 扭摆法已排，其余全被 schedulable 过滤
 
 
+def test_raw_schedulable_tasks_filter_intro_and_exam(monkeypatch):
+    """灰箱可排清单统一走 is_schedulable_project：绪论与考试类都不进求解器。
+
+    此前只过滤 looks_like_exam —— R-58 让绪论登记进主数据后，上传清单
+    （_master_tasks）或 pending 里若出现绪论行，灰箱排课就会把一场绪论课
+    排进某个教室（R-48：绪论课已单独安排）。
+    """
+    from app.utils.excel_parser import PendingTask
+
+    db = ScheduleDatabase()
+    db.entries = []
+    db.pending = [PendingTask(class_name="一班", group="1组", experiment="绪论课")]
+    db.loaded = True
+    monkeypatch.setattr(api, "_db", db)
+    monkeypatch.setattr(api, "_master_tasks", [
+        PendingTask(class_name="一班", group="1组", experiment="大物实验B考试"),
+        PendingTask(class_name="一班", group="1组", experiment="扭摆法"),
+    ])
+    monkeypatch.setattr(api, "_master_derived_tasks", lambda: [])
+
+    names = [t.experiment for t in api._raw_schedulable_tasks()]
+    assert names == ["扭摆法"], names  # 绪论与考试都被滤掉，只剩可排项
+
+
 def test_master_derived_tasks_group_granularity_no_false_positive(monkeypatch):
     """组名写法不一致（班上有组 A 上过别的项目、却没上「扭摆法」）不应被误判为漏排。"""
     db = ScheduleDatabase()

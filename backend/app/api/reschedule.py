@@ -814,10 +814,11 @@ def _enrich_extra_tasks() -> Tuple[List, List[str]]:
 
 
 def _raw_schedulable_tasks() -> List:
-    from app.utils.excel_parser import looks_like_exam
-
     raw = list(getattr(_db, "pending", None) or []) + list(_master_tasks) + _master_derived_tasks()
-    return [t for t in raw if not looks_like_exam(getattr(t, "experiment", "") or "")]
+    # 统一判定「可排」：考试类**和绪论类**都不进求解器（R-48/R-58 口径）。
+    # 此前只过滤 looks_like_exam —— R-58 让绪论登记进主数据后，上传清单或
+    # pending 里若出现绪论行，灰箱排课就会把一场绪论课排进某个教室。
+    return [t for t in raw if is_schedulable_project(getattr(t, "experiment", "") or "")]
 
 
 def _ensure_loaded() -> None:
