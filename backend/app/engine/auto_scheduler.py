@@ -45,6 +45,7 @@ CP-SAT 面对 10! 量级的对称解，实测 30 个任务 5.2 万个布尔变�
   这条与 `parallel_scheduler._is_intro` 同一口径。
 """
 
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -210,7 +211,11 @@ class AutoScheduler:
             return None
 
     # ------------------------------------------------------------------ 求解
-    def solve(self, max_sections: int = 30) -> Dict:
+    def solve(self, max_sections: int = 30, sections_override: Optional[List[Dict]] = None,
+              extra_room_busy: Optional[Set[Tuple]] = None,
+              extra_teacher_busy: Optional[Set[Tuple]] = None,
+              extra_class_busy: Optional[Set[Tuple]] = None,
+              flatten_seconds: float = 4.0) -> Dict:
         sections, intro_excluded = self._get_course_sections()
         if not sections:
             return {"success": False, "error": "没有可排课的教学任务"}
@@ -222,10 +227,16 @@ class AutoScheduler:
         total_all = len(sections)
         weeks = self._get_weeks()
         room_busy, teacher_busy = self._occupancy()
+        # 分片求解（solve_all）时把前面片已排定的格子回填进来 —— 否则第 2 片会把
+        # 教室/教师/班级排到第 1 片刚占的位置上（片与片之间互相不可见）。
+        room_busy |= set(extra_room_busy or ())
+        teacher_busy |= set(extra_teacher_busy or ())
+        class_busy = set(extra_class_busy or ())
         student_busy = self._student_busy(weeks)
 
-        # 限制规模保证求解速度（全表 171 个任务 × 16 周 × 15 时段 × 10 教室过重）
-        sections = sections[:max(1, int(max_sections))]
+        # 限制规模保证求解速度（全表 171 个任务 × 16 周 × 15 时段过重，单次会超时）
+        sections = sections_override if sections_override is not None \
+            else sections[:max(1, int(max_sections))]
 
         # ---- 候选域：先按"现有表占用"剪掉不可用的格子，模型只建可行格 ----
         # `free_rooms[(w,d,t)]` = 该格当前还空着的教室（顺序稳定，用于求解后分配）
@@ -256,6 +267,9 @@ class AutoScheduler:
                         if not free_rooms[(w, d, t)]:
                             continue
                         if sec["teacher"] and (w, d, t, sec["teacher"]) in teacher_busy:
+                            continue
+                        # 分片求解时，同一班级在前面的片里已排定的格子必须避开
+                        if sec["class_name"] and (w, d, t, sec["class_name"]) in class_busy:
                             continue
                         cells.append((w, d, t))
             domains[i] = cells
@@ -302,7 +316,7 @@ class AutoScheduler:
         model.Maximize(sum(x.values()))
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 6.0
+        solver.parameters.max_time_in_seconds = max(1.0, float(flatten_seconds) + 2.0)
         status = solver.Solve(model)
         ok = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
@@ -325,7 +339,7 @@ class AutoScheduler:
                 model.Minimize(z)
 
                 solver2 = cp_model.CpSolver()
-                solver2.parameters.max_time_in_seconds = 4.0
+                solver2.parameters.max_time_in_seconds = max(0.5, float(flatten_seconds))
                 status2 = solver2.Solve(model)
                 if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     solver, status = solver2, status2
@@ -394,6 +408,93 @@ class AutoScheduler:
             ),
         }
 
+    # ------------------------------------------------------------ 全校一键（分片）
+    def solve_all(self, chunk_size: int = 60, max_chunks: int = 40,
+                  flatten_seconds: float = 3.0) -> Dict:
+        """全表一键排课：**全部**教学任务而不是前 N 个。
+
+        为什么必须分片：171 个任务一次性建模（16 周 × 15 时段 + 摊平目标）实测
+        6 秒时限内连可行解都拿不到（status=UNKNOWN）；60 个一片 7 秒可解。
+        分片之间不是独立的 —— 前一片排定的 (周,星期,时段) 上的教室/教师/班级
+        必须回填成后一片的占用，否则两片会互相"看不见"而重排同一格。
+        """
+        sections_all, intro_excluded = self._get_course_sections()
+        if not sections_all:
+            return {"success": False, "error": "没有可排课的教学任务"}
+        if not self._get_rooms():
+            return {"success": False, "error": "没有可用教室"}
+
+        chunk_size = max(1, int(chunk_size))
+        chunks = [sections_all[i:i + chunk_size]
+                  for i in range(0, len(sections_all), chunk_size)][:max_chunks]
+
+        room_busy: Set[Tuple] = set()
+        teacher_busy: Set[Tuple] = set()
+        class_busy: Set[Tuple] = set()
+        schedule: List[Dict] = []
+        conflicts: List[Dict] = []
+        chunk_reports: List[Dict] = []
+        statuses: List[str] = []
+        t_start = time.time()
+
+        for idx, chunk in enumerate(chunks, 1):
+            t0 = time.time()
+            r = self.solve(
+                sections_override=chunk,
+                extra_room_busy=room_busy,
+                extra_teacher_busy=teacher_busy,
+                extra_class_busy=class_busy,
+                flatten_seconds=flatten_seconds,
+            )
+            rows = r.get("schedule") or []
+            schedule.extend(rows)
+            conflicts.extend(r.get("conflicts") or [])
+            statuses.append(str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE")))
+            for row in rows:
+                key = (row["week"], row["weekday"], row["time_slot"])
+                room_busy.add(key + (row["room"],))
+                if row.get("teacher"):
+                    teacher_busy.add(key + (row["teacher"],))
+                if row.get("class_name"):
+                    class_busy.add(key + (row["class_name"],))
+            chunk_reports.append({
+                "index": idx, "size": len(chunk), "solved": len(rows),
+                "status": statuses[-1], "seconds": round(time.time() - t0, 1),
+            })
+
+        schedule.sort(key=lambda s: (s["week"], WEEKDAYS.index(s["weekday"]),
+                                     TIME_SLOTS.index(s["time_slot"]),
+                                     s["class_name"], s["teacher"]))
+        overall = ("OPTIMAL" if statuses and all(s == "OPTIMAL" for s in statuses)
+                   else "FEASIBLE" if all(s in ("OPTIMAL", "FEASIBLE") for s in statuses)
+                   else "PARTIAL")
+        if not schedule:
+            return {"success": False, "status": overall, "error": "分片求解未产出任何排课结果",
+                    "chunks": chunk_reports, "conflicts": conflicts}
+        return {
+            "success": bool(schedule),
+            "status": overall,
+            "weeks": self._get_weeks()[:1] + self._get_weeks()[-1:],
+            "total_sections": len(sections_all),
+            "total_sections_all": len(sections_all),
+            "intro_excluded": intro_excluded,
+            "solved": len(schedule),
+            "conflicts": conflicts,
+            "schedule": schedule,
+            "chunks": chunk_reports,
+            "chunked": len(chunks) > 1,
+            "elapsed_s": round(time.time() - t_start, 1),
+            "student_checked": self._student_busy(self._get_weeks()) is not None,
+            "capacity_checked": False,
+            "note": (
+                f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学任务分 {len(chunks)} 片求解，"
+                f"片间回填教室/教师/班级占用；教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
+                + ("；学生课表已校验" if self._student_busy(self._get_weeks()) is not None
+                   else "；学生维度未校验（未上传学生课表）")
+                + "；容量未校验（安排表无容量字段）"
+            ),
+        }
+
     # ------------------------------------------------------------------ 文案
     def summary(self, result: Dict) -> str:
         """生成可读的排课方案摘要"""
@@ -424,9 +525,22 @@ class AutoScheduler:
         for s in result["schedule"]:
             by_week[s["week"]].append(s)
 
+        # 全文列出 171 条会把教秘淹没（界面里是一个 96px 高的滚动框）：
+        # 大方案只给每周条数 + 每周前几行示例，完整明细走「导出初稿 Excel」。
+        big = len(result["schedule"]) > 40
         for week in sorted(by_week):
+            rows = by_week[week]
+            if big:
+                lines.append(f"\n第{week}周：{len(rows)} 个教学任务")
+                for s in rows[:3]:
+                    lines.append(
+                        f"  {s['weekday']} {s['time_slot']} {s['room']} | "
+                        f"{s['teacher']} {s['course']}（{s['class_name']}）")
+                if len(rows) > 3:
+                    lines.append(f"  …… 另有 {len(rows) - 3} 个（完整明细请点「导出初稿 Excel」）")
+                continue
             lines.append(f"\n第{week}周：")
-            for s in by_week[week]:
+            for s in rows:
                 lines.append(
                     f"  {s['weekday']} {s['time_slot']} {s['room']} | "
                     f"{s['teacher']} {s['course']}（{s['class_name']}）"

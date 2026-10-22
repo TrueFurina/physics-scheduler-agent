@@ -6,8 +6,11 @@ interface Props {
   loadError: string;
   autoScheduleLoading: boolean;
   autoScheduleMsg: string;
+  /** 初稿条数（0 表示没有可导出的方案） */
+  autoScheduleCount?: number;
   onOpenAdmin: () => void;
   onAutoSchedule: () => void;
+  onExportAutoSchedule?: () => void;
   onRetryLoad: () => void;
   onSelectTeacher: (name: string) => void;
 }
@@ -19,7 +22,8 @@ interface Props {
  * 教师姓名是业务主体（教秘按姓名发起调课），不做脱敏。
  */
 export default function IdentityView({
-  teachers, loadError, autoScheduleLoading, autoScheduleMsg, onOpenAdmin, onAutoSchedule, onRetryLoad, onSelectTeacher,
+  teachers, loadError, autoScheduleLoading, autoScheduleMsg, autoScheduleCount = 0,
+  onOpenAdmin, onAutoSchedule, onExportAutoSchedule, onRetryLoad, onSelectTeacher,
 }: Props) {
   return (
     <div>
@@ -46,12 +50,24 @@ export default function IdentityView({
             disabled={autoScheduleLoading}
             className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium transition-colors shrink-0"
           >
-            {autoScheduleLoading ? '⏳ 排课中...' : '一键自动排课'}
+            {autoScheduleLoading ? '⏳ 全校排课中（约 25 秒）...' : '一键自动排课（全校）'}
           </button>
         </div>
         {autoScheduleMsg && (
-          <div className="mt-4 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 whitespace-pre-wrap max-h-96 overflow-y-auto">
-            {autoScheduleMsg}
+          <div className="mt-4">
+            <div className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 whitespace-pre-wrap max-h-96 overflow-y-auto">
+              {autoScheduleMsg}
+            </div>
+            {/* 初稿能排出来，也要能交给班级：171 行文本没法直接用 */}
+            {autoScheduleCount > 0 && onExportAutoSchedule && (
+              <button
+                onClick={onExportAutoSchedule}
+                className="mt-2 px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+                title="总表给排课人员核对，每班一页直接发给班级"
+              >
+                ⬇️ 导出初稿 Excel（{autoScheduleCount} 条 · 总表 + 每班一页）
+              </button>
+            )}
           </div>
         )}
       </div>

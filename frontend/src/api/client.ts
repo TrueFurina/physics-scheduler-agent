@@ -230,9 +230,16 @@ export const rescheduleApi = {
   autoSchedule: () =>
     api.post<{ success: boolean; message: string; data: {
       total_sections: number; total_sections_all: number; intro_excluded: number;
-      solved: number; weeks: number[]; conflicts: any[]; schedule: any[];
+      solved: number; truncated?: boolean; coverage?: string; chunks?: any[];
+      elapsed_s?: number | null;
+      weeks: number[]; conflicts: any[]; schedule: any[];
       student_checked: boolean; capacity_checked: boolean; real_entries: number;
     } }>('/reschedule/auto-schedule'),
+
+  // 自动排课初稿导出（总表 + 每班一页）：教秘拿到 171 行文本无法落地，
+  // 这一步把"排完了"变成"能发班级群"的 Excel。
+  autoScheduleExport: (schedule: any[]) =>
+    api.post('/reschedule/auto-schedule/export', { schedule }, { responseType: 'blob' }),
 
   // 管理员登录（审批台）：口令由服务端校验，成功返回会话令牌
   adminLogin: (username: string, password: string) =>

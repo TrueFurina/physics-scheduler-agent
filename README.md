@@ -127,6 +127,8 @@ physics-scheduler-agent/
 | GET | `/api/reschedule/data-audit` | Dashboard | Graded conflict audit + parallel-teaching note |
 | GET | `/api/reschedule/export/class-schedule` | Export | Per-class timetables (course column + cross-course clashes) |
 | GET | `/api/reschedule/export/room-schedule` | Export | Per-room timetables |
+| POST | `/api/reschedule/auto-schedule` | Scheduling | Full-school one-click draft (chunked, all 171 tasks) |
+| POST | `/api/reschedule/auto-schedule/export` | Export | Draft workbook (master sheet + one sheet per class) |
 | POST | `/api/reschedule/admin-login` | Auth | Admin login (approval desk) |
 | POST | `/api/reschedule/course-select` | Selection | Course selection Q&A (LLM) |
 | POST | `/api/reschedule/experiment-tutor` | Tutoring | Lab tutoring Q&A (LLM) |
@@ -145,6 +147,7 @@ python -m pytest tests/ -v
 - [x] Master data CRUD + persistence + Excel ledger round-trip
 - [x] Parallel batch scheduling with gray-box completion
 - [x] Multi-course consolidation in class timetables (course column + cross-course clash marking)
+- [x] Full-school one-click scheduling (chunked CP-SAT, 171/171 coverage, draft export)
 - [ ] Visual schedule grid (weekly timetable view)
 - [ ] Data import wizard (field mapping for different schools)
 - [ ] Multi-school data isolation

@@ -955,6 +955,12 @@ class ParallelSolveRequest(BaseModel):
     weeks: Optional[int] = None       # 窗口宽度（默认用主数据该班的周次范围）
 
 
+class AutoScheduleRequest(BaseModel):
+    """全校一键排课请求。默认全表分片；传 max_sections 则退回"只排前 N 个"。"""
+    max_sections: Optional[int] = None
+    chunk_size: int = 60
+
+
 class ParallelExportRequest(BaseModel):
     """并行排课方案导出请求"""
     class_name: str
@@ -1654,8 +1660,13 @@ async def impact_analysis(req: ChatRequest):
 
 @router.post("/auto-schedule", summary="排课自动生成（P1）",
              dependencies=[Depends(rate_limit("auto-schedule"))])
-async def auto_schedule():
-    """用约束求解器基于现有数据自动生成排课初稿（带周次，避开现有安排表）"""
+async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
+    """用约束求解器基于现有数据自动生成排课初稿（带周次，避开现有安排表）。
+
+    默认**全表覆盖**：真实表 171 个教学任务分片求解（单次 171 个任务实测 6 秒时限
+    内连可行解都拿不到；60 个一片可解）。传 `max_sections` 可回到"只排前 N 个"的
+    旧行为（调试/演示用）。
+    """
     _ensure_loaded()
 
     from app.engine.auto_scheduler import AutoScheduler
@@ -1664,33 +1675,55 @@ async def auto_schedule():
         _db, student=_student,
         extra_tasks=extra_tasks,
     )
-    result = await run_in_threadpool(scheduler.solve, max_sections=30)
+    if req and req.max_sections:
+        result = await run_in_threadpool(scheduler.solve, max_sections=req.max_sections)
+        truncated = True
+    else:
+        chunk_size = (req.chunk_size if req else 60) or 60
+        result = await run_in_threadpool(scheduler.solve_all, chunk_size=chunk_size)
+        truncated = False
 
-    # 定位说明：自动排课是"辅助初稿生成"，非替代学校已排定的完整安排表。
-    # 原文案写"本次简化演示 12 个教学任务"，而实际 `max_sections=30` —— 文案与事实不符，
-    # 同一份方案下方就列着 30 条。这里改成用真实数字拼，避免再漂。
     real_entries = len(_db.entries)
+    total_all = result.get("total_sections_all", 0)
+    in_scope = result.get("total_sections", 0)
+    solved = result.get("solved", 0)
+    if truncated:
+        scope_text = (f"本次取前 {in_scope} 个求解（其余 {max(0, total_all - in_scope)} 个未参与，"
+                      f"如需全部请不传 max_sections）")
+    elif result.get("chunks"):
+        chunk_desc = "、".join(f"第{c['index']}片 {c['solved']}/{c['size']}"
+                               for c in result["chunks"])
+        scope_text = (f"本次全表覆盖：{in_scope} 个任务分 {len(result['chunks'])} 片求解"
+                      f"（{chunk_desc}），用时 {result.get('elapsed_s', 0)} 秒")
+    else:
+        scope_text = f"本次求解 {in_scope} 个任务"
+
+    note = (
+        f"📌 定位说明：自动排课为辅助初稿生成。全表共 {total_all} 个实验教学任务"
+        f"（另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"
+        f"    {scope_text}；共排定 {solved} 个。方案已逐周避开现有安排表"
+        f"（共 {real_entries} 条记录）占用的教室、教师与班级。\n"
+        f"    未排入的 {len(result.get('conflicts') or [])} 个任务已逐条列出原因；"
+        f"生成结果仅供教秘做初稿参考，落地前请按「我的课程 / 数据体检」复核。"
+    )
     # 灰箱补全：替教秘做的默认决定（自动分配教师/场地）附加在定位说明之后，不静默
     if task_assumptions and result.get("success"):
         note += "\n\n🧩 灰箱补全（信息不全时系统自动做的决定）:\n" + \
                 "\n".join(f"  · {a}" for a in task_assumptions)
-    note = (
-        f"📌 定位说明：自动排课为辅助初稿生成。全表共 {result.get('total_sections_all', 0)} 个实验教学任务"
-        f"（另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"
-        f"    本次取前 {result.get('total_sections', 0)} 个求解。方案已逐周避开现有安排表"
-        f"（共 {real_entries} 条记录）占用的教室与教师。\n"
-        f"    生成结果仅供教秘做初稿参考，落地前请按「我的课程 / 数据体检」复核。"
-    )
     result["summary_text"] = note + "\n\n" + scheduler.summary(result)
 
     return {
         "success": result.get("success", False),
         "message": result.get("summary_text", result.get("error", "排课失败")),
         "data": {
-            "total_sections": result.get("total_sections", 0),
-            "total_sections_all": result.get("total_sections_all", 0),
+            "total_sections": in_scope,
+            "total_sections_all": total_all,
             "intro_excluded": result.get("intro_excluded", 0),
-            "solved": result.get("solved", 0),
+            "solved": solved,
+            "truncated": truncated,
+            "coverage": f"{solved}/{total_all}",
+            "chunks": result.get("chunks", []),
+            "elapsed_s": result.get("elapsed_s"),
             "weeks": result.get("weeks", []),
             "conflicts": result.get("conflicts", []),
             "schedule": result.get("schedule", []),
@@ -1699,6 +1732,81 @@ async def auto_schedule():
             "real_entries": real_entries,
         },
     }
+
+
+class AutoScheduleExportRequest(BaseModel):
+    """自动排课初稿导出：把 /auto-schedule 返回的 schedule 原样发回来。"""
+    schedule: list  # [{week, weekday, time_slot, room, teacher, course, class_name}]
+
+
+@router.post("/auto-schedule/export", summary="自动排课初稿导出 Excel（总表 + 每班一页）",
+             dependencies=[Depends(rate_limit("standard-export"))])
+async def auto_schedule_export(req: AutoScheduleExportRequest):
+    """把一键自动排课的初稿导出成可发班级群的 Excel。
+
+    为什么需要：`/auto-schedule` 只返回文本摘要 + JSON 明细，教秘拿到 171 行
+    文本无法落地 —— 要么手抄，要么重新在 Excel 里排一遍。这份导出就是"排完了"
+    到"能交付"之间缺的那一步：总表给排课人员核对，每班一页直接发给班级。
+    """
+    from io import BytesIO
+    from urllib.parse import quote
+
+    import openpyxl
+    from openpyxl.styles import Alignment, Font
+    from fastapi.responses import StreamingResponse
+
+    rows = list(req.schedule or [])
+    if not rows:
+        raise HTTPException(status_code=400, detail="没有可导出的排课方案（schedule 为空）")
+
+    order = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
+    rows.sort(key=lambda s: (s.get("week") or 0, s.get("weekday") or "",
+                             order.get(s.get("time_slot") or "", 9),
+                             s.get("class_name") or "", s.get("teacher") or ""))
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "总表"
+    headers = ["周次", "星期", "时段", "场地", "教师", "实验项目", "班级"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center")
+    for s in rows:
+        ws.append([s.get("week"), s.get("weekday"), s.get("time_slot"), s.get("room"),
+                   s.get("teacher"), s.get("course"), s.get("class_name")])
+    for col, w in zip("ABCDEFG", [8, 8, 14, 10, 20, 30, 26]):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+
+    used = {"总表"}
+    by_class: dict = {}
+    for s in rows:
+        by_class.setdefault(s.get("class_name") or "（未填班级）", []).append(s)
+    for cls, items in by_class.items():
+        sheet = _safe_sheet_name(cls, used)
+        used.add(sheet)
+        sh = wb.create_sheet(sheet)
+        sh.append(["周次", "星期", "时段", "场地", "教师", "实验项目"])
+        for c in sh[1]:
+            c.font = Font(bold=True)
+            c.alignment = Alignment(horizontal="center")
+        for s in items:
+            sh.append([s.get("week"), s.get("weekday"), s.get("time_slot"), s.get("room"),
+                       s.get("teacher"), s.get("course")])
+        for col, w in zip("ABCDEF", [8, 8, 14, 10, 20, 30]):
+            sh.column_dimensions[col].width = w
+        sh.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = quote(f"自动排课初稿_{len(rows)}条_{len(by_class)}班.xlsx")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 @router.get("/teachers", summary="教师列表（F1 身份选择）")

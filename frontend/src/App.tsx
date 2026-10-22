@@ -68,6 +68,7 @@ function App() {
   const [consultQ, setConsultQ] = useState('');  // 选课/辅导咨询输入
   const [consultMsg, setConsultMsg] = useState('');  // 咨询回复
   const [autoScheduleMsg, setAutoScheduleMsg] = useState('');  // 自动排课结果
+  const [autoScheduleRows, setAutoScheduleRows] = useState<any[]>([]);  // 初稿明细（供导出）
   const [autoScheduleLoading, setAutoScheduleLoading] = useState(false);  // 自动排课中
   const [showAdminLogin, setShowAdminLogin] = useState(false);  // 管理员登录弹窗
   // 管理员登录态：以客户端持有的服务端令牌为准（刷新后从 sessionStorage 恢复）。
@@ -322,10 +323,23 @@ function App() {
     try {
       const r = await rescheduleApi.autoSchedule();
       setAutoScheduleMsg(r.data.message);
+      setAutoScheduleRows((r.data as any)?.data?.schedule || []);
     } catch (err: any) {
+      setAutoScheduleRows([]);
       setAutoScheduleMsg(`❌ 自动排课失败：${describeApiError(err)}`);
     } finally {
       setAutoScheduleLoading(false);
+    }
+  };
+
+  // 一键自动排课的初稿导出：总表 + 每班一页（171 行文本没法直接交给班级）
+  const handleAutoScheduleExport = async () => {
+    if (!autoScheduleRows.length) return;
+    try {
+      const r = await rescheduleApi.autoScheduleExport(autoScheduleRows);
+      downloadBlob(r.data, `自动排课初稿_${autoScheduleRows.length}条.xlsx`);
+    } catch (err: any) {
+      setMsg(`初稿导出失败：${describeApiError(err)}`);
     }
   };
 
@@ -1136,8 +1150,10 @@ function App() {
               loadError={loadError}
               autoScheduleLoading={autoScheduleLoading}
               autoScheduleMsg={autoScheduleMsg}
+              autoScheduleCount={autoScheduleRows.length}
               onOpenAdmin={handleOpenAdmin}
               onAutoSchedule={handleAutoSchedule}
+              onExportAutoSchedule={handleAutoScheduleExport}
               onRetryLoad={loadTeacherList}
               onSelectTeacher={handleSelectTeacher}
             />

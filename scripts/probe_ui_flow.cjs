@@ -83,6 +83,28 @@ function rec(ok, name, detail, opts = {}) {
     rec(false, '🤖 一键自动排课（带周次）', String(e).slice(0, 100));
   }
 
+  // ⬇️ 自动排课初稿导出（全校 171 条）：能排出来 ≠ 能交付。
+  // 只给一段文本，教秘还得手抄；这里验"点了能拿到真 xlsx"（zip 魔数 + 体积）。
+  try {
+    const tE = Date.now();
+    const [dl] = await Promise.all([
+      page.waitForEvent('download', { timeout: 60000 }),
+      page.getByRole('button', { name: /导出初稿 Excel/ }).first().click(),
+    ]);
+    const nm = dl.suggestedFilename();
+    const pth = await dl.path();
+    const buf = pth ? fs.readFileSync(pth) : Buffer.alloc(0);
+    const isZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b;
+    rec(
+      isZip && /\.xlsx$/i.test(nm) && buf.length > 2000,
+      '⬇️ 导出初稿 Excel',
+      `${Date.now() - tE}ms，「${nm}」${(buf.length / 1024).toFixed(1)} KB，`
+        + (isZip ? 'zip 魔数 PK 正常' : '不是 xlsx（可能下到了错误 JSON）'),
+    );
+  } catch (e) {
+    rec(false, '⬇️ 导出初稿 Excel', `没拿到下载事件：${String(e).slice(0, 110)}`);
+  }
+
   // F2：点第一位教师 → 我的课程
   try {
     const t1 = Date.now();
