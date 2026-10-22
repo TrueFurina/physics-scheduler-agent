@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { RefObject } from 'react';
-import type { ParallelCourse, ParallelSolveResult } from '../types';
+import type { ParallelCourse, ParallelSolveResult, SchoolPlanResult } from '../types';
 import { GRID_TIME_SLOTS, timeSlotLabels } from '../constants/labels';
 
 // 周六/周日也是真实上课日（真实表 71/433 条在周末，"金工 5、6 周排周六"是常态）。
@@ -16,16 +16,22 @@ interface Props {
   result: ParallelSolveResult | null;
   viewWeek: number | null;
   resultRef: RefObject<HTMLDivElement>;
+  /** 全校一键结果（逐班·按天，组级） */
+  schoolPlan?: SchoolPlanResult | null;
+  schoolSolving?: boolean;
   onWeekdayChange: (w: string) => void;
   onSolve: (className: string) => void;
   onExport: () => void;
   onViewWeekChange: (w: number) => void;
+  onSolveSchool?: () => void;
+  onExportSchool?: () => void;
 }
 
 /** ⚡ 并行排课：一门课的全部实验项目 × 学生组别一次列出，CP-SAT 一键统一分配。 */
 export default function ParallelView({
   weekday, courses, selected, loading, solving, result, viewWeek, resultRef,
-  onWeekdayChange, onSolve, onExport, onViewWeekChange,
+  schoolPlan, schoolSolving, onWeekdayChange, onSolve, onExport, onViewWeekChange,
+  onSolveSchool, onExportSchool,
 }: Props) {
   // 周沙盘：只渲染被选中的那一周，行=时段 列=学生组
   const weeks = Object.keys(result?.by_week || {}).map(Number).sort((a, b) => a - b);
@@ -36,7 +42,19 @@ export default function ParallelView({
   return (
     <main className="max-w-4xl mx-auto px-4 pb-10">
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-1">⚡ 并行排课</h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">⚡ 并行排课</h2>
+          {onSolveSchool && (
+            <button
+              onClick={onSolveSchool}
+              disabled={schoolSolving}
+              className="shrink-0 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium"
+              title="按主数据的「课程总时间范围」逐班排定（跨星期、组级），班与班之间互斥教室/教师"
+            >
+              {schoolSolving ? '⏳ 全校排课中（约 15 秒）...' : '🌐 一键排全校'}
+            </button>
+          )}
+        </div>
         <p className="text-sm text-gray-500 mb-3">
           一门课的全部实验项目 × 学生组别一次列出，CP-SAT 约束求解一键统一分配周次/时段/场地（每组每周一个实验，场地/教师互斥）
         </p>
@@ -110,6 +128,55 @@ export default function ParallelView({
           ))}
         </div>
       </div>
+
+      {/* 全校一键结果：逐班状态（失败必须说清原因，不能只显示"完成"） */}
+      {schoolPlan && (
+        <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
+          <h3 className="font-medium text-gray-900 mb-1">
+            🌐 全校一键排课 · {schoolPlan.classes_ok}/{schoolPlan.classes_total} 个班排定
+          </h3>
+          <p className="text-xs text-gray-500 mb-3">
+            共 {schoolPlan.scheduled} 条安排（组级）｜ 单元 {schoolPlan.units} 个 ｜ 用时 {schoolPlan.elapsed_s} 秒
+            {schoolPlan.classes_failed.length > 0 && (
+              <span className="text-amber-600"> ｜ {schoolPlan.classes_failed.length} 个班未排定（原因见下表）</span>
+            )}
+            {onExportSchool && schoolPlan.schedule.length > 0 && (
+              <button
+                onClick={onExportSchool}
+                className="ml-3 px-3 py-1 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+              >
+                ⬇️ 导出全校方案 Excel
+              </button>
+            )}
+          </p>
+          <div className="max-h-72 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="text-gray-400">
+                <tr>
+                  <th className="text-left py-1">班级</th>
+                  <th className="text-left">上课日</th>
+                  <th className="text-right">单元</th>
+                  <th className="text-right">已排</th>
+                  <th className="text-left pl-3">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schoolPlan.per_class.map((c) => (
+                  <tr key={c.class_name} className="border-t border-gray-100">
+                    <td className="py-1 text-gray-800">{c.class_name}</td>
+                    <td className="text-gray-500">{(c.weekdays || []).join('/') || '—'}</td>
+                    <td className="text-right text-gray-600">{c.total_units}</td>
+                    <td className="text-right text-gray-800">{c.scheduled}</td>
+                    <td className={`pl-3 ${c.success ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {c.success ? c.status : (c.error || '失败')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* 求解结果 */}
       {result && (

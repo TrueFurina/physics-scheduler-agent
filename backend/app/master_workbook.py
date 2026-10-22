@@ -84,11 +84,12 @@ TABLE_SPECS: List[dict] = [
             "name": ("班级", "班级名称", "行政班级", "教学班"),
             "groups": ("学生组", "组别", "分组", "组"),
             "weekday": ("上课星期", "星期", "星期几"),
+            "weekdays": ("全部上课日", "上课日", "上课日期"),
             "time_slots": ("节次", "时段", "上课节次", "时间段"),
             "week_min": ("起始周", "开始周", "周次起", "起始周次"),
             "week_max": ("结束周", "截止周", "周次止", "结束周次"),
         },
-        "multi": {"groups", "time_slots"}, "required": ("name",),
+        "multi": {"groups", "weekdays", "time_slots"}, "required": ("name",),
     },
     {
         "key": "courses", "sheet": "课程",
@@ -187,9 +188,10 @@ def build_workbook(md) -> "openpyxl.Workbook":
     _sheet("场地", ["场地", "容量"], [14, 10],
            [[r["name"], r["capacity"] if r["capacity"] is not None else ""]
             for r in ov["rooms"]])
-    _sheet("班级", ["班级", "学生组", "上课星期", "节次", "起始周", "结束周"],
-           [30, 34, 12, 16, 10, 10],
+    _sheet("班级", ["班级", "学生组", "上课星期", "全部上课日", "节次", "起始周", "结束周"],
+           [30, 34, 12, 20, 16, 10, 10],
            [[c["name"], MULTI_SEP.join(c["groups"]), c["weekday"],
+             MULTI_SEP.join(c.get("weekdays") or []),
              MULTI_SEP.join(c["time_slots"]),
              "" if c["week_min"] is None else c["week_min"],
              "" if c["week_max"] is None else c["week_max"]]
@@ -416,7 +418,8 @@ def _apply_classes(md, rows) -> dict:
         md.upsert_class(
             r["name"], groups=r.get("groups") or [], weekday=r.get("weekday") or "",
             time_slots=r.get("time_slots") or [],
-            week_min=r.get("week_min"), week_max=r.get("week_max"))
+            week_min=r.get("week_min"), week_max=r.get("week_max"),
+            weekdays=r.get("weekdays") or None)
         n += 1
     return {"rows": len(rows), "applied": n}
 

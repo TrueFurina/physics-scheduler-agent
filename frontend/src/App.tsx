@@ -84,6 +84,8 @@ function App() {
   const [parallelLoading, setParallelLoading] = useState(false);  // 总览加载中
   const [parallelSolving, setParallelSolving] = useState(false);  // 求解中
   const [parallelResult, setParallelResult] = useState<any>(null);  // 求解结果
+  const [schoolPlan, setSchoolPlan] = useState<any>(null);  // 全校一键结果（逐班·按天）
+  const [schoolSolving, setSchoolSolving] = useState(false);
   const [parallelSelected, setParallelSelected] = useState('');  // 当前选中课程
   // 失败提示条渲染在页面顶部（header 正下方），而教秘的点按发生在页面中部/底部
   // （如并行排课点某张课程卡的「一键排课」）—— 不滚进视口就是"点了没反应"（R-30 同族）。
@@ -201,6 +203,42 @@ function App() {
       setMsg(`并行排课失败：${describeApiError(err)}`);
     } finally {
       setParallelSolving(false);
+    }
+  };
+
+  // 全校一键：逐班求解（组级），班与班之间互斥教室/教师。
+  // 与首屏「一键自动排课」的分工：那个是教师×课程×班级的初稿，这个是班级×项目×组，
+  // 与安排表同口径，可直接对照/导出班级课表。
+  const handleSolveSchool = async () => {
+    setSchoolSolving(true);
+    setMsg('');
+    try {
+      const r = await rescheduleApi.parallelSolveAll();
+      const d = r.data as any;
+      setSchoolPlan(d);
+      if (!d?.success) {
+        setMsg(`全校排课未完成：${d?.classes_failed?.[0]?.error || '没有可排的班级'}`);
+      } else if (d.classes_failed?.length) {
+        setMsg(`⚠️ ${d.classes_ok}/${d.classes_total} 个班排定，${d.classes_failed.length} 个班未排定（原因见结果表）`);
+      } else {
+        setMsg(`✅ 全校 ${d.classes_total} 个班全部排定，共 ${d.scheduled} 条安排（${d.elapsed_s}s）`);
+      }
+    } catch (err: any) {
+      setMsg(`全校排课失败：${describeApiError(err)}`);
+    } finally {
+      setSchoolSolving(false);
+    }
+  };
+
+  // 全校方案导出（总表 + 每班一页，与自动排课初稿共用导出端点）
+  const handleExportSchool = async () => {
+    const rows = schoolPlan?.schedule || [];
+    if (!rows.length) return;
+    try {
+      const r = await rescheduleApi.autoScheduleExport(rows);
+      downloadBlob(r.data, `全校排课方案_${schoolPlan.classes_ok}班_${rows.length}条.xlsx`);
+    } catch (err: any) {
+      setMsg(`全校方案导出失败：${describeApiError(err)}`);
     }
   };
 
@@ -1221,6 +1259,10 @@ function App() {
                 solving={parallelSolving}
                 result={parallelResult}
                 viewWeek={parallelViewWeek}
+                schoolPlan={schoolPlan}
+                schoolSolving={schoolSolving}
+                onSolveSchool={handleSolveSchool}
+                onExportSchool={handleExportSchool}
                 resultRef={parallelResultRef}
                 onWeekdayChange={handleParallelWeekdayChange}
                 onSolve={handleParallelSolve}

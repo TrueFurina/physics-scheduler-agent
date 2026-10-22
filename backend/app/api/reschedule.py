@@ -314,6 +314,7 @@ class _ClassIn(BaseModel):
     name: str
     groups: Optional[List[str]] = None
     weekday: Optional[str] = None
+    weekdays: Optional[List[str]] = None
     time_slots: Optional[List[str]] = None
     week_min: Optional[int] = None
     week_max: Optional[int] = None
@@ -424,7 +425,8 @@ async def master_upsert_class(req: _ClassIn):
     _ensure_master_data()
     try:
         _master_data.upsert_class(req.name, groups=req.groups, weekday=req.weekday or "",
-                                  time_slots=req.time_slots, week_min=req.week_min, week_max=req.week_max)
+                                  time_slots=req.time_slots, week_min=req.week_min,
+                                  week_max=req.week_max, weekdays=req.weekdays)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _persist_master_state()
@@ -1024,6 +1026,44 @@ async def parallel_solve(req: ParallelSolveRequest):
     # 求解失败时错误信息本身就是结论，不必再叠一层假设。
     if task_assumptions and result.get("success"):
         result["assumptions"] = task_assumptions + list(result.get("assumptions") or [])
+    return result
+
+
+@router.post("/parallel/solve-all", summary="并行排课-全校一键（逐班·按天，组级）",
+             dependencies=[Depends(rate_limit("parallel-solve"))])
+async def parallel_solve_all():
+    """全校一键排课：逐班求解（组级），班与班之间回填同星期的教室/教师占用。
+
+    与 `/auto-schedule` 的分工：
+      - `/auto-schedule` 是**教师×课程×班级**粒度的全校初稿（不区分学生组）；
+      - 本接口是**班级×项目×学生组**粒度（与安排表同一口径），结果可直接对照/导出班级课表。
+    时间范围取主数据该班的「课程总时间范围」（星期可多天、节次、周次）。
+    """
+    _ensure_loaded()
+    _ensure_master_data()
+    from app.engine.parallel_scheduler import ParallelScheduler
+
+    extra, task_assumptions = _enrich_extra_tasks()
+    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+
+    class_names = sorted(_master_data.classes) if _master_data.initialized else \
+        sorted({e.class_name for e in _db.entries if e.class_name})
+    specs = []
+    for name in class_names:
+        c = _master_data.classes.get(name) or {}
+        specs.append({
+            "class_name": name,
+            "weekday": c.get("weekday") or None,
+            "weekdays": sorted(c.get("weekdays") or []) or None,
+            "start_week": c.get("week_min") or 2,
+            "weeks": 10,
+            "time_slots": sorted(c.get("time_slots") or []) or None,
+            "week_max": c.get("week_max"),
+        })
+
+    result = await run_in_threadpool(ps.solve_school, specs)
+    if result.get("success") and task_assumptions:
+        result["assumptions"] = task_assumptions
     return result
 
 
@@ -1760,6 +1800,7 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
         raise HTTPException(status_code=400, detail="没有可导出的排课方案（schedule 为空）")
 
     order = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
+    rows = [dict(r, course=(r.get("course") or r.get("project") or "")) for r in rows]
     rows.sort(key=lambda s: (s.get("week") or 0, s.get("weekday") or "",
                              order.get(s.get("time_slot") or "", 9),
                              s.get("class_name") or "", s.get("teacher") or ""))
@@ -1774,7 +1815,7 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
         c.alignment = Alignment(horizontal="center")
     for s in rows:
         ws.append([s.get("week"), s.get("weekday"), s.get("time_slot"), s.get("room"),
-                   s.get("teacher"), s.get("course"), s.get("class_name")])
+                   s.get("teacher"), s.get("course") or s.get("project"), s.get("class_name")])
     for col, w in zip("ABCDEFG", [8, 8, 14, 10, 20, 30, 26]):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = "A2"
@@ -1793,7 +1834,7 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
             c.alignment = Alignment(horizontal="center")
         for s in items:
             sh.append([s.get("week"), s.get("weekday"), s.get("time_slot"), s.get("room"),
-                       s.get("teacher"), s.get("course")])
+                       s.get("teacher"), s.get("course") or s.get("project")])
         for col, w in zip("ABCDEF", [8, 8, 14, 10, 20, 30]):
             sh.column_dimensions[col].width = w
         sh.freeze_panes = "A2"

@@ -126,6 +126,30 @@ function rec(ok, name, detail, opts = {}) {
     rec(classCount > 5, '⚡ 并行排课 · 课程总览', `渲染出班级卡片（"2024级" 出现 ${classCount} 次）`);
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-parallel.png') });
 
+    // 🌐 一键排全校（逐班·按天，组级）：单班一键 ×17 次不是"一键全面排课"。
+    // 断言三件事：① 结果标题出现；② 覆盖 17/17（真实表班级数）；③ 方案条数 > 300。
+    try {
+      const tS = Date.now();
+      await page.getByRole('button', { name: /一键排全校/ }).first().click();
+      await page.waitForFunction(
+        () => /全校一键排课 · \d+\/\d+ 个班排定/.test(document.body.innerText),
+        { timeout: 180000 },
+      );
+      await page.waitForTimeout(400);
+      const stxt = await page.evaluate(() => document.body.innerText);
+      const m = stxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排定/);
+      const rows = stxt.match(/共 (\d+) 条安排/);
+      const n = rows ? Number(rows[1]) : 0;
+      rec(
+        !!m && m[1] === m[2] && n > 300,
+        '🌐 一键排全校（组级）',
+        `${Date.now() - tS}ms 返回，${m ? `${m[1]}/${m[2]} 班` : '未见解' }，${n} 条安排`,
+      );
+      await page.screenshot({ path: path.join(SHOT_DIR, 'flow-school-plan.png') });
+    } catch (e) {
+      rec(false, '🌐 一键排全校（组级）', String(e).slice(0, 120));
+    }
+
     const t2 = Date.now();
     // 点**靠后的一张卡**：结果区渲染在全部课程卡之后，点第一张卡（本就在首屏）
     // 或点最后一张卡，结果都可能掉到折叠线以下 —— 教秘只看到按钮从"求解中"恢复，
@@ -204,7 +228,7 @@ function rec(ok, name, detail, opts = {}) {
     const t3 = Date.now();
     await page.getByRole('button', { name: /数据看板/ }).first().click();
     await page.waitForFunction(
-      () => /共 \d+ 条安排/.test(document.body.innerText),
+      () => /共 \d+ 条安排\s*｜\s*\d+ 位教师/.test(document.body.innerText),
       { timeout: 40000 },
     );
     await page.waitForFunction(
@@ -212,8 +236,8 @@ function rec(ok, name, detail, opts = {}) {
       { timeout: 20000 },
     );
     const txt = await page.evaluate(() => document.body.innerText);
-    const mEntries = txt.match(/共 (\d+) 条安排/);
-    const mRooms = txt.match(/(\d+) 间场地/);
+    const mEntries = txt.match(/共 (\d+) 条安排\s*｜\s*\d+ 位教师\s*｜\s*(\d+) 间场地/);
+    const mRooms = mEntries ? [null, mEntries[2]] : null;
     const mUtil = txt.match(/([\d.]+)%\s*\n\s*平均教室利用率/);
     const conclusion = /整体健康/.test(txt)
       ? '整体健康'

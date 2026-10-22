@@ -99,6 +99,31 @@ export interface ParallelSolveResult {
   assumptions?: string[];
 }
 
+/** 全校一键排课（逐班·按天，组级）的单班结果 */
+export interface SchoolClassResult {
+  class_name: string;
+  success: boolean;
+  status: string;
+  weekdays: string[];
+  scheduled: number;
+  total_units: number;
+  error?: string | null;
+  days?: Array<{ day: string; units: number; scheduled: number; status: string }>;
+}
+
+export interface SchoolPlanResult {
+  success: boolean;
+  classes_total: number;
+  classes_ok: number;
+  classes_failed: Array<{ class_name: string; error?: string | null }>;
+  scheduled: number;
+  units: number;
+  elapsed_s: number;
+  per_class: SchoolClassResult[];
+  schedule: ParallelSession[];
+  note?: string;
+}
+
 /** `/data-audit` 的单条冲突。 */
 export interface AuditConflict {
   week: number;

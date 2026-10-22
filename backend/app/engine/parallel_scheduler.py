@@ -17,6 +17,7 @@
 4. 软目标：尽量排前面的周（早完成）
 """
 
+import time
 from typing import Dict, List, Optional
 from collections import defaultdict, Counter
 
@@ -99,11 +100,129 @@ class ParallelScheduler:
             for cls, projs in sorted(courses.items())
         ]
 
+    def _unit_day_map(self, class_name: str, days: List[str]) -> Dict[tuple, str]:
+        """每个 (项目, 组) 单元该排在哪一天：按历史多数派；无历史（大纲新增）按天负载最轻。"""
+        votes: Dict[tuple, Counter] = defaultdict(Counter)
+        for e in self.db.entries:
+            if e.class_name != class_name or not e.experiment or not e.group:
+                continue
+            if e.weekday in days:
+                votes[(e.experiment, e.group)][e.weekday] += 1
+        mapping: Dict[tuple, Optional[str]] = {
+            k: c.most_common(1)[0][0] for k, c in votes.items()}
+        load = Counter(v for v in mapping.values() if v)
+        for t in self._tasks_of(class_name):
+            k = (t.experiment, t.group or "1组")
+            if k in mapping:
+                continue
+            day = min(days, key=lambda d: load[d])
+            mapping[k] = day
+            load[day] += 1
+        return {k: v for k, v in mapping.items() if v}
+
+    def solve_school(self, class_specs: List[Dict], max_time_seconds: float = 10.0) -> Dict:
+        """全校一键：逐班、按天求解（组级），班与班之间回填同星期的教室/教师占用。
+
+        为什么按天：真实班级的时间范围经常跨 2–3 天（如 24级电子信息工程 周日 24 节 +
+        周六 18 节）。把范围压成"单一星期"会让 45 个单元在 11 周里怎么都排不下（实测
+        7 个班全失败）。这里按**历史星期**把单元分到各天，再逐天求解 —— 不改 CP-SAT
+        模型（改模型要动教师互斥/占用那套来之不易的约束），只做编排层切分。
+
+        为什么要回填：单班求解只避开 `db.entries` 里其他班的占用，看不见本次刚给
+        别的班排出来的格子；17 个班各排各的，两个班就会把同一间教室排到同一格。
+        """
+        acc_room: Dict[str, set] = defaultdict(set)     # weekday -> {(week, slot, room)}
+        acc_teacher: Dict[str, set] = defaultdict(set)  # weekday -> {(week, slot, teacher)}
+        schedule: List[Dict] = []
+        per_class: List[Dict] = []
+        t0 = time.time()
+
+        for spec in class_specs:
+            cls = spec["class_name"]
+            raw_days = spec.get("weekdays") or [spec.get("weekday")]
+            days = [d for d in raw_days if d in ALL_WEEKDAYS] or ["周四"]
+            unit_day = self._unit_day_map(cls, days)
+            by_day: Dict[str, set] = defaultdict(set)
+            for key, day in unit_day.items():
+                by_day[day].add(key)
+            if not by_day:  # 没有任何单元（数据里也没记录）：仍尝试一次，让求解器如实报错
+                by_day[days[0]] = set()
+
+            cls_rows: List[Dict] = []
+            day_reports = []
+            errors = []
+            statuses = []
+            for day, keys in sorted(by_day.items()):
+                r = self.solve(
+                    cls,
+                    weekday=day,
+                    start_week=spec.get("start_week") or 2,
+                    weeks=spec.get("weeks") or 10,
+                    time_slots=spec.get("time_slots"),
+                    week_max_override=spec.get("week_max"),
+                    max_time_seconds=max_time_seconds,
+                    extra_room_busy=acc_room[day],
+                    extra_teacher_busy=acc_teacher[day],
+                    unit_keys=keys or None,
+                )
+                rows = r.get("schedule") or []
+                status = str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE"))
+                statuses.append(status)
+                for row in rows:
+                    cls_rows.append({**row, "class_name": cls})
+                    acc_room[day].add((row["week"], row["time_slot"], row["room"]))
+                    if row.get("teacher"):
+                        acc_teacher[day].add((row["week"], row["time_slot"], row["teacher"]))
+                if not r.get("success"):
+                    errors.append("%s: %s" % (day, r.get("error")))
+                day_reports.append({
+                    "day": day, "units": len(keys), "scheduled": len(rows),
+                    "status": status,
+                })
+
+            schedule.extend(cls_rows)
+            per_class.append({
+                "class_name": cls,
+                "success": bool(cls_rows),
+                "status": ("OPTIMAL" if statuses and all(x == "OPTIMAL" for x in statuses)
+                           else "FEASIBLE" if all(x in ("OPTIMAL", "FEASIBLE") for x in statuses)
+                           else "PARTIAL"),
+                "weekdays": sorted(by_day),
+                "scheduled": len(cls_rows),
+                "total_units": sum(d["units"] for d in day_reports),
+                "pending_units": 0,
+                "days": day_reports,
+                "error": "；".join(errors) or None,
+                "assumptions": [],
+            })
+
+        ok_classes = [c for c in per_class if c["success"]]
+        failed = [c for c in per_class if not c["success"]]
+        schedule.sort(key=lambda s: (s["week"], s["weekday"], s["time_slot"],
+                                     s.get("class_name") or "", s["group"]))
+        return {
+            "success": bool(ok_classes),
+            "classes_total": len(per_class),
+            "classes_ok": len(ok_classes),
+            "classes_failed": [{"class_name": c["class_name"], "error": c["error"]} for c in failed],
+            "scheduled": len(schedule),
+            "units": sum(c["total_units"] for c in per_class),
+            "elapsed_s": round(time.time() - t0, 1),
+            "per_class": per_class,
+            "schedule": schedule,
+            "note": ("全校一键排课（逐班·按天 CP-SAT，组级）：%d/%d 个班排定，共 %d 条；"
+                     "班与班之间回填同星期的教室/教师占用（三方互斥）"
+                     % (len(ok_classes), len(per_class), len(schedule))),
+        }
+
     def solve(self, class_name: str, weekday: Optional[str] = None,
               start_week: int = 2, weeks: int = 10,
               time_slots: Optional[List[str]] = None,
               week_max_override: Optional[int] = None,
-              max_time_seconds: float = 10.0) -> Dict:
+              max_time_seconds: float = 10.0,
+              extra_room_busy: Optional[set] = None,
+              extra_teacher_busy: Optional[set] = None,
+              unit_keys: Optional[set] = None) -> Dict:
         """并行排课求解：该课程所有 (项目, 组别) 单元 → (周次, 时段, 场地)
 
         `time_slots` / `week_max_override` 是教务给定的「课程总时间范围」：求解器只在
@@ -153,6 +272,8 @@ class ParallelScheduler:
             elif not t.group:
                 graybox_notes.append(f"「{t.experiment}」未指定学生组，按 1 组处理"
                                      f"（保守策略：与 1 组互斥排课，不会让学生双抓）")
+        if unit_keys is not None:
+            units = [u for u in units if (u["project"], u["group"]) in unit_keys]
         if not units:
             return {"success": False, "error": f"未找到 {class_name} 的实验项目/分组数据"}
 
@@ -186,6 +307,10 @@ class ParallelScheduler:
 
         # 3. 其他课程已占用（同星期）：场地 / 教师
         room_occupied, teacher_occupied = set(), set()
+        # 全校一键（solve_school）：同一个星期上，前面班级刚排定的格子也要算占用，
+        # 否则 17 个班各排各的，两个班会把同一间教室排到同一格（单班视角完全看不出来）。
+        room_occupied |= set(extra_room_busy or ())
+        teacher_occupied |= set(extra_teacher_busy or ())
         for e in self.db.entries:
             if e.class_name == class_name or e.weekday != wd:
                 continue

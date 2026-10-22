@@ -43,7 +43,7 @@ def is_schedulable_project(name: str) -> bool:
 
 def _new_class() -> dict:
     """班级实体的统一骨架：组 + 教务给定的上课时间范围。"""
-    return {"groups": set(), "weekday": "", "time_slots": set(),
+    return {"groups": set(), "weekday": "", "weekdays": set(), "time_slots": set(),
             "week_min": None, "week_max": None}
 
 
@@ -122,6 +122,7 @@ class MasterData:
                 # 教秘可在主数据里改。节次按 blocked 展开（跨节次记录占多格）。
                 if e.weekday:
                     c["_wd_count"][e.weekday] += 1
+                    c["weekdays"].add(e.weekday)
                 for s in (getattr(e, "blocked", None) or [e.time_slot]):
                     if s:
                         c["time_slots"].add(s)
@@ -257,7 +258,8 @@ class MasterData:
 
     def upsert_class(self, name: str, groups: Optional[List[str]] = None,
                      weekday: str = "", time_slots: Optional[List[str]] = None,
-                     week_min: Optional[int] = None, week_max: Optional[int] = None) -> dict:
+                     week_min: Optional[int] = None, week_max: Optional[int] = None,
+                     weekdays: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("班级名不能为空")
@@ -270,6 +272,12 @@ class MasterData:
         # 教务给定的「课程总时间范围」：星期 / 节次 / 周次。空字符串/None 表示不覆盖。
         if weekday:
             c["weekday"] = weekday.strip()
+            c["weekdays"].add(weekday.strip())
+        if weekdays is not None:
+            for d in weekdays:
+                d = (d or "").strip()
+                if d:
+                    c["weekdays"].add(d)
         if time_slots is not None:
             for s in time_slots:
                 s = (s or "").strip()
@@ -303,6 +311,7 @@ class MasterData:
             "rooms": {n: {"capacity": v.get("capacity")} for n, v in self.rooms.items()},
             "classes": {n: {"groups": sorted(v["groups"], key=str),
                             "weekday": v.get("weekday", ""),
+                            "weekdays": sorted(v.get("weekdays") or [], key=str),
                             "time_slots": sorted(v["time_slots"], key=str),
                             "week_min": v.get("week_min"), "week_max": v.get("week_max")}
                         for n, v in self.classes.items()},
@@ -324,6 +333,7 @@ class MasterData:
                           for n, v in (d.get("rooms") or {}).items()}
             self.classes = {n: {"groups": set(v.get("groups") or []),
                                 "weekday": v.get("weekday") or "",
+                                "weekdays": set(v.get("weekdays") or []),
                                 "time_slots": set(v.get("time_slots") or []),
                                 "week_min": v.get("week_min"), "week_max": v.get("week_max")}
                             for n, v in (d.get("classes") or {}).items()}
@@ -360,6 +370,7 @@ class MasterData:
             ],
             "classes": [
                 {"name": n, "groups": _sorted(v["groups"]), "weekday": v.get("weekday", ""),
+                 "weekdays": _sorted(v.get("weekdays") or []),
                  "time_slots": _sorted(v["time_slots"]), "week_min": v.get("week_min"),
                  "week_max": v.get("week_max")}
                 for n, v in sorted(self.classes.items(), key=lambda kv: str(kv[0]))

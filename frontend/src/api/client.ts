@@ -278,6 +278,10 @@ export const rescheduleApi = {
     }>('/reschedule/parallel/solve', { class_name: className, weekday: weekday ?? null }),
 
   // 并行排课：方案导出 Excel（blob 下载）
+  // 全校一键：逐班求解（组级），班与班之间回填同星期的教室/教师占用
+  parallelSolveAll: () =>
+    api.post('/reschedule/parallel/solve-all'),
+
   parallelExport: (className: string, schedule: Array<{ project: string; group: string; week: number; weekday: string; time_slot: string; room: string; teacher: string }>) =>
     api.post('/reschedule/parallel/export', { class_name: className, schedule }, { responseType: 'blob' }),
 
