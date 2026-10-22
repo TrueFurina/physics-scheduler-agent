@@ -12,6 +12,9 @@ Write-Host "============================================" -ForegroundColor Cyan
 $RepoRoot = $PSScriptRoot
 if (-not $RepoRoot) { $RepoRoot = "E:\Program\physics-scheduler-agent" }
 
+# numpy/OpenBLAS 在机器紧时会导入失败 —— 跑 Python 一律单线程（实测教训，见项目记忆）
+$env:OPENBLAS_NUM_THREADS = "1"
+
 $PythonExe = $env:PYTHON_EXE
 if (-not $PythonExe -or -not (Test-Path $PythonExe)) {
     $pyCandidates = @(
