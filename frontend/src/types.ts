@@ -182,6 +182,8 @@ export interface MasterOverview {
   courses: Array<{ name: string; experiments: string[] }>;
   experiments: Array<{
     name: string; course: string; teachers: string[]; rooms: string[]; classes: string[];
+    /** 绪论课/考试类登记为实体但**不参与排课**（R-48 口径，项目名派生、不可覆盖）。 */
+    schedulable?: boolean;
   }>;
   teachers: Array<{ name: string; projects: string[] }>;
   rooms: Array<{ name: string; capacity: number | null }>;

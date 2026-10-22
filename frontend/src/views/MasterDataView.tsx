@@ -324,7 +324,15 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
             <tbody>
               {tab === 'experiments' && data?.experiments.map((e) => (
                 <tr key={e.name} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-2.5 font-medium text-gray-800">{e.name}</td>
+                  <td className="px-4 py-2.5 font-medium text-gray-800">
+                    {e.name}
+                    {e.schedulable === false && (
+                      <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px] align-middle"
+                        title="绪论课/考试类已单独安排，登记在台账但不参与排课（R-48 口径）">
+                        不排课
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-gray-500">
                     <div>课程：{e.course}</div>
                     <div className="text-xs">教师 {e.teachers.length} · 场地 {e.rooms.length} · 班级 {e.classes.length}</div>

@@ -36,6 +36,28 @@ def store_path(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 序列化
 
+def test_old_version_store_invalidated(store_path):
+    """旧版本落盘必须作废（R-58）：落盘是**整体恢复**语义，不设版本门的话，
+    旧基线快照（如 22 个项目）会一直遮蔽新反推基线，基线逻辑变更等于没生效。
+    """
+    from app.master_data import MasterData
+
+    md = MasterData()
+    md.build_from_entries([_entry(1, "周四", "567", "一班", "1组", "A410", experiment="扭摆法")])
+    assert master_store.save({"schedule_fingerprint": "fp::1", "master": md.to_dict(), "tasks": []})
+    assert master_store.load() is not None  # 当前版本可读
+
+    # 模拟旧版本文件：抹掉 schema_version
+    import json
+    with open(store_path, encoding="utf-8") as f:
+        d = json.load(f)
+    d.pop("schema_version", None)
+    with open(store_path, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+
+    assert master_store.load() is None  # 旧版本 → 作废，调用方回退新反推基线
+
+
 def test_master_dict_roundtrip_preserves_everything():
     md = MasterData()
     md.build_from_entries([

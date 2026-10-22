@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.reschedule_agent import RescheduleAgent
 from app.agent.student_schedule import StudentSchedule
-from app.master_data import MasterData
+from app.master_data import MasterData, is_schedulable_project
 from app.security import check_admin_credentials, issue_admin_token, require_admin
 from app.ratelimit import rate_limit
 
@@ -733,6 +733,11 @@ def _master_derived_tasks() -> List:
     pending_pairs = {(t.class_name, t.experiment) for t in list(_db.pending) + list(_master_tasks)}
     derived: List = []
     for exp_name, ex in _master_data.experiments.items():
+        # ⚠️ 绪论/考试类项目自 R-58 起也登记为实体（台账可见、可指定课程），
+        # 但**绝不派生**：绪论课已单独安排、考试类时间与场地逻辑不同（R-48 口径）。
+        # 不过滤的话，教秘经 CRUD/台账导入给绪论项目加个班级，求解器就会去排一场绪论课。
+        if not is_schedulable_project(exp_name):
+            continue
         for cls in ex.get("classes", set()):
             if (cls, exp_name) in scheduled_pairs or (cls, exp_name) in pending_pairs:
                 continue

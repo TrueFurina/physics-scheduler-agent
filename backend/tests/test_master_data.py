@@ -41,21 +41,47 @@ def test_build_from_entries_derives_five_tables():
         _entry(3, "周五", "91011", "一班", "1组", "", teacher="吴老师", experiment="绪论课（教室已安排）"),
     ])
     assert md.initialized
-    assert set(md.experiments) == {"扭摆法", "声速测量"}  # 绪论课被排除
+    # R-58：绪论课**登记为实体**（台账可见、可指定课程），不再整行跳过 ——
+    # 早先为"不排绪论课"把它的事实信息也扔了，17 条记录的课程只能回落默认课。
+    assert set(md.experiments) == {"扭摆法", "声速测量", "绪论课（教室已安排）"}
+    intro = md.experiments["绪论课（教室已安排）"]
+    assert intro["classes"] == {"一班"} and intro["teachers"] == {"吴老师"}  # 事实链接保留
+    # 但班级/教师/场地**实体**累积仍排除绪论（ week_min 基线不漂移，见下一条）
     assert set(md.teachers) == {"吴老师", "林老师"}
     assert set(md.rooms) == {"A410", "A411"}
     assert set(md.classes) == {"一班", "二班"}
-    assert {"扭摆法", "声速测量"} == md.courses[DEFAULT_COURSE]["experiments"]
+    # 课程聚合含绪论（归默认课，教秘可在台账里改）
+    assert {"扭摆法", "声速测量", "绪论课（教室已安排）"} == md.courses[DEFAULT_COURSE]["experiments"]
+
+
+def test_intro_does_not_shift_class_time_range():
+    """绪论课在该班第一次实验**之前**：若计入班级累积，week_min 会提前 —— 求解器
+    周次窗口（R-51 产品边界："时间由教务给定"）随之放宽。实测真实表 17 个班全部
+    会提前 1 周，故班级时间范围**只由可排课项目累积**。
+    """
+    md = MasterData()
+    md.build_from_entries([
+        _entry(1, "周五", "91011", "一班", "1组", "", teacher="吴老师", experiment="绪论课"),
+        _entry(3, "周四", "567", "一班", "1组", "A410", teacher="吴老师", experiment="扭摆法"),
+    ])
+    c = md.classes["一班"]
+    assert c["week_min"] == 3 and c["week_max"] == 3, c  # 不是 1
+    assert "绪论课" in md.experiments  # 但项目实体在
+    ov_exp = next(x for x in md.overview()["experiments"] if x["name"] == "绪论课")
+    assert ov_exp["schedulable"] is False  # 台账可见「不排课」
 
 
 def test_build_from_entries_excludes_exam_and_empty():
+    """考试类：项目**登记**为实体（R-58），但教师/场地/班级实体不累积；空名跳过。"""
     md = MasterData()
     md.build_from_entries([
         _entry(1, "周四", "567", "一班", "1组", "A410", experiment="大物实验B考试"),
         _entry(1, "周四", "567", "一班", "1组", "A410", experiment=""),
     ])
-    assert md.experiments == {}
+    assert set(md.experiments) == {"大物实验B考试"}  # 登记但不累积
+    assert md.experiments["大物实验B考试"]["classes"] == {"一班"}
     assert md.teachers == {}
+    assert md.rooms == {}
 
 
 # ---------------------------------------------------------------- 查询
@@ -155,6 +181,30 @@ def test_master_derived_tasks_only_new_projects(monkeypatch):
     assert len(derived) == 1
     assert derived[0].experiment == "光纤传感"
     assert derived[0].class_name == "一班"
+
+
+def test_master_derived_tasks_skip_intro_and_exam(monkeypatch):
+    """R-58 防线：绪论/考试类项目登记为实体后，**绝不派生**待排任务。
+
+    不过滤的话：教秘经 CRUD 或台账导入给「绪论课」加一个适用班级，求解器就会
+    把一场绪论课排进某个教室 —— R-48 的口径是绪论课已单独安排、不进求解器。
+    """
+    db = ScheduleDatabase()
+    db.entries = [_entry(1, "周四", "567", "一班", "1组", "A410", experiment="扭摆法")]
+    db.pending = []
+    db.loaded = True
+    monkeypatch.setattr(api, "_db", db)
+    monkeypatch.setattr(api, "_master_tasks", [])
+    md = MasterData()
+    md.build_from_entries(db.entries)
+    monkeypatch.setattr(api, "_master_data", md)
+
+    md.upsert_experiment("绪论课", classes=["一班"])       # 模拟台账导入/CRUD 补班级
+    md.upsert_experiment("大物实验C考试", classes=["一班"])
+    derived = api._master_derived_tasks()
+    names = {t.experiment for t in derived}
+    assert "绪论课" not in names and "大物实验C考试" not in names, names
+    assert names == set(), names  # 扭摆法已排，其余全被 schedulable 过滤
 
 
 def test_master_derived_tasks_group_granularity_no_false_positive(monkeypatch):

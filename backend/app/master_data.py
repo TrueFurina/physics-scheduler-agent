@@ -27,6 +27,20 @@ DEFAULT_COURSE = "大学物理实验"
 _INTRO_KW = ("绪论",)
 
 
+def is_schedulable_project(name: str) -> bool:
+    """该项目是否**参与排课**：绪论课 / 考试考核类不参与（R-48 的业务口径）。
+
+    ⚠️ 这是"可排"属性，不是"存在"属性 —— 绪论与考试类**照样登记为实体**
+    （见 `build_from_entries`）。早先的做法是整行 `continue` 跳过，于是这 3 个项目
+    连实体都不建：教秘在台账里看不到它们、无法给它们指定课程，17 条记录的课程
+    只能回落默认课（R-57 实测发现）。代价是"为了不排绪论课，把它的事实信息也扔了"。
+
+    它是**项目名的函数，不可被用户覆盖** —— 否则教秘把"考试"改成可排，求解器就会
+    去排一场考试（R-48 明确考试/考核类的时间与场地逻辑不同，不该进求解器）。
+    """
+    return not (_is_intro_like(name) or looks_like_exam(name))
+
+
 def _new_class() -> dict:
     """班级实体的统一骨架：组 + 教务给定的上课时间范围。"""
     return {"groups": set(), "weekday": "", "time_slots": set(),
@@ -70,13 +84,15 @@ class MasterData:
 
         for e in entries:
             exp = (e.experiment or "").strip()
-            if not exp or _is_intro_like(exp) or looks_like_exam(exp):
+            if not exp:
                 continue
             cls = (e.class_name or "").strip()
             teacher = (e.teacher or "").strip()
             room = (e.room or "").strip()
             group = (e.group or "").strip()
 
+            # 项目实体**一律登记**（含绪论/考试类）：教秘要能在台账里看到它们、
+            # 给它们指定课程。早先整行跳过 ⇒ 17 条记录的课程只能回落默认课（R-57）。
             ex = self.experiments.setdefault(
                 exp, {"course": DEFAULT_COURSE, "teachers": set(), "rooms": set(), "classes": set()})
             if cls:
@@ -85,6 +101,13 @@ class MasterData:
                 ex["teachers"].add(teacher)
             if room:
                 ex["rooms"].add(room)
+
+            # ⚠️ 班级 / 教师 / 场地**实体**的累积仍然跳过绪论与考试类。
+            # 实测：若把它们也算进去，17 个班的 week_min 会统一提前 1 周（绪论课在该班
+            # 第一次实验之前），求解器的周次窗口随之放宽 —— 那是 R-51 锁定的产品边界
+            # （"时间由教务给定"），不该顺手改。教师 13 / 场地 10 / 班级 17 也不受影响。
+            if not is_schedulable_project(exp):
+                continue
 
             if teacher:
                 self.teachers.setdefault(teacher, {"projects": set()})["projects"].add(exp)
@@ -166,19 +189,25 @@ class MasterData:
                 t = (t or "").strip()
                 if t:
                     ex["teachers"].add(t)
-                    self.teachers.setdefault(t, {"projects": set()})["projects"].add(name)
+                    # 实体回链只给**可排课**项目：与 build_from_entries 的反推口径一致
+                    # （绪论/考试类登记实体但不做教师/场地/班级累积）。否则台账导回
+                    # 绪论项目会把它的教师/场地凭空建成实体，往返不再相等（实测抓到）。
+                    if is_schedulable_project(name):
+                        self.teachers.setdefault(t, {"projects": set()})["projects"].add(name)
         if rooms is not None:
             for r in rooms:
                 r = (r or "").strip()
                 if r:
                     ex["rooms"].add(r)
-                    self.rooms.setdefault(r, {"capacity": None})
+                    if is_schedulable_project(name):
+                        self.rooms.setdefault(r, {"capacity": None})
         if classes is not None:
             for c in classes:
                 c = (c or "").strip()
                 if c:
                     ex["classes"].add(c)
-                    self.classes.setdefault(c, _new_class())
+                    if is_schedulable_project(name):
+                        self.classes.setdefault(c, _new_class())
         self._rebuild_courses()
         return self.experiments[name]
 
@@ -317,7 +346,8 @@ class MasterData:
             "experiments": [
                 {"name": n, "course": v.get("course") or DEFAULT_COURSE,
                  "teachers": _sorted(v["teachers"]), "rooms": _sorted(v["rooms"]),
-                 "classes": _sorted(v["classes"])}
+                 "classes": _sorted(v["classes"]),
+                 "schedulable": is_schedulable_project(n)}
                 for n, v in sorted(self.experiments.items(), key=lambda kv: str(kv[0]))
             ],
             "teachers": [

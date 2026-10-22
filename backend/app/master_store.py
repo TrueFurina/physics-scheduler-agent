@@ -23,6 +23,11 @@ from typing import List, Optional
 
 STORE_PATH = os.path.join(os.path.dirname(__file__), "data", "master_store.json")
 
+# 落盘格式版本。基线反推逻辑变更（如 R-58：绪论/考试类项目开始登记为实体）时
+# 必须 +1：旧版本文件整体作废回退新基线 —— 落盘是"整体恢复"语义，不设版本门的话，
+# 旧文件（22 个项目的旧基线快照）会一直遮蔽新基线，改动等于没生效。
+SCHEMA_VERSION = 2
+
 
 def schedule_fingerprint(schedule_path: Optional[str]) -> Optional[str]:
     """安排表的指纹（路径+mtime）。上传新表 / 表文件被替换 → 指纹变化。"""
@@ -40,6 +45,8 @@ def save(payload: dict, store_path: Optional[str] = None) -> bool:
     store_path = store_path or STORE_PATH
     try:
         os.makedirs(os.path.dirname(store_path), exist_ok=True)
+        payload = dict(payload or {})
+        payload["schema_version"] = SCHEMA_VERSION  # 版本门：读侧不认旧格式（见 load）
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(store_path), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -66,6 +73,11 @@ def load(store_path: Optional[str] = None) -> Optional[dict]:
         with open(store_path, encoding="utf-8") as f:
             d = json.load(f)
         if not isinstance(d, dict) or "master" not in d:
+            return None
+        if d.get("schema_version") != SCHEMA_VERSION:
+            # 旧版本落盘：整体恢复会遮蔽新反推基线（基线逻辑已变），作废处理
+            print(f"⚠️ 主数据落盘为旧版本格式（v{d.get('schema_version')} ≠ v{SCHEMA_VERSION}），"
+                  f"作废并回退新反推基线")
             return None
         return d
     except (OSError, ValueError) as e:

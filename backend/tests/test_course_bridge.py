@@ -266,8 +266,8 @@ def test_audit_counts_cross_course_without_double_counting(db, monkeypatch):
 def test_audit_says_course_is_fallback_when_project_not_in_master(db, monkeypatch):
     """项目不在主数据里 → 课程是**回落默认**，不是查出来的，必须说出口。
 
-    真实表就有：主数据只建了 22 个项目，安排表却有 25 个项目名，3 个绪论类项目
-    （共 17 条）不在主数据里 —— 教秘在台账里看不到它们，也就无法给它们指定课程。
+    R-58 后真实表已无此缺口（绪论类也登记），但缺口机制必须保留：教秘手工
+    新增项目不进台账、或台账导入漏页时，同样会出现"查不出课程"的记录。
     沉默地让一部分记录"查不出课程"比报假冲突更危险（R-35 同族）。
     """
     # 「绪论课」故意不进主数据：md 只建其余项目
@@ -300,14 +300,12 @@ def test_real_table_baseline():
     assert res["coverage"]["total_entries"] == len(d.entries)
     assert res["coverage"]["master_ready"] is True
     assert res["coverage"]["distinct_courses"] == 1, res["coverage"]
-    # 口径锁死：主数据只建 22 个项目，表里有 25 个 —— 3 个绪论类项目（共 17 条）
-    # 不在主数据里，它们的课程是**回落默认**而非查得。这个缺口不许被静默。
-    assert res["coverage"]["project_in_master"] == 416, res["coverage"]
-    assert res["coverage"]["total_entries"] - res["coverage"]["project_in_master"] == 17
-    # 口径锁死：主数据只建 22 个项目，表里有 25 个 —— 3 个绪论类项目（共 17 条）
-    # 不在主数据里，它们的课程是**回落默认**而非查得。这个缺口不许被静默。
-    assert res["coverage"]["project_in_master"] == 416, res["coverage"]
-    assert res["coverage"]["total_entries"] - res["coverage"]["project_in_master"] == 17
+    # 口径锁死（R-58 后）：3 个绪论类项目也登记为主数据实体 ⇒ 433 条全部查得课程，
+    # 不再有"回落默认而非查得"的 17 条缺口。绪论项目 marked schedulable=False。
+    assert res["coverage"]["project_in_master"] == res["coverage"]["total_entries"], res["coverage"]
+    for intro in ("绪论-光学实验预备知识", "绪论课（教室已安排，请查系统）", "绪论课（教室自己申请）"):
+        assert intro in md.experiments, intro
+        assert md.overview()  # overview 可渲染
     # 单课程时也只有一个块，不产生分块标题
     blocks = group_by_course(
         [e for e in d.entries if e.class_name == d.entries[0].class_name], md)
