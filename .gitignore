@@ -43,3 +43,8 @@ schedule.xlsx
 server.log
 server.err.log
 .tmp/
+
+# Tool caches（ruff/pytest 虽在各自目录内自写 .gitignore，显式忽略双保险：
+# 换平台/换版本时自写机制失效也不会误提交缓存垃圾）
+.ruff_cache/
+.pytest_cache/
