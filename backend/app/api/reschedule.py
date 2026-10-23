@@ -18,6 +18,7 @@ from app.agent.student_schedule import StudentSchedule
 from app.master_data import MasterData, is_schedulable_project
 from app.security import check_admin_credentials, issue_admin_token, require_admin
 from app.ratelimit import rate_limit
+from app import plan_landing
 
 router = APIRouter()
 
@@ -34,6 +35,9 @@ router = APIRouter()
 #   - /student-status            吐真实学生姓名与学号（PII）
 #   - GET/POST/DELETE /requests  工单读写与清空（写，DELETE 会清全表）
 #   - /requests/{id}/approve     审批并自动应用调课，直接改排课结果（写）
+#   - POST /parallel/land        把排课方案写回安排表（写，真实排课数据）
+#   - POST /parallel/land/undo   撤销落地（写）
+# （/parallel/land/preview 与 /parallel/land/status 是只读，随 /parallel/** 免鉴权）
 #
 # 注意：这些写接口前端**已不再调用**（调课/审批走云数据库 + RLS），
 # 因此加门禁不影响任何演示流程，只是把"匿名可写"改成"需管理员会话"。
@@ -59,6 +63,19 @@ _master_tasks: List = []
 _master_data = MasterData()
 _schedule_fp: Optional[str] = None  # 当前安排表指纹（路径+mtime），落盘失效判定用
 _agent = RescheduleAgent(_db, student=_student)
+
+# 落地方案存储（landed_plans 表，与 requests.db 同库同目录同 gitignore）。
+# 懒建 + 跟随 _DB_PATH：测试会 monkeypatch _DB_PATH 到临时库，store 必须跟着走。
+_landing_store: Optional[plan_landing.LandingStore] = None
+_land_lock = threading.Lock()
+
+
+def _landings() -> plan_landing.LandingStore:
+    global _landing_store
+    if _landing_store is None or _landing_store.path != _DB_PATH:
+        _landing_store = plan_landing.LandingStore(_DB_PATH)
+        _landing_store.init_schema()
+    return _landing_store
 
 # 默认实验安排表路径解析
 # 优先级：SCHEDULE_PATH 环境变量 → 仓库根 schedule.xlsx（真实表）→ schedule.demo.xlsx（回退）
@@ -210,7 +227,12 @@ async def upload_schedule(file: UploadFile = File(...)):
         _master_data.__init__()          # 回到未初始化态，下次访问按新表反推
         _master_tasks.clear()
         _ms.clear()
+        # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
+        # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
+        discarded = _landings().clear()
         msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
+        if discarded:
+            msg += f"（已丢弃旧表上的落地方案 {discarded} 份，以新表为基准）"
         if rep.get("pending"):
             msg += f"，另有 {rep['pending']} 条待排任务（没排时间，可直接进并行排课）"
         if rep.get("skipped"):
@@ -637,26 +659,51 @@ def _load_default_schedule() -> tuple[str, int]:
     global _schedule_fp
     from app import master_store as _ms
     _schedule_fp = _ms.schedule_fingerprint(DEFAULT_SCHEDULE_PATH)
-    # 重放已应用的调课记录（applied_moves），保证重启后调整仍然生效
-    replay_applied, replay_skipped = 0, 0
+    # 重放写事件：审批调课（applied_moves）+ 落地方案（landed_plans）。
+    # 两者都是"重启后不能丢"的状态（R-18 内存态 + R-36 审批闭环 + 落地）。
+    # 有落地记录时按**时间戳顺序**混排：后发生的事件赢 —— 调课不会被落地静默
+    # 吞掉，落地也不会被后来的调课静默抹掉。无落地记录时逐字走旧路径。
+    replay_applied, replay_skipped, replay_landed = 0, 0, 0
     try:
         conn = _get_db()
-        rows = conn.execute("SELECT request_data FROM applied_moves ORDER BY id").fetchall()
+        moves = conn.execute(
+            "SELECT id, request_data, applied_at FROM applied_moves ORDER BY id").fetchall()
         conn.close()
-        for r in rows:
-            try:
-                rec = json.loads(r["request_data"])
-                res = _apply_reschedule(rec, persist=False)
-                replay_applied += res["applied"]
-                replay_skipped += res["skipped"]
-            except Exception:
-                pass
+        lands = _landings().all()
+        if not lands:
+            for r in moves:
+                try:
+                    rec = json.loads(r["request_data"])
+                    res = _apply_reschedule(rec, persist=False)
+                    replay_applied += res["applied"]
+                    replay_skipped += res["skipped"]
+                except Exception:
+                    pass
+        else:
+            events = [(r["applied_at"] or "0000-00-00", 0, r["id"], "move",
+                       r["request_data"]) for r in moves]
+            events += [(L["landed_at"] or "0000-00-00", 1, L["id"], "land",
+                        L["plan"]) for L in lands]
+            events.sort(key=lambda e: (e[0], e[1], e[2]))
+            for _ts, _kind, _i, kind, payload in events:
+                try:
+                    if kind == "move":
+                        res = _apply_reschedule(json.loads(payload), persist=False)
+                        replay_applied += res["applied"]
+                        replay_skipped += res["skipped"]
+                    else:
+                        plan_landing.replay_landing(_db, payload)
+                        replay_landed += 1
+                except Exception:
+                    pass
     except Exception:
         pass
 
     msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
     if replay_applied:
         msg += f"（已重放 {replay_applied} 条审批通过的调课）"
+    if replay_landed:
+        msg += f"（已重放落地方案 {replay_landed} 份）"
     # 待排/丢弃都必须说出口：静默丢弃是本项目反复踩的坑（R-35、以及缺周次的整行蒸发）
     rep = _db.load_report
     if rep.get("pending"):
@@ -1100,6 +1147,110 @@ async def parallel_export(req: ParallelExportRequest):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
+
+
+# ---------------------------------------------------------------------------
+# 方案落地（预览 → 采纳 → 撤销）
+#
+# 为什么需要：全校一键算出的方案此前只能看、只能导出 —— 安排表（db.entries）
+# 还是原来上传的那份，看板 / 班级课表 / 数据体检用的都是旧数据，教秘必须把
+# Excel 人工录回教务系统。"排完了"和"能交付"之间差最后一公里。
+#
+# 三步的理由：这改的是**真实排课数据**（433 → 410 不是数字变化，是某些行的
+# 时间/教师/场地被正式改写）。所以① 先出差异预览（不写入）② 教秘确认后才写
+# ③ 写完可撤销（恢复落地前快照）。采纳时 diff **重新计算**：预览与采纳之间
+# 若有审批调课生效，按旧 diff 写入就是偷换（R-36：写路径的不实必须可见）。
+#
+# 鉴权边界：预览/状态只读（随 /parallel/** 免鉴权）；采纳/撤销是写
+# （与 /upload、/apply-move 一致挂 require_admin）。
+#
+# 粒度说明：只有**班级×项目×学生组**口径的方案（全校一键 / 单班并行排课）
+# 能落地 —— 与安排表同构。首屏「一键自动排课」的初稿是教师×课程口径、
+# 没有学生组，落进安排表会凭空编造组别，故不支持（前端只给全校方案开放入口）。
+# ---------------------------------------------------------------------------
+
+class LandPlanRequest(BaseModel):
+    """落地方案请求。与 /parallel/export 同构：方案由前端带上，服务端不存会话态。"""
+    schedule: list
+    class_name: Optional[str] = None   # 单班方案补班级名（全校一键结果已自带）
+    note: Optional[str] = None
+
+
+def _land_plan_or_400(req: LandPlanRequest) -> List[dict]:
+    """校验方案行。缺字段的行**报错列出**，绝不静默丢弃（R-35 同族）。"""
+    try:
+        plan = plan_landing.normalize_plan(req.schedule, default_class=req.class_name)
+    except plan_landing.PlanValidationError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"方案有 {len(e.bad)} 行缺少必填字段（班级/项目/组/周次/星期/时段），"
+                    f"未做任何改动。问题行示例：{e.bad[:3]}"))
+    if not plan:
+        raise HTTPException(status_code=400, detail="方案为空：没有可落地的排课行")
+    return plan
+
+
+@router.post("/parallel/land/preview", summary="落地预览：方案与当前安排表的差异（不写入）",
+             dependencies=[Depends(rate_limit("parallel-land"))])
+async def land_preview(req: LandPlanRequest):
+    """差异预览：新增 / 调整 / 未覆盖 / 原样保留四类账 + 警告。绝不写入。"""
+    _ensure_loaded()
+    plan = _land_plan_or_400(req)
+    diff = plan_landing.diff_plan(plan, _db.entries)
+    diff["success"] = True
+    return diff
+
+
+@router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
+             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
+async def land_commit(req: LandPlanRequest):
+    """写入安排表并落盘（landed_plans 表）。落盘失败回滚内存改动。
+
+    为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
+    看到方案神秘消失 —— 与 R-36「审批通过课表一个字节没变」同族的不实。
+    """
+    _ensure_loaded()
+    plan = _land_plan_or_400(req)
+    with _land_lock:
+        # diff 现算，不信预览那一份：预览与采纳之间可能有审批调课生效
+        diff = plan_landing.diff_plan(plan, _db.entries)
+        before = plan_landing.snapshot(_db)
+        applied = plan_landing.apply_plan(_db, plan)
+        try:
+            rec = _landings().save(plan, before, note=req.note or "")
+        except Exception as e:
+            plan_landing.restore(_db, before)
+            raise HTTPException(
+                status_code=500,
+                detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
+    diff.update({"success": True, "landed_at": rec["landed_at"],
+                 "after_entries": applied["total"]})
+    return diff
+
+
+@router.post("/parallel/land/undo", summary="撤销最后一次落地（需管理员）",
+             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
+async def land_undo():
+    """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
+    _ensure_loaded()
+    with _land_lock:
+        out = plan_landing.undo(_db, _landings())
+    if not out.get("success"):
+        raise HTTPException(status_code=404, detail=out["error"])
+    return out
+
+
+@router.get("/parallel/land/status", summary="当前落地状态（供界面显示撤销入口）",
+            dependencies=[Depends(rate_limit("parallel-land"))])
+async def land_status():
+    """是否已落地、何时、多少条。_ensure_loaded 保证重启重放之后再回答。"""
+    _ensure_loaded()
+    rec = _landings().latest()
+    if not rec:
+        return {"landed": False}
+    return {"landed": True, "landed_at": rec["landed_at"],
+            "plan_rows": len(json.loads(rec["plan_json"])),
+            "after_entries": rec["after_entries"], "note": rec["note"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1970,6 +2121,8 @@ def _init_db():
         conn.execute("ALTER TABLE applied_moves ADD COLUMN idem_key TEXT DEFAULT ''")
     except Exception:
         pass  # 列已存在
+    # 落地方案表（与 applied_moves 同模式：重启重放的写事件账本）
+    _landings().init_schema()
     conn.commit()
     conn.close()
 
@@ -2147,7 +2300,9 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
         conn = _get_db()
         conn.execute(
             "INSERT INTO applied_moves (request_data, applied_at, idem_key) VALUES (?, ?, ?)",
-            (json.dumps(record, ensure_ascii=False), datetime.now().isoformat(timespec="seconds"),
+            # 微秒精度：重启重放按时间戳排序（后发生者赢），秒级精度会让同一秒内的
+            # 落地/调课无法区分，排序退化成人为定的 kind 顺序 —— 那就是静默吞事件。
+            (json.dumps(record, ensure_ascii=False), datetime.now().isoformat(timespec="microseconds"),
              idem_key or ""),
         )
         conn.commit()

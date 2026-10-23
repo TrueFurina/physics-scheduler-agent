@@ -1261,6 +1261,9 @@ function App() {
                 viewWeek={parallelViewWeek}
                 schoolPlan={schoolPlan}
                 schoolSolving={schoolSolving}
+                adminAuthed={adminAuthed}
+                onRequireLogin={handleOpenAdmin}
+                onMsg={setMsg}
                 onSolveSchool={handleSolveSchool}
                 onExportSchool={handleExportSchool}
                 resultRef={parallelResultRef}

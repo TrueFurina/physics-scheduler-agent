@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan, MasterOverview, NlSlotContext } from '../types';
+import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext } from '../types';
 
 const API_BASE = '/api';
 
@@ -281,6 +281,27 @@ export const rescheduleApi = {
   // 全校一键：逐班求解（组级），班与班之间回填同星期的教室/教师占用
   parallelSolveAll: () =>
     api.post('/reschedule/parallel/solve-all'),
+
+  // ---------------------------------------------------------------------------
+  // 方案落地（预览 → 采纳 → 撤销）
+  //
+  // 把求解结果写回**真实安排表**（改的是真实排课数据，不是另存一份文件）：
+  // ① preview 只读算差异，绝不写入；② commit 需管理员（与 /upload、/apply-move
+  //    同一鉴权边界），且采纳时 diff 重新计算 —— 预览与采纳之间若有审批调课
+  //    生效，按旧 diff 写入就是偷换；③ undo 恢复落地前快照，落地之后又生效的
+  //    调课会一并回滚并在 rolled_back_moves 里如实计数。
+  // `class_name` 只对单班方案需要（补班级名）；全校一键结果的行已自带。
+  // ---------------------------------------------------------------------------
+  landPreview: (schedule: unknown[], class_name?: string) =>
+    api.post<LandPlanDiff>('/reschedule/parallel/land/preview',
+      { schedule, class_name: class_name ?? null }),
+  landCommit: (schedule: unknown[], class_name?: string, note?: string) =>
+    api.post<LandPlanDiff>('/reschedule/parallel/land',
+      { schedule, class_name: class_name ?? null, note: note ?? '' }),
+  landUndo: () =>
+    api.post<LandUndoResult>('/reschedule/parallel/land/undo'),
+  landStatus: () =>
+    api.get<LandStatus>('/reschedule/parallel/land/status'),
 
   parallelExport: (className: string, schedule: Array<{ project: string; group: string; week: number; weekday: string; time_slot: string; room: string; teacher: string }>) =>
     api.post('/reschedule/parallel/export', { class_name: className, schedule }, { responseType: 'blob' }),

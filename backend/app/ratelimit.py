@@ -95,6 +95,9 @@ RULES: Dict[str, Tuple[int, int, int]] = {
     # 标准课表导出（班级/场地）：每次遍历全表并生成一个多 sheet 的 xlsx，
     # 代价与 parallel-export 同档
     "standard-export": (20, 200, 60),
+    # 方案落地：预览是只读 diff；采纳/撤销是 sqlite 单行写 + 内存替换，
+    # 单次开销小，但属"教秘想清楚才点"的操作，阈值与导出同档
+    "parallel-land": (20, 200, 60),
 }
 
 # 单 IP 桶的 key 数量上限：防止伪造大量源 IP 撑爆内存。

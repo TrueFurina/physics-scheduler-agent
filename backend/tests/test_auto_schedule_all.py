@@ -175,7 +175,12 @@ def test_export_sanitizes_illegal_sheet_names():
 
 @pytest.mark.skipif(not os.path.exists(REAL_XLSX), reason="真实排课表不在仓库里")
 def test_real_table_full_coverage():
-    """真实表 171 个任务全表分片：全部排定、零跨片撞车（约 25 秒）。"""
+    """真实表 171 个任务全表分片：全部排定、零跨片撞车（约 36 秒）。
+
+    耗时说明：每片一阶段 7 秒 + 摊平 5 秒的预算，硬片会用满 —— 曾把一阶段压到
+    5 秒（比"60 个一片 7 秒可解"的实测点还紧），真实表第 2 片在边界上时灵时不灵
+    （单独跑 5 次里 4 次 UNKNOWN），那是时限给错了不是求解器退化（见 solve_all 注释）。
+    """
     db = ScheduleDatabase()
     db.load_from_excel(os.path.abspath(REAL_XLSX))
     r = AutoScheduler(db).solve_all(chunk_size=60)

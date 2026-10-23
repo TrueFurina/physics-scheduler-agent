@@ -71,13 +71,20 @@ class ParallelScheduler:
                 if e.weekday in ALL_WEEKDAYS:
                     weekday_votes[e.class_name][e.weekday] += 1
         # 待排任务并入总览：教秘要能在界面上看见"大纲里这几个项目还没排"
+        # ⚠️ 已排过的单元不算待排：落地方案写回安排表后，大纲清单里的同一单元仍在
+        # extra_tasks 里，不排除的话总览会永远显示"含 N 个待排单元"，而求解器因
+        # seen 去重根本不会再排它们 —— 界面与行为对不上。
+        scheduled_units = {(e.class_name, e.experiment, e.group or "1组")
+                           for e in self.db.entries
+                           if e.class_name and e.experiment and not _is_intro(e.experiment)}
         for t in self.extra_tasks:
             if not t.class_name or not t.experiment or _is_intro(t.experiment):
                 continue
             if looks_like_exam(t.experiment):
                 continue
             courses[t.class_name][t.experiment].add(t.group or "1组")
-            pending_units[t.class_name].add((t.experiment, t.group or "1组"))
+            if (t.class_name, t.experiment, t.group or "1组") not in scheduled_units:
+                pending_units[t.class_name].add((t.experiment, t.group or "1组"))
             if t.weekday in ALL_WEEKDAYS:
                 weekday_votes[t.class_name][t.weekday] += 1
         return [

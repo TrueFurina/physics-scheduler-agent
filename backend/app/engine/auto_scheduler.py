@@ -410,13 +410,19 @@ class AutoScheduler:
 
     # ------------------------------------------------------------ 全校一键（分片）
     def solve_all(self, chunk_size: int = 60, max_chunks: int = 40,
-                  flatten_seconds: float = 3.0) -> Dict:
+                  flatten_seconds: float = 5.0) -> Dict:
         """全表一键排课：**全部**教学任务而不是前 N 个。
 
         为什么必须分片：171 个任务一次性建模（16 周 × 15 时段 + 摊平目标）实测
         6 秒时限内连可行解都拿不到（status=UNKNOWN）；60 个一片 7 秒可解。
         分片之间不是独立的 —— 前一片排定的 (周,星期,时段) 上的教室/教师/班级
         必须回填成后一片的占用，否则两片会互相"看不见"而重排同一格。
+
+        ⚠️ `flatten_seconds=5.0`（一阶段时限 7 秒）不是拍脑袋，是照着上面那句
+        实测证据设的：曾用 3.0（一阶段 5 秒），比"7 秒可解"的实测点还紧 2 秒，
+        真实表第 2 片（带着第 1 片回填的占用，域更小更难）在 5 秒边界上时灵时不灵
+        —— 实测单独跑 5 次里 4 次 UNKNOWN，教秘点一次"全校初稿"有 4/5 概率拿到
+        111/171 的 PARTIAL。这不是求解器退化，是时限给错了。
         """
         sections_all, intro_excluded = self._get_course_sections()
         if not sections_all:

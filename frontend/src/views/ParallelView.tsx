@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import type { RefObject } from 'react';
 import type { ParallelCourse, ParallelSolveResult, SchoolPlanResult } from '../types';
 import { GRID_TIME_SLOTS, timeSlotLabels } from '../constants/labels';
+import LandPlanPanel from '../components/LandPlanPanel';
 
 // 周六/周日也是真实上课日（真实表 71/433 条在周末，"金工 5、6 周排周六"是常态）。
 // 原先只给周中五个按钮，周末班连"选对日子"的入口都没有。
@@ -19,6 +20,10 @@ interface Props {
   /** 全校一键结果（逐班·按天，组级） */
   schoolPlan?: SchoolPlanResult | null;
   schoolSolving?: boolean;
+  /** 落地：是否已登录管理员（采纳/撤销需要）+ 引导登录 */
+  adminAuthed?: boolean;
+  onRequireLogin?: () => void;
+  onMsg?: (m: string) => void;
   onWeekdayChange: (w: string) => void;
   onSolve: (className: string) => void;
   onExport: () => void;
@@ -30,7 +35,8 @@ interface Props {
 /** ⚡ 并行排课：一门课的全部实验项目 × 学生组别一次列出，CP-SAT 一键统一分配。 */
 export default function ParallelView({
   weekday, courses, selected, loading, solving, result, viewWeek, resultRef,
-  schoolPlan, schoolSolving, onWeekdayChange, onSolve, onExport, onViewWeekChange,
+  schoolPlan, schoolSolving, adminAuthed, onRequireLogin, onMsg,
+  onWeekdayChange, onSolve, onExport, onViewWeekChange,
   onSolveSchool, onExportSchool,
 }: Props) {
   // 周沙盘：只渲染被选中的那一周，行=时段 列=学生组
@@ -175,6 +181,20 @@ export default function ParallelView({
               </tbody>
             </table>
           </div>
+
+          {/* 落地为正式安排表：方案与安排表同构（班级×项目×组），先看差异再写入。
+              首屏「一键自动排课」的初稿是教师×课程口径、没有学生组，落进安排表
+              会凭空编造组别，所以那个入口不给落地（后端同一口径）。
+              weekday 在这里显式补齐：ParallelSession 的防御性可选 → LandPlanRow 必填；
+              真缺了由后端 normalize_plan 报错列出（不猜、不静默丢行）。 */}
+          {schoolPlan.schedule.length > 0 && onMsg && onRequireLogin && (
+            <LandPlanPanel
+              schedule={schoolPlan.schedule.map((r) => ({ ...r, weekday: r.weekday ?? '' }))}
+              adminAuthed={!!adminAuthed}
+              onRequireLogin={onRequireLogin}
+              onMsg={onMsg}
+            />
+          )}
         </div>
       )}
 

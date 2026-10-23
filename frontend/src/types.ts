@@ -81,6 +81,9 @@ export interface ParallelSession {
   group: string;
   project: string;
   teacher: string;
+  /** 全校一键（solve-all）的行自带班级名；单班求解不带，由请求的 class_name 补。
+   *  落地接口按行取班级，缺省会报 400（不猜、不静默丢行）。 */
+  class_name?: string;
 }
 
 /** `/parallel/solve` 返回结果。 */
@@ -183,6 +186,68 @@ export interface AuditData {
   room_conflicts?: AuditConflict[];
   teacher_conflicts?: AuditConflict[];
   group_conflicts?: AuditConflict[];
+}
+
+// ---------------------------------------------------------------------------
+// 方案落地（预览 → 采纳 → 撤销）
+//
+// 把求解结果写回**真实安排表**。三步的理由：这改的是真实排课数据，所以
+// ① 先差异预览（不写入）② 教秘确认后才写 ③ 写完可撤销（恢复落地前快照）。
+// 后端 `/parallel/land/preview|land|land/undo|land/status`。
+// ---------------------------------------------------------------------------
+
+/** 差异账里的一行安排（预览/采纳共用同一结构）。 */
+export interface LandPlanRow {
+  class_name?: string;
+  project: string;
+  group: string;
+  week: number;
+  weekday: string;
+  time_slot: string;
+  room: string;
+  teacher: string;
+}
+
+/** `/parallel/land/preview` 与 `/parallel/land` 返回的差异账。 */
+export interface LandPlanDiff {
+  success?: boolean;
+  plan_units: number;
+  plan_rows: number;
+  before_entries: number;
+  after_entries: number;
+  /** 方案里有、安排表里没有的单元 */
+  added: Array<{ unit: string; rows: LandPlanRow[] }>;
+  /** 时间/场地/教师被改写的单元（long_session=true 表示是跨时段长实验被截短） */
+  changed: Array<{ unit: string; old: LandPlanRow[]; new: LandPlanRow[]; long_session?: boolean }>;
+  unchanged_units: number;
+  /** 方案没覆盖的可排单元：保留原行（删了就是静默丢课） */
+  uncovered: Array<{ unit: string; rows: LandPlanRow[] }>;
+  /** 原表里同周同天地占多个时段的长实验，方案每单元只排一个 ⇒ 会被截短 */
+  long_sessions: Array<{ unit: string; old_slots: string[]; plan_slots: string[] }>;
+  /** 绪论课/考试类：原样保留、不参与替换 */
+  untouched_nonsched: number;
+  warnings: string[];
+  has_changes: boolean;
+  /** 仅采纳响应带 */
+  landed_at?: string;
+}
+
+/** `/parallel/land/status`：当前落地状态（供界面显示撤销入口）。 */
+export interface LandStatus {
+  landed: boolean;
+  landed_at?: string;
+  plan_rows?: number;
+  after_entries?: number;
+  note?: string;
+}
+
+/** `/parallel/land/undo`：撤销结果。 */
+export interface LandUndoResult {
+  success: boolean;
+  landed_at: string;
+  restored_entries: number;
+  /** 落地之后又生效的调课条数 —— 会随快照一起回滚，必须如实报出 */
+  rolled_back_moves: number;
 }
 
 /** `/stats` 返回：利用率与工作量统计。 */

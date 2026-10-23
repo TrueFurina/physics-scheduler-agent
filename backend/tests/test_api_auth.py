@@ -53,6 +53,9 @@ _PROTECTED = [
     ("GET", "/api/reschedule/requests", {}),
     ("DELETE", "/api/reschedule/requests", {}),
     ("POST", "/api/reschedule/requests/1/approve", {"json": {"approve": True, "comment": "ok"}}),
+    # 方案落地：写真实排课数据，与 /upload、/apply-move 同门禁
+    ("POST", "/api/reschedule/parallel/land", {"json": {"schedule": []}}),
+    ("POST", "/api/reschedule/parallel/land/undo", {}),
 ]
 
 

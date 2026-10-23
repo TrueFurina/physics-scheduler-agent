@@ -100,7 +100,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM parser, student schedule
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel/PDF parsers
-│   └── tests/                      # 308 pytest tests
+│   └── tests/                      # 349 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -129,6 +129,10 @@ physics-scheduler-agent/
 | GET | `/api/reschedule/export/room-schedule` | Export | Per-room timetables |
 | POST | `/api/reschedule/auto-schedule` | Scheduling | Full-school one-click draft (chunked, all 171 tasks) |
 | POST | `/api/reschedule/parallel/solve-all` | Scheduling | Whole-school group-level plan (per class, per day, 17/17) |
+| POST | `/api/reschedule/parallel/land/preview` | Landing | Diff preview vs current table (added/changed/uncovered/kept + warnings, no write) |
+| POST | `/api/reschedule/parallel/land` | Landing | Commit plan into the schedule table (admin; ledger in sqlite for restart replay) |
+| POST | `/api/reschedule/parallel/land/undo` | Landing | Undo last landing (admin; restores pre-landing snapshot) |
+| GET | `/api/reschedule/parallel/land/status` | Landing | Landing state (drives the undo entry in the UI) |
 | POST | `/api/reschedule/auto-schedule/export` | Export | Draft workbook (master sheet + one sheet per class) |
 | POST | `/api/reschedule/admin-login` | Auth | Admin login (approval desk) |
 | POST | `/api/reschedule/course-select` | Selection | Course selection Q&A (LLM) |
@@ -142,6 +146,17 @@ cd backend
 python -m pytest tests/ -v
 ```
 
+Independent auditors (they re-read the raw Excel / re-solve from scratch instead of reusing
+backend code, so a green pytest run alone is not trusted):
+
+```bash
+python scripts/verify_graybox.py        # lexical/coverage/internal-collision audit
+python scripts/verify_school_plan.py    # independent re-solve of the whole-school plan
+python scripts/audit_conflicts.py       # openpyxl + real-clock conflict scan
+python scripts/probe_approval_chain.py  # reschedule write path (API level, --restore)
+python scripts/probe_land_plan.py       # plan-landing write path (API level, undoes by default)
+```
+
 ## Roadmap
 
 - [x] Conflict grading (core conflicts must-adjust / light per-student conflicts blocked on student-timetable PII)
@@ -150,12 +165,17 @@ python -m pytest tests/ -v
 - [x] Multi-course consolidation in class timetables (course column + cross-course clash marking)
 - [x] Full-school one-click scheduling (chunked CP-SAT, 171/171 coverage, draft export)
 - [x] Whole-school group-level plan in one click (per class × day, cross-class occupancy chaining)
+- [x] Landing a plan as the official schedule table (diff preview → admin commit → undo, restart-replay ledger)
 - [ ] Visual schedule grid (weekly timetable view)
 - [ ] Data import wizard (field mapping for different schools)
 - [ ] Multi-school data isolation
 - [ ] RAG knowledge base for lab materials
 
 ## Deployment & Publishing
+
+> ⚠️ **Publishing is frozen (user decision, 2026-10-23).** The live site stays at the D-9 build
+> (`index-B6jUBL3e.js`, no R-59/R-60/landing). Local iteration continues; do not re-deploy or
+> propose publishing unless the user explicitly re-authorizes it.
 
 Live app: <https://physics-scheduler.app.workbuddy.host/>
 
