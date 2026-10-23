@@ -82,7 +82,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **367 backend tests + 78 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **381 backend tests + 85 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -100,7 +100,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM parser, student schedule
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel/PDF parsers
-│   └── tests/                      # 367 pytest tests
+│   └── tests/                      # 381 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -122,6 +122,8 @@ physics-scheduler-agent/
 | GET | `/api/reschedule/parallel/overview` | Parallel | Course overview (experiments × groups) |
 | POST | `/api/reschedule/parallel/solve` | Parallel | One-shot CP-SAT solve for a whole class |
 | POST | `/api/reschedule/upload-master` | Master data | Upload syllabus/task list (from-zero input) |
+| POST | `/api/reschedule/master/import-preview` | Master data | Import wizard step 2: read-only preview of the workbook field mapping, unrecognized/stat columns and row counts — writes nothing |
+| POST | `/api/reschedule/master/tasks-preview` | Master data | Import wizard step 2 (task-list variant): read-only preview of the list column mapping — writes nothing |
 | GET | `/api/reschedule/master/overview` | Master data | Five-table master data (read-only) |
 | GET | `/api/reschedule/export/master-workbook` | Master data | Export editable ledger (importable back) |
 | GET | `/api/reschedule/data-audit` | Dashboard | Graded conflict audit + parallel-teaching note |
@@ -156,6 +158,7 @@ python scripts/verify_school_plan.py    # independent re-solve of the whole-scho
 python scripts/audit_conflicts.py       # openpyxl + real-clock conflict scan
 python scripts/probe_approval_chain.py  # reschedule write path (API level, --restore)
 python scripts/probe_land_plan.py       # plan-landing write path (API level, undoes by default)
+python scripts/probe_import_wizard.py   # import wizard: read-only preview + commit + self-cleanup
 python scripts/probe_schedule_grid.py   # weekly grid vs independent openpyxl re-count (all 16 weeks)
 ```
 
@@ -169,7 +172,7 @@ python scripts/probe_schedule_grid.py   # weekly grid vs independent openpyxl re
 - [x] Whole-school group-level plan in one click (per class × day, cross-class occupancy chaining)
 - [x] Landing a plan as the official schedule table (diff preview → admin commit → undo, restart-replay ledger)
 - [x] Visual schedule grid (weekly timetable view: 7 days × 4 periods, cross-period entries, conflict marks)
-- [ ] Data import wizard (field mapping for different schools)
+- [x] Data import wizard (read-only field-mapping preview → admin commit, shared parse code, only-adds import)
 - [ ] Multi-school data isolation
 - [ ] RAG knowledge base for lab materials
 

@@ -1,6 +1,7 @@
 """调课 API - 上传数据 + 查询空闲时段"""
 
 import os
+import io
 import json
 import re
 import threading
@@ -461,6 +462,51 @@ async def master_delete_class(name: str):
     _master_data.delete_class(name)
     _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
+
+
+@router.post("/master/import-preview", summary="预览主数据台账导入（只读，不写入）",
+             dependencies=_ADMIN_ONLY)
+async def master_import_preview(file: UploadFile = File(...)):
+    """导入向导第 2 步：把文件解析成「页 → 列 → 字段」映射给教秘看，**不写任何状态**。
+
+    与 `/master/import` 共用 `parse_workbook`（同一份选页/匹配/统计列/行转换
+    代码）：预览报的"将导入 N 行、没认出哪些列"就是点确认后真正发生的导入，
+    不会出现"预览说 12 行、导入进 9 行"的错版（R-34 同族：校验器与被验对象
+    必须同源）。
+
+    刻意不落盘：预览是纯读路径，文件走内存 BytesIO 解析，
+    `_DATA_DIR` 里不该留下一个谁都不会再看的临时文件。
+    """
+    content = await file.read()
+    try:
+        from app.master_workbook import preview_workbook
+
+        report = preview_workbook(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"台账解析失败：{str(e)}")
+    return {"success": True, "kind": "workbook", "data": report}
+
+
+@router.post("/master/tasks-preview", summary="预览教学任务清单导入（只读，不写入）",
+             dependencies=_ADMIN_ONLY)
+async def master_tasks_preview(file: UploadFile = File(...)):
+    """导入向导第 2 步（清单版）：只解析不写入。
+
+    `_master_tasks` / `db.pending` 都不碰 —— 确认走 `/upload-master`，
+    它自己会再完整解析一次（同一份代码，结果逐字一致）。
+    认不出「班级/实验项目」两列时这里就 400 说清缺什么，不用等导入那一刻
+    才发现整份文件白传。
+    """
+    content = await file.read()
+    try:
+        from app.utils.excel_parser import preview_master_tasks
+
+        report = preview_master_tasks(io.BytesIO(content))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+    return {"success": True, "kind": "tasks", "data": report}
 
 
 @router.post("/master/import", summary="导入主数据台账（Excel 批量维护五张表）",

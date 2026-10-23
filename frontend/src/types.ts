@@ -70,6 +70,52 @@ export interface ScheduleGrid {
   notes: string[];
 }
 
+/** 导入向导：主数据台账预览的一张表（`/master/import-preview`，只读）。 */
+export interface ImportPreviewTable {
+  found: boolean;
+  sheet?: string;
+  header_row?: number;
+  rows: number;
+  blank_rows?: number;
+  bad_values?: number;
+  /** 表头认不出名称列 → 整页跳过（报告里说清缺什么） */
+  skipped?: boolean;
+  recognized?: string[];
+  missing?: string[];
+  /** 字段 ← 表头列名（预览与写库同一份匹配代码，前端不自己映射） */
+  columns?: Record<string, string>;
+  /** 表头里没被任何字段认出的列 —— 明示出来，否则教秘不知道它们被丢了 */
+  unrecognized?: string[];
+  /** 被判为统计列（数值）而忽略的列 */
+  stat_dropped?: string[];
+  /** 前 3 行样本（与写库同一段行转换代码） */
+  samples?: Array<Record<string, unknown>>;
+}
+
+/** `/master/import-preview` 返回：五张表的只读解析报告。 */
+export interface ImportWorkbookPreview {
+  /** 文件带不带可导回标记（自己导出的台账带；外校格式不带） */
+  tagged: boolean;
+  sheets: string[];
+  tables: Record<string, ImportPreviewTable>;
+  warnings: string[];
+  ignored_sheets: string[];
+}
+
+/** `/master/tasks-preview` 返回：教学任务清单的只读解析报告。 */
+export interface ImportTasksPreview {
+  sheet: string;
+  header_row: number;
+  /** 字段 ← 表头列名 */
+  columns: Record<string, string>;
+  /** 没被任何字段认出的列 */
+  unrecognized_columns: string[];
+  recognized_columns: string[];
+  tasks: number;
+  blank_or_incomplete_rows: number;
+  samples: Array<Record<string, unknown>>;
+}
+
 /** `/impact-analysis` 返回：调课后的冲突影响面。 */
 export interface ImpactResult {
   conflict_count: number;

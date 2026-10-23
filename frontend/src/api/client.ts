@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext, ScheduleGrid } from '../types';
+import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext, ScheduleGrid, ImportWorkbookPreview, ImportTasksPreview } from '../types';
 
 const API_BASE = '/api';
 
@@ -368,6 +368,36 @@ export const rescheduleApi = {
       success: boolean; message: string; data: MasterOverview;
       report: { warnings: string[] };
     }>('/reschedule/master/import', fd);
+  },
+
+  // ---------------------------------------------------------------------------
+  // 导入向导（R-63）：预览（只读）→ 确认导入。
+  //
+  // 两个预览端点**不写任何状态**，且与 /master/import、/upload-master 共用
+  // 同一份后端解析代码 —— 预览报的"将导入 N 行、没认出哪些列"就是点确认后
+  // 真正发生的导入。前端因此不自己解析 Excel、不自己映射列名：
+  // 教秘在界面上看到的每个字都来自服务端解析报告。
+  // ---------------------------------------------------------------------------
+  masterImportPreview: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post<{ success: boolean; kind: 'workbook'; data: ImportWorkbookPreview }>(
+      '/reschedule/master/import-preview', fd);
+  },
+  masterTasksPreview: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post<{ success: boolean; kind: 'tasks'; data: ImportTasksPreview }>(
+      '/reschedule/master/tasks-preview', fd);
+  },
+  // 教学任务清单的确认导入（写入 _master_tasks → 进并行排课）
+  uploadMaster: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post<{
+      success: boolean; message: string; total_tasks: number;
+      classes: string[]; report: { warnings: string[] };
+    }>('/reschedule/upload-master', fd);
   },
 
   // 数据体检报告（扫描现有安排表冲突）

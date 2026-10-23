@@ -154,6 +154,10 @@ def parse_master_tasks(filepath: str):
 
     表头按别名匹配，匹配不到才退回列序；找不到就报清楚"缺哪一列"，
     而不是像主流程那样静默丢行。
+
+    报告里的 `columns` / `unrecognized_columns` / `samples` 同时服务
+    只读预览（`preview_master_tasks`，导入向导第 2 步）—— 预览与写库
+    共用这一份匹配代码，"预览说 30 条、导入进 28 条"不可能发生。
     """
     wb = openpyxl.load_workbook(filepath)
     sheet, sheet_name = None, None
@@ -172,7 +176,7 @@ def parse_master_tasks(filepath: str):
         raise ValueError("文件里没有任何工作表")
 
     # 找表头行：前 5 行里命中别名最多的一行
-    header_row, mapping = None, {}
+    header_row, mapping, header_cells = None, {}, []
     for r in range(1, min(6, sheet.max_row + 1)):
         cells = [_norm_header(c) for c in next(sheet.iter_rows(min_row=r, max_row=r, values_only=True))]
         hit = {}
@@ -182,7 +186,7 @@ def parse_master_tasks(filepath: str):
                     hit[field] = i
                     break
         if len(hit) > len(mapping):
-            header_row, mapping = r, hit
+            header_row, mapping, header_cells = r, hit, cells
     if header_row is None or "class_name" not in mapping or "experiment" not in mapping:
         raise ValueError(
             "清单里必须至少能认出「班级」和「实验项目」两列"
@@ -219,15 +223,36 @@ def parse_master_tasks(filepath: str):
             weekday=str(cell("weekday") or "").strip(),
             source="master",
         ))
+    claimed = set(mapping.values())
     report = {
         "sheet": str(sheet_name),
         "header_row": header_row,
         "recognized_columns": sorted(set(mapping)),
         "tasks": len(tasks),
         "blank_or_incomplete_rows": blanks,
-        "samples": [repr(t) for t in tasks[:5]],
+        # ↓ 导入向导预览用：字段 ← 列名 / 没被认出的列 / 结构化样本行。
+        # 与写库（/upload-master）共用同一份匹配代码，预览数字即导入数字。
+        "columns": {f: (header_cells[i] if i < len(header_cells) else "")
+                    for f, i in mapping.items()},
+        "unrecognized_columns": [c for i, c in enumerate(header_cells)
+                                 if c and i not in claimed],
+        "samples": [{"class_name": t.class_name, "experiment": t.experiment,
+                     "group": t.group, "teacher": t.teacher, "room": t.room,
+                     "course": t.course, "week": t.week, "weekday": t.weekday}
+                    for t in tasks[:5]],
     }
     return tasks, report
+
+
+def preview_master_tasks(filepath) -> dict:
+    """只读预览教学任务清单：**不写任何状态**（导入向导第 2 步，清单版）。
+
+    就是 `parse_master_tasks` + 丢掉任务对象：`_master_tasks` / `db.pending`
+    都不碰。认不出「班级/实验项目」两列时抛 ValueError（由端点转 400），
+    与 `/upload-master` 同一条错误消息 —— 预览阶段就能看见，不用等导入。
+    """
+    _tasks, report = parse_master_tasks(filepath)
+    return report
 
 
 def _parse_semester_start(wb):

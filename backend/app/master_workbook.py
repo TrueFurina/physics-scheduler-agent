@@ -8,7 +8,10 @@
 闭环真正接上：
 
     /export/master-workbook  五张实体表，每表一页，行=实体，列=可编辑字段
-    /master/import           同一个文件改完传回来，逐表 upsert 进主数据
+    /master/import-preview   先只读解析一遍：页→列→字段映射 + 没认出的列 +
+                             统计列 + 样本行给教秘看，**不写任何状态**
+                             （与 /master/import 共用 parse_workbook，数字一致）
+    /master/import           看过预览再确认：逐表 upsert 进主数据
 
 设计上刻意守的三条防线（前两条是本项目反复踩过的坑）
 ------------------------------------------------
@@ -147,6 +150,56 @@ def _to_int(value) -> Optional[int]:
         return None
 
 
+def _find_sheet(wb, spec: dict, used: set) -> Optional[str]:
+    """定位 spec 对应的页：精确名优先，否则最短的包含名。
+
+    `parse_workbook`（写库）与 `preview_workbook`（只读预览）共用 ——
+    两处各写一份选页逻辑，就会出现"预览说这页没找到、导入却导进去了"
+    的错版，而教秘没有任何手段发现它。
+    """
+    if spec["sheet"] in wb.sheetnames:
+        return spec["sheet"]
+    cands = [n for n in wb.sheetnames if n not in used and spec["sheet"] in str(n)]
+    return sorted(cands, key=lambda n: len(str(n)))[0] if cands else None
+
+
+def _row_to_rec(row: tuple, mapping: Dict[str, int], spec: dict) -> Tuple[Optional[dict], int]:
+    """一行 → 字段 dict；名称为空返回 None（空行/续表）。
+
+    多值切分、整数 coercion 都在这一处：**预览给教秘看的样本与导入真正
+    写库的行，必须是同一段代码**（R-34 同族：校验器与被验对象必须同源，
+    否则"预览说 12 行、导入进 9 行"这类错版无人能发现）。
+    返回 (rec, bad)：bad = 这行里"填了却不是数字"的整数字段个数。
+    """
+    def cell(f):
+        i = mapping.get(f)
+        return row[i] if i is not None and i < len(row) else None
+
+    name = str(cell("name") or "").strip()
+    if not name:
+        return None, 0
+    rec: dict = {"name": name}
+    bad = 0
+    for f in spec["fields"]:
+        if f == "name" or f not in mapping:
+            continue
+        v = cell(f)
+        if f in spec["multi"]:
+            rec[f] = _split_multi(v)
+        elif f in ("capacity", "week_min", "week_max"):
+            iv = _to_int(v)
+            if v not in (None, "") and iv is None:
+                bad += 1
+            rec[f] = iv
+        else:
+            rec[f] = str(v).strip() if v is not None else ""
+    return rec, bad
+
+
+def _header_text(rows: List[tuple], header_row: int, col: int) -> str:
+    return _norm(rows[header_row - 1][col]) if header_row and col < len(rows[header_row - 1]) else ""
+
+
 # --------------------------------------------------------------------------- 导出
 def build_workbook(md) -> "openpyxl.Workbook":
     """五张实体表 → 可编辑工作簿（行=实体，列=字段，多值用顿号连接）。"""
@@ -261,6 +314,11 @@ def parse_workbook(filepath: str) -> Tuple[Dict[str, List[dict]], dict]:
 
     报告里一定说清楚：认出了哪些表、每张表认出哪些列、**哪些列没认出来**、
     跳过了哪些行。宁可报"没认出来"，也不静默导入一半（R-34）。
+
+    报告同时服务于**导入向导的只读预览**（`preview_workbook`）：每张表带
+    `columns`（字段 ← 表头列名）、`unrecognized`（没被任何字段认出的列）、
+    `stat_dropped`（判为统计列而忽略的列）、`samples`（前 3 行，与写库同一
+    行转换代码）。预览与写库因此共用同一份解析，数字不可能对不上。
     """
     wb = openpyxl.load_workbook(filepath, data_only=True)
     tagged = any(MASTER_WORKBOOK_TAG in str(c[0] if c else "")
@@ -273,15 +331,7 @@ def parse_workbook(filepath: str) -> Tuple[Dict[str, List[dict]], dict]:
 
     used_sheets = set()
     for spec in TABLE_SPECS:
-        sheet_name = None
-        # 精确名优先（"实验项目" 不能被 "课程" 抢走）
-        if spec["sheet"] in wb.sheetnames:
-            sheet_name = spec["sheet"]
-        else:
-            cands = [n for n in wb.sheetnames
-                     if n not in used_sheets and spec["sheet"] in str(n)]
-            if cands:
-                sheet_name = sorted(cands, key=lambda n: len(str(n)))[0]
+        sheet_name = _find_sheet(wb, spec, used_sheets)
         if sheet_name is None:
             report["tables"][spec["key"]] = {"found": False, "rows": 0}
             continue
@@ -299,6 +349,10 @@ def parse_workbook(filepath: str) -> Tuple[Dict[str, List[dict]], dict]:
             continue
 
         # 统计列剔除（双保险：列名带"数/格/率/%" 或 值几乎全是数字）
+        # ⚠️ claimed 必须在剔除**之前**取：统计列是"认出来之后又主动忽略"的，
+        # 剔除后再算未识别列，它就会同时出现在两个列表里（同一列报两次，
+        # 教秘会以为有两处问题）。
+        claimed = set(mapping.values())
         dropped = []
         for field, col in list(mapping.items()):
             if field not in spec["multi"]:
@@ -314,41 +368,42 @@ def parse_workbook(filepath: str) -> Tuple[Dict[str, List[dict]], dict]:
 
         recs, blank, bad = [], 0, 0
         for row in rows[header_row:]:
-            def cell(f):
-                i = mapping.get(f)
-                return row[i] if i is not None and i < len(row) else None
-
-            name = str(cell("name") or "").strip()
-            if not name:
+            rec, row_bad = _row_to_rec(row, mapping, spec)
+            bad += row_bad
+            if rec is None:
                 if any(c not in (None, "") for c in row):
                     blank += 1
                 continue
-            rec = {"name": name}
-            for f in spec["fields"]:
-                if f == "name" or f not in mapping:
-                    continue
-                v = cell(f)
-                if f in spec["multi"]:
-                    rec[f] = _split_multi(v)
-                elif f in ("capacity", "week_min", "week_max"):
-                    iv = _to_int(v)
-                    if v not in (None, "") and iv is None:
-                        bad += 1
-                    rec[f] = iv
-                else:
-                    rec[f] = str(v).strip() if v is not None else ""
             recs.append(rec)
 
         tables[spec["key"]] = recs
+        header_cells = [_norm(c) for c in rows[header_row - 1]]
         report["tables"][spec["key"]] = {
             "found": True, "sheet": sheet_name, "header_row": header_row,
             "rows": len(recs), "blank_rows": blank, "bad_values": bad,
             "recognized": sorted(mapping),
             "missing": sorted(f for f in spec["fields"] if f not in mapping),
+            # ↓ 导入向导预览用：字段 ← 列名 / 没认出的列 / 统计列 / 样本行
+            "columns": {f: _header_text(rows, header_row, col) for f, col in mapping.items()},
+            "unrecognized": [c for i, c in enumerate(header_cells) if c and i not in claimed],
+            "stat_dropped": dropped,
+            "samples": recs[:3],
         }
 
     report["ignored_sheets"] = [n for n in wb.sheetnames if n not in used_sheets]
     return tables, report
+
+
+def preview_workbook(filepath) -> dict:
+    """只读预览：解析整份台账但**不写任何状态**（导入向导第 2 步）。
+
+    就是 `parse_workbook` + 丢掉行数据：同一份选页/匹配/统计列/行转换
+    代码，预览报的"将导入 N 行、没认出哪些列"与点确认后真正发生的导入
+    逐字一致。单独写一套预览逻辑是 R-34 同族错误（校验器与被验对象
+    不同源），本项目不这么干。
+    """
+    _tables, report = parse_workbook(filepath)
+    return report
 
 
 # --------------------------------------------------------------------------- 应用

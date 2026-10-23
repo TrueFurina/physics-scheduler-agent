@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { rescheduleApi } from '../api/client';
 import type { MasterOverview } from '../types';
+import ImportWizard, { type ImportKind } from '../components/ImportWizard';
 
 /**
  * 主数据管理（导师座谈一号行动项「基于教学大纲梳理实验课程属性、重构数据库」）。
@@ -13,6 +14,8 @@ import type { MasterOverview } from '../types';
  *
  * 批量维护：导出可编辑台账 → Excel 里改 → 导回。导回**只增补不删除**（Excel 里的
  * "空"可能是"没填"也可能是"没变"，后端不猜这个意图），删实体用列表里的删除按钮。
+ * 两个导入入口（台账 / 任务清单）都走**导入向导**（R-63）：先只读预览
+ * 「页→列→字段」映射与告警，教秘确认后才写入。
  */
 
 type TabKey = 'experiments' | 'teachers' | 'rooms' | 'classes' | 'courses';
@@ -43,8 +46,8 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
-  const [importReport, setImportReport] = useState<{ message: string; warnings: string[] } | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  // 导入向导（R-63）：'' = 关；'workbook' = 台账导回；'tasks' = 任务清单
+  const [wizard, setWizard] = useState<'' | ImportKind>('');
 
   const load = async () => {
     setLoading(true);
@@ -94,22 +97,6 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
       setError(err?.response?.data?.detail || '导出台账失败');
-    }
-  };
-
-  const doImportWorkbook = async (file: File) => {
-    if (!guard()) return;
-    setBusy(true);
-    setImportReport(null);
-    try {
-      const r = await rescheduleApi.masterImport(file);
-      refresh(r.data.data);
-      setImportReport({ message: r.data.message, warnings: r.data.report?.warnings || [] });
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || '导入台账失败');
-    } finally {
-      setBusy(false);
-      if (fileRef.current) fileRef.current.value = '';   // 允许连续导入同一个文件
     }
   };
 
@@ -213,20 +200,21 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
             ⬇ 导出台账
           </button>
           <button
-            onClick={() => { if (guard()) fileRef.current?.click(); }}
+            onClick={() => { if (guard()) setWizard('workbook'); }}
             disabled={busy || !adminAuthed}
             className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium disabled:opacity-40"
-            title="把改过的台账导回（只增补，不删除）"
+            title="打开导入向导：先只读预览「页→列→字段」映射，确认后才写入（只增补，不删除）"
           >
             ⬆ 导入台账
           </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".xlsx,.xls"
-            className="hidden"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) doImportWorkbook(f); }}
-          />
+          <button
+            onClick={() => { if (guard()) setWizard('tasks'); }}
+            disabled={busy || !adminAuthed}
+            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium disabled:opacity-40"
+            title="导入「班级×实验项目」清单：没有周次/时段的行直接进并行排课（同样先预览后写入）"
+          >
+            📋 任务清单
+          </button>
           <button
             onClick={doInit}
             disabled={busy || !adminAuthed}
@@ -253,15 +241,15 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       {error && (
         <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{error}</div>
       )}
-      {importReport && (
-        <div className="mb-3 px-3 py-2 bg-teal-50 border border-teal-200 text-teal-800 text-sm rounded-lg">
-          <div>{importReport.message}</div>
-          {importReport.warnings.length > 0 && (
-            <ul className="mt-1.5 list-disc pl-5 text-xs text-amber-700 space-y-0.5">
-              {importReport.warnings.map((w, i) => <li key={i}>{w}</li>)}
-            </ul>
-          )}
-        </div>
+
+      {wizard && (
+        <ImportWizard
+          kind={wizard}
+          adminAuthed={adminAuthed}
+          onRequireLogin={onRequireLogin}
+          onImported={load}
+          onClose={() => setWizard('')}
+        />
       )}
 
       {/* Tab */}
