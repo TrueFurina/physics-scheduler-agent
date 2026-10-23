@@ -421,6 +421,11 @@ async function fullyInViewport(page, selector) {
     await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
     const base2 = (await getStatus(p2)).body;
+    // 开场内容签名：L0 的"什么都没写"以它为准，不能以 landed 查询为准——
+    // land/status 与落地/撤销共用 parallel-land 桶（20 次/60s），探针一轮跑下来
+    // 超限后这里会 429（body 无 landed 字段），"查询失败≠被写"。
+    // 且签名判据比 landed 更强：413 巧合下"写入但条数不变"只有签名能抓住。
+    const base2Sig = await fullSignature(p2);
     await p2.getByRole('button', { name: /并行排课/ }).first().click();
     await p2.waitForFunction(() => document.body.innerText.includes('2024级'), { timeout: 40000 });
     await p2.getByRole('button', { name: /一键排全校/ }).first().click();
@@ -438,12 +443,19 @@ async function fullyInViewport(page, selector) {
     } catch { /* 下面按 false 判 */ }
     const after2 = await getStatus(p2);
     const land2 = await getLandStatus(p2);
+    const sigAfter2 = await fullSignature(p2);
+    // landed 查询可用时才纳入判据；429（限流）时 body 没有 landed 字段，
+    // 此时只凭内容判：条数 + 全周签名都与开场一致 ⇒ 没写。
+    const land2Usable = land2.body && typeof land2.body.landed === 'boolean';
     const nothingWritten = after2.body && after2.body.total_entries === base2.total_entries
-      && land2.body && land2.body.landed === false;
+      && sigAfter2.hash === base2Sig.hash
+      && (!land2Usable || land2.body.landed === false);
     rec(hintShown && modalShown && nothingWritten,
       'L0 未登录守卫',
       `提示「采纳需管理员登录」${hintShown ? '有' : '无'}，点采纳弹云端登录${modalShown ? '有' : '无'}，`
-      + `安排表 ${after2.body ? after2.body.total_entries : '?'} 条（${nothingWritten ? '未被动' : '被写了！'}）`);
+      + `安排表 ${after2.body ? after2.body.total_entries : '?'} 条（开场 ${base2.total_entries}），`
+      + `内容签名 ${sigAfter2.hash}${sigAfter2.hash === base2Sig.hash ? '（与开场一致）' : ` ≠ 开场 ${base2Sig.hash}——内容被改了！`}，`
+      + (land2Usable ? `landed=${land2.body.landed}` : `landed 查询不可用（HTTP ${land2.status || '?'}，限流不以它判冤）`));
     await p2.screenshot({ path: path.join(SHOT_DIR, 'newviews-land-guard.png') });
     await ctx2.close();
   } catch (e) {

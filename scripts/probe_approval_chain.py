@@ -10,7 +10,15 @@
 
 用法：
   D:/miniconda3_new/python.exe scripts/probe_approval_chain.py
-  ... --site http://127.0.0.1:8023 --restore    # 测完把探针造成的移动撤掉
+  ... --site http://127.0.0.1:8023              # 默认打本地
+  ... --no-restore                              # 默认自动还原；要留痕迹才显式关
+
+数据卫生（2026-10-24 踩坑记录）：
+  本探针会**真的移动一条排课记录**。--restore 曾经默认关，忘了传就跑 ⇒ 探针
+  移动留在了服务端（且 applied_moves 里的 probe-% 记录让第二轮 discover 失效），
+  schedule_grid 对账探针立刻抓到"第 2 周多 1 条 / 第 3 周少 1 条"。现已默认开：
+  本地库自动 DELETE probe-% + load-default；远端站点找不到 db 时按原样跳过
+  （第 207 行那条分支），不会误删任何东西。
 """
 import argparse
 import json
@@ -117,7 +125,8 @@ def current_course(site: str, teacher: str, course_name: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", default=DEFAULT_SITE)
-    ap.add_argument("--restore", action="store_true", help="测完撤掉探针造成的移动")
+    ap.add_argument("--restore", action=argparse.BooleanOptionalAction, default=True,
+                    help="测完撤掉探针造成的移动（默认开；--no-restore 留痕检查用）")
     args = ap.parse_args()
     site = args.site.rstrip("/")
     rep = Report()

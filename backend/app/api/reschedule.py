@@ -1247,7 +1247,7 @@ async def land_undo():
 
 
 @router.get("/parallel/land/status", summary="当前落地状态（供界面显示撤销入口）",
-            dependencies=[Depends(rate_limit("parallel-land"))])
+            dependencies=[Depends(rate_limit("parallel-land-status"))])
 async def land_status():
     """是否已落地、何时、多少条。_ensure_loaded 保证重启重放之后再回答。"""
     _ensure_loaded()

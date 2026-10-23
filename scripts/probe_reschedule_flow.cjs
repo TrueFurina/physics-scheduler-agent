@@ -87,17 +87,24 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     availCount = mAvail ? Number(mAvail[1]) : 0;
     exclCount = mExcl ? Number(mExcl[1]) : 0;
 
-    // 沙盘网格：绿格 = 可用，红格 = 排除。直接数 DOM，避免被文案骗过
+    // 沙盘网格：绿格 = 可用。直接数 DOM，避免被文案骗过。
+    // ⚠️ 这里**不断红格**：网格按 (天,时段) 聚合且 available 优先渲染——
+    // excluded 是房间级冲突（A504 被占），available 是同时段其他房可用
+    // （A410/A411），12 条排除全部落在"同时段有可用房"的格子里 ⇒ 红格恒 0
+    // （2026-10-24 实测断言 cells.red>0 必红，是判据与聚合语义不符，非产品缺陷）。
+    // 排除时段的渲染判据在列表区（🚫 被排除时段）：行数必须与标题数字一致，
+    // 防"标题有数字但列表空"的假绿。
     const cells = await page.evaluate(() => ({
       green: document.querySelectorAll('.bg-green-50.border-green-200').length,
-      red: document.querySelectorAll('.bg-red-50.border-red-200').length,
     }));
+    const exclRows = await page.evaluate(() =>
+      document.querySelectorAll('.text-red-400.ml-7').length);
     // 阈值 2s：首屏请求走 fast=true（规则解析，实测 25ms），若误改回 fast=false
     // 会退回 LLM 候选生成（实测 7.6s），这一项立刻变红。
     rec(
-      availCount > 0 && exclCount > 0 && cells.green > 0 && cells.red > 0 && sandboxMs < 2000,
+      availCount > 0 && exclCount > 0 && cells.green > 0 && exclRows === exclCount && sandboxMs < 2000,
       '③ 调课沙盘',
-      `${sandboxMs}ms 出沙盘：可用 ${availCount} / 排除 ${exclCount}（网格 绿${cells.green} 红${cells.red}）`,
+      `${sandboxMs}ms 出沙盘：可用 ${availCount} / 排除 ${exclCount}（网格 绿${cells.green}，排除列表 ${exclRows}/${exclCount} 行）`,
     );
     await page.screenshot({ path: path.join(SHOT_DIR, 'reschedule-sandbox.png'), fullPage: true });
   } catch (e) {
