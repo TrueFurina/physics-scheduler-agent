@@ -13,7 +13,8 @@
     "probe:demo": "node ../scripts/probe_demo_path.cjs",
     "verify": "tsc -b && vitest run",
     "probe:reschedule": "node ../scripts/probe_reschedule_flow.cjs",
-    "probe:faults": "node ../scripts/probe_faults.cjs"
+    "probe:faults": "node ../scripts/probe_faults.cjs",
+    "probe:newviews": "node ../scripts/probe_ui_newviews.cjs"
   },
   "dependencies": {
     "@tencent-ai/workbuddy-cloud-sdk": "^0.1.3-dev.c090db7.202610050023",

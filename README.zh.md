@@ -82,7 +82,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 381 个测试 + 前端 85 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 381 个测试 + 前端 85 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
