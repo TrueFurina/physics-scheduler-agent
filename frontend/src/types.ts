@@ -15,7 +15,60 @@ export type View =
   | 'tutor'
   | 'parallel'
   | 'dashboard'
-  | 'master';
+  | 'master'
+  | 'grid';
+
+/** `/schedule-grid` 的一个时段（行）：机器值 + 人话 + 真实时钟区间。 */
+export interface GridSlotMeta {
+  slot: string;
+  label: string;
+  clock: string;
+}
+
+/** `/schedule-grid` 单元格里的一条安排。 */
+export interface GridCellEntry {
+  class_name: string;
+  group: string;
+  experiment: string;
+  teacher: string;
+  /** 空串＝没填场地（前端标「未填场地」，不静默丢） */
+  room: string;
+  /** 主标签（展示用） */
+  time_slot: string;
+  /** 原表时段写法（跨节次时回显它，如 14:00-17:00） */
+  time_raw: string;
+  /** 真实占住的所有节次（R-40：一条记录可占多格） */
+  blocked: string[];
+  missing_room: boolean;
+  /** 参与的核心冲突类型（来自 scan_table）：room/teacher/group */
+  conflicts: string[];
+}
+
+/** `/schedule-grid` 的一周网格全景。 */
+export interface ScheduleGrid {
+  week: number;
+  week_min: number;
+  week_max: number;
+  weekdays: string[];
+  slots: GridSlotMeta[];
+  /** key = `星期|时段`（如 `周一|567`），只有非空格 */
+  cells: Record<string, GridCellEntry[]>;
+  filters: { class_name: string; room: string };
+  /** 筛选项从全表取：被筛选吃掉下拉选项是经典的"筛回去"陷阱 */
+  class_options: string[];
+  room_options: string[];
+  totals: {
+    entries: number;
+    nonempty_cells: number;
+    missing_room: number;
+    conflict_entries: number;
+    unplaced: number;
+  };
+  /** 全周全表口径，不受班级/场地筛选影响 */
+  conflict_counts: { room: number; teacher: number; group: number };
+  conflict_scope: string;
+  notes: string[];
+}
 
 /** `/impact-analysis` 返回：调课后的冲突影响面。 */
 export interface ImpactResult {

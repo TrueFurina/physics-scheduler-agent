@@ -1759,6 +1759,40 @@ async def stats():
     }
 
 
+@router.get("/schedule-grid", summary="周课表网格：某一周的 星期×时段 排课全景")
+async def schedule_grid(week: int, class_name: str = "", room: str = ""):
+    """把某一周的安排表重排成网格（README 路线图：排课结果可视化）。
+
+    与导出的关系：导出给教务系统/打印用，这个给**当场看**用——落地（R-61）
+    之后教秘要确认"方案真的写进安排表了"，看板只有统计数字，网格才是
+    一眼可见的那一面。
+
+    口径（详见 `app/schedule_grid.py` 模块头）：
+    - 7 天 × 4 时段全列（周末 71 条、上午 4 条不能丢——R-41）；
+    - 跨节次记录（`blocked` 如 ["567","678"]）在每个占用的节次各出现一次（R-40）；
+    - 没填场地的记录照常入格并标注（R-35：不静默丢）；
+    - 冲突标记来自 `conflict_model.scan_table`（唯一权威），本端点不重算；
+    - 周次超出覆盖范围直接 400 并说清范围（R-32：不夹取）。
+    """
+    _ensure_loaded()
+
+    from app import schedule_grid
+    from app.conflict_model import scan_table
+
+    try:
+        grid = schedule_grid.build_grid(
+            _db.entries,
+            week=week,
+            class_name=class_name,
+            room=room,
+            conflicts=scan_table(_db.entries),
+            skipped=getattr(_db, "skipped", None) or [],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": grid}
+
+
 @router.post("/impact-analysis", summary="冲突影响分析（差异化功能）",
              dependencies=[Depends(rate_limit("impact-analysis"))])
 async def impact_analysis(req: ChatRequest):

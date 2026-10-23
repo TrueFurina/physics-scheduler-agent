@@ -82,7 +82,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 349 个测试 + 前端 69 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 367 个测试 + 前端 78 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
@@ -101,7 +101,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # 调课智能体、LLM 解析、学生课表
 │   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel/PDF 解析器
-│   └── tests/                      # 349 个 pytest 测试
+│   └── tests/                      # 367 个 pytest 测试
 ├── frontend/
 │   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
 ├── scripts/                        # 独立审计器 + 发布预检
@@ -126,6 +126,7 @@ physics-scheduler-agent/
 | POST | `/api/reschedule/parallel/land` | 方案落地 | 采纳方案写回安排表（需管理员，落盘可重放） |
 | POST | `/api/reschedule/parallel/land/undo` | 方案落地 | 撤销最近一次落地（需管理员） |
 | GET | `/api/reschedule/parallel/land/status` | 方案落地 | 当前落地状态（界面撤销入口据此显示） |
+| GET | `/api/reschedule/schedule-grid` | 排课可视化 | 周课表网格：某一周的 星期×时段 全景（7 天 × 4 时段，跨节次记录在每个占用的时段都出现，冲突格带 ⚠ 标记） |
 | POST | `/api/reschedule/upload-master` | 主数据 | 上传教学大纲/任务清单（从零排课输入） |
 | GET | `/api/reschedule/master/overview` | 主数据 | 五表主数据（只读） |
 | GET | `/api/reschedule/export/master-workbook` | 主数据 | 导出可编辑台账（可导回） |
@@ -151,7 +152,7 @@ python -m pytest tests/ -v
 - [x] 并行批量排课 + 灰箱补全
 - [x] 班级课表跨课程合并（课程列 + 跨课程撞车标记）
 - [x] 全校一键组级方案 + 方案落地为正式安排表（差异预览/采纳/撤销/重启重放）
-- [ ] 排课结果可视化（周课表网格）
+- [x] 排课结果可视化（周课表网格）
 - [ ] 数据上传向导（字段映射，适配不同学校）
 - [ ] 多校数据隔离
 - [ ] 实验讲义 RAG 知识库

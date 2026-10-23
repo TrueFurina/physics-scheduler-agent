@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext } from '../types';
+import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext, ScheduleGrid } from '../types';
 
 const API_BASE = '/api';
 
@@ -302,6 +302,13 @@ export const rescheduleApi = {
     api.post<LandUndoResult>('/reschedule/parallel/land/undo'),
   landStatus: () =>
     api.get<LandStatus>('/reschedule/parallel/land/status'),
+
+  // 周课表网格：把某一周的安排表重排成 星期×时段 全景（R-62）。
+  // 读路径免鉴权（与 dataAudit/stats 同族）。班级/场地传空串＝不过滤。
+  scheduleGrid: (week: number, class_name = '', room = '') =>
+    api.get<{ success: boolean; data: ScheduleGrid }>(
+      '/reschedule/schedule-grid',
+      { params: { week, class_name, room } }),
 
   parallelExport: (className: string, schedule: Array<{ project: string; group: string; week: number; weekday: string; time_slot: string; room: string; teacher: string }>) =>
     api.post('/reschedule/parallel/export', { class_name: className, schedule }, { responseType: 'blob' }),

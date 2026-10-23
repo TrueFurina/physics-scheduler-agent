@@ -82,7 +82,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **308 backend tests + 60 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **367 backend tests + 78 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -100,7 +100,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM parser, student schedule
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel/PDF parsers
-│   └── tests/                      # 349 pytest tests
+│   └── tests/                      # 367 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -133,6 +133,7 @@ physics-scheduler-agent/
 | POST | `/api/reschedule/parallel/land` | Landing | Commit plan into the schedule table (admin; ledger in sqlite for restart replay) |
 | POST | `/api/reschedule/parallel/land/undo` | Landing | Undo last landing (admin; restores pre-landing snapshot) |
 | GET | `/api/reschedule/parallel/land/status` | Landing | Landing state (drives the undo entry in the UI) |
+| GET | `/api/reschedule/schedule-grid` | View | Weekly timetable grid: one week as weekday × period cells (7 days × 4 periods, cross-period entries appear in every occupied cell, conflict marks from the audit) |
 | POST | `/api/reschedule/auto-schedule/export` | Export | Draft workbook (master sheet + one sheet per class) |
 | POST | `/api/reschedule/admin-login` | Auth | Admin login (approval desk) |
 | POST | `/api/reschedule/course-select` | Selection | Course selection Q&A (LLM) |
@@ -155,6 +156,7 @@ python scripts/verify_school_plan.py    # independent re-solve of the whole-scho
 python scripts/audit_conflicts.py       # openpyxl + real-clock conflict scan
 python scripts/probe_approval_chain.py  # reschedule write path (API level, --restore)
 python scripts/probe_land_plan.py       # plan-landing write path (API level, undoes by default)
+python scripts/probe_schedule_grid.py   # weekly grid vs independent openpyxl re-count (all 16 weeks)
 ```
 
 ## Roadmap
@@ -166,7 +168,7 @@ python scripts/probe_land_plan.py       # plan-landing write path (API level, un
 - [x] Full-school one-click scheduling (chunked CP-SAT, 171/171 coverage, draft export)
 - [x] Whole-school group-level plan in one click (per class × day, cross-class occupancy chaining)
 - [x] Landing a plan as the official schedule table (diff preview → admin commit → undo, restart-replay ledger)
-- [ ] Visual schedule grid (weekly timetable view)
+- [x] Visual schedule grid (weekly timetable view: 7 days × 4 periods, cross-period entries, conflict marks)
 - [ ] Data import wizard (field mapping for different schools)
 - [ ] Multi-school data isolation
 - [ ] RAG knowledge base for lab materials

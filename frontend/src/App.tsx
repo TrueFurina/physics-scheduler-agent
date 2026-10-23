@@ -12,7 +12,7 @@ import {
 import { withRetry, whenIdle } from './utils/async';
 import { describeApiError } from './utils/apiError';
 import ErrorBoundary from './components/ErrorBoundary';
-import type { View, ImpactResult, AiPlan, NlSlotContext } from './types';
+import type { View, ImpactResult, AiPlan, NlSlotContext, ScheduleGrid } from './types';
 import IdentityView from './views/IdentityView';
 import CoursesView from './views/CoursesView';
 import RescheduleView from './views/RescheduleView';
@@ -24,6 +24,7 @@ const ParallelView = lazy(() => import('./views/ParallelView'));
 const DashboardView = lazy(() => import('./views/DashboardView'));
 const ConsultView = lazy(() => import('./views/ConsultView'));
 const MasterDataView = lazy(() => import('./views/MasterDataView'));
+const ScheduleGridView = lazy(() => import('./views/ScheduleGridView'));
 
 /** 懒加载视图的占位：与视图等高的骨架，避免切换时页面高度塌陷导致跳动。 */
 function ViewFallback() {
@@ -87,6 +88,13 @@ function App() {
   const [schoolPlan, setSchoolPlan] = useState<any>(null);  // 全校一键结果（逐班·按天）
   const [schoolSolving, setSchoolSolving] = useState(false);
   const [parallelSelected, setParallelSelected] = useState('');  // 当前选中课程
+  // 周课表网格（R-62）：读路径免鉴权，与数据看板同族
+  const [gridWeek, setGridWeek] = useState(1);
+  const [gridData, setGridData] = useState<ScheduleGrid | null>(null);
+  const [gridLoading, setGridLoading] = useState(false);
+  const [gridError, setGridError] = useState('');
+  const [gridClass, setGridClass] = useState('');
+  const [gridRoom, setGridRoom] = useState('');
   // 失败提示条渲染在页面顶部（header 正下方），而教秘的点按发生在页面中部/底部
   // （如并行排课点某张课程卡的「一键排课」）—— 不滚进视口就是"点了没反应"（R-30 同族）。
   const msgBannerRef = useRef<HTMLDivElement>(null);
@@ -335,6 +343,42 @@ function App() {
       setStatsData(null);
       setStatsError(describeApiError(err));
     }
+  };
+
+  // 周课表网格（R-62）：打开即加载；切周次/筛选只是重新取数。
+  const fetchGrid = async (w: number, cls: string, room: string) => {
+    setGridLoading(true);
+    setGridError('');
+    try {
+      const r = await rescheduleApi.scheduleGrid(w, cls, room);
+      setGridData(r.data.data);
+    } catch (err: any) {
+      // 失败时清掉旧数据：旧周的格子配上"这是第 N 周的"比空白更误导
+      setGridData(null);
+      setGridError(describeApiError(err));
+    } finally {
+      setGridLoading(false);
+    }
+  };
+
+  const handleOpenGrid = () => {
+    setView('grid');
+    void fetchGrid(gridWeek, gridClass, gridRoom);
+  };
+
+  const handleGridWeekChange = (w: number) => {
+    setGridWeek(w);
+    void fetchGrid(w, gridClass, gridRoom);
+  };
+
+  const handleGridClassChange = (c: string) => {
+    setGridClass(c);
+    void fetchGrid(gridWeek, c, gridRoom);
+  };
+
+  const handleGridRoomChange = (r: string) => {
+    setGridRoom(r);
+    void fetchGrid(gridWeek, gridClass, r);
   };
 
   // 冲突影响分析（差异化功能）：查看调课影响范围
@@ -993,6 +1037,14 @@ function App() {
               📊 数据看板
             </button>
             <button
+              onClick={handleOpenGrid}
+              className={`px-4 py-2 rounded-lg transition-colors ${
+                view === 'grid' ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              📅 周课表
+            </button>
+            <button
               onClick={() => setView('master')}
               className={`px-4 py-2 rounded-lg transition-colors ${
                 view === 'master' ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
@@ -1288,6 +1340,24 @@ function App() {
                 onExportClass={() => handleExportStandard('class')}
                 onExportRoom={() => handleExportStandard('room')}
                 onExportMaster={() => handleExportStandard('master')}
+              />
+            </Suspense>
+          )}
+
+          {/* 页面6.6：📅 周课表网格（R-62：排课结果可视化，落地后的一眼确认面） */}
+          {view === 'grid' && (
+            <Suspense fallback={<ViewFallback />}>
+              <ScheduleGridView
+                week={gridWeek}
+                data={gridData}
+                loading={gridLoading}
+                error={gridError}
+                classFilter={gridClass}
+                roomFilter={gridRoom}
+                onWeekChange={handleGridWeekChange}
+                onClassChange={handleGridClassChange}
+                onRoomChange={handleGridRoomChange}
+                onRetry={handleOpenGrid}
               />
             </Suspense>
           )}
