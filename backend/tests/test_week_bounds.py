@@ -61,7 +61,7 @@ class _FakeLlmParser:
         # 生成 AI 候选方案那一步会看这个开关；这里只需要"解析"能力
         self.configured = False
 
-    def parse(self, text):                      # noqa: D102 - 玩具实现
+    def parse(self, text):
         self.calls += 1
         return dict(self.payload)
 

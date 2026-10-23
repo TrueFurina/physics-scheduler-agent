@@ -39,7 +39,25 @@ from typing import Any, Dict, List, Optional
 #     于是"沙盘把 678 判为空闲"这个缺陷会在命中缓存时重现（且难以察觉）。
 # v4：新增 pending（没排时间的行 → 待排任务）与 sheet_name。
 #     旧缓存里没有 pending ⇒ 命中缓存时"待排任务"会凭空消失（正好是静默丢弃的另一种形态）。
-CACHE_VERSION = 4
+# v5：ScheduleEntry 新增 course（显式课程外键，R-66）。
+#     ⚠️ 顺带修一个自 v3 起就潜伏的真 bug：`entries_to_rows` 自 v3 起产出 **10 字段**行
+#     （time_raw/blocked），而 `_validate` 仍按 **8 字段**校验 ⇒ 磁盘缓存恒被判为结构异常、
+#     永远 MISS、每次冷启动都重解析整表（进程内 memo 绕过校验，故不易察觉；优化路线里
+#     "冷启动 0.025s/13.6×" 是 memo 的数字，不是真冷启动）。现在行宽收敛成一处常量
+#     `ENTRY_ROW_WIDTH`，序列化与校验共用它，杜绝再次漂移。
+# v6：**解析行为变更**（不是结构变更）也必须 bump —— 这是本次踩坑的根因：
+#     R-66 期间 `_detect_course_col` 先从"模糊子串"改成"精确别名匹配"（防「课程类别」
+#     分类码被误当课程名），但当时没 bump 版本 ⇒ 模糊时代写下的 v5 磁盘缓存
+#     （433 条 course=C/B/普物3）签名（path/mtime/size/v）全部仍"有效"而被命中，
+#     表现为 test_real_table_baseline 莫名红（distinct_courses==3），
+#     隔离实验（PARSE_CACHE=0）却全绿。v5 从未发布、只是本地中间态产物，
+#     统一作废即可。教训：签名里的 v 必须跟随**任何**解析逻辑变化，不止结构变化。
+CACHE_VERSION = 6
+
+# ScheduleEntry 序列化后的字段数（entries_to_rows 产出 / _validate 校验 / ScheduleEntry(*row) 反序列化
+# 三处必须一致）。字段顺序即 ScheduleEntry.__init__ 的位置参数顺序：
+#   week, weekday, time_slot, class_name, group, experiment, room, teacher, time_raw, blocked, course
+ENTRY_ROW_WIDTH = 11
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
 _DEFAULT_DIR = _APP_DIR / "data" / "cache"
@@ -94,7 +112,7 @@ def _validate(payload: Any, sig: Dict[str, Any]) -> bool:
     if not isinstance(entries, list):
         return False
     for row in entries:
-        if not isinstance(row, list) or len(row) != 8:
+        if not isinstance(row, list) or len(row) != ENTRY_ROW_WIDTH:
             return False
         if not isinstance(row[0], int):
             return False
@@ -180,11 +198,15 @@ def reset_memo() -> None:
 def entries_to_rows(entries: List[Any]) -> List[List[Any]]:
     """ScheduleEntry 列表 → 可 JSON 化的行列表（字段顺序即 ScheduleEntry 构造顺序）。
 
-    末尾两项 `time_raw` / `blocked` 是 v3 新增：跨节次记录的"原表写法"和
-    "真实占住哪几个节次"必须一起落盘，否则缓存命中时判占用会退回单标签。
+    末尾三项 `time_raw` / `blocked`（v3）/ `course`（v5）：跨节次记录的"原表写法"和
+    "真实占住哪几个节次"、以及"源表自带的显式课程"都必须一起落盘，否则缓存命中时
+    判占用会退回单标签、课程归属会丢失显式外键。
+    ⚠️ 字段数必须 == ENTRY_ROW_WIDTH，且顺序与 ScheduleEntry.__init__ 位置参数一致
+    （反序列化是 `ScheduleEntry(*row)`）—— 二者由 test_parse_cache 的行宽用例锁死。
     """
     return [
         [e.week, e.weekday, e.time_slot, e.class_name, e.group, e.experiment, e.room, e.teacher,
-         getattr(e, "time_raw", "") or "", list(getattr(e, "blocked", None) or [e.time_slot])]
+         getattr(e, "time_raw", "") or "", list(getattr(e, "blocked", None) or [e.time_slot]),
+         getattr(e, "course", "") or ""]
         for e in entries
     ]

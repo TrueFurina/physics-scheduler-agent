@@ -304,7 +304,7 @@ class AutoScheduler:
         # 固定住已求得的最大数量 K，再最小化"单周任务数"的上界 z。
         chosen: Dict[int, Tuple] = {}
         if ok and x:
-            total_placed = int(round(solver.ObjectiveValue()))
+            total_placed = round(solver.ObjectiveValue())
             if total_placed:
                 model.Add(sum(x.values()) == total_placed)
                 z = model.NewIntVar(0, total_placed, "max_week_load")

@@ -19,7 +19,16 @@ SCHEDULE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__f
 
 @pytest.fixture(scope="module")
 def agent():
-    """加载真实实验安排表，构建调课智能体"""
+    """加载真实实验安排表，构建调课智能体
+
+    真实表被 .gitignore 排除（"kept local"），干净检出 / CI / 评审方机器上
+    本来就没有它 —— 这种环境的正确表现是 **skip 而不是 ERROR**
+    （2026-10-24 交付评审 P0-3：原先模块级直接读文件，13 个用例在收集阶段
+    全部 FileNotFoundError，干净检出跑测试 = 红，与 README 的全绿承诺不符）。
+    与 test_conflict_grading.py / test_auto_schedule.py 的守卫写法保持一致。
+    """
+    if not os.path.exists(SCHEDULE_PATH):
+        pytest.skip("仓库根没有 schedule.xlsx（干净检出的预期表现：跳过而非报错）")
     db = ScheduleDatabase()
     db.load_from_excel(SCHEDULE_PATH)
     return RescheduleAgent(db)

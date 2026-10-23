@@ -131,7 +131,7 @@ def load_rows() -> Tuple[List[Dict], List[Dict]]:
     ws = wb[SHEET]
     rows, unknown = [], []
     for r in ws.iter_rows(min_row=3, values_only=True):
-        week, weekday, ts, cls, group, exp, room, teacher = r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]
+        week, weekday, ts, cls, _group, exp, room, teacher = r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]
         if not isinstance(week, (int, float)) or not weekday or not cls:
             continue
         raw = str(ts).strip() if ts else ""

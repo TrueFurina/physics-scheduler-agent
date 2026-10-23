@@ -35,9 +35,7 @@
 import argparse
 import io
 import json
-import os
 import sys
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -320,7 +318,7 @@ def main() -> int:
         rep.skip("T3 确认上传后进待排任务",
                  f"服务器上已有 {base_tasks} 条主数据任务清单，跳过写入部分以免覆盖")
     else:
-        code, up = _post_file("/upload-master", task_content, token)
+        code, _up = _post_file("/upload-master", task_content, token)
         st2 = master_status()
         rep.add(code == 200 and st2["master_tasks"] == 2,
                 "T3 确认上传后进入待排任务", f"HTTP {code} master_tasks={st2['master_tasks']}")

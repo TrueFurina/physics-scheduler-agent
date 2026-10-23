@@ -415,7 +415,7 @@ class ParallelScheduler:
                              for te in teachers}
 
             # 同组同周最多一个实验（真实节奏：每组每周做一个实验）
-            for g, idxs in group_units.items():
+            for _g, idxs in group_units.items():
                 if len(idxs) > 1:
                     for w in range(n_w):
                         model.Add(sum(x[(i, w, t, r)] for i in idxs
@@ -429,12 +429,12 @@ class ParallelScheduler:
                     for r in range(n_r):
                         model.Add(sum(x[(i, w, t, r)] for i in range(n_u)) <= 1)
                     # 同组同时段互斥
-                    for g, idxs in group_units.items():
+                    for _g, idxs in group_units.items():
                         if len(idxs) > 1:
                             model.Add(sum(x[(i, w, t, r)] for i in idxs
                                           for r in range(n_r)) <= 1)
                     # 同教师同时段互斥
-                    for te, idxs in teacher_units.items():
+                    for _te, idxs in teacher_units.items():
                         model.Add(sum(x[(i, w, t, r)] for i in idxs
                                       for r in range(n_r)) <= 1)
                     # 其他课程占用 → 禁用

@@ -13,8 +13,6 @@
 7. 采纳/撤销需管理员；预览/状态免鉴权（教秘主路径）。
 """
 
-import asyncio
-import json
 import os
 import sys
 
@@ -319,7 +317,7 @@ def test_undo_restores_before_snapshot(env):
 
 def test_undo_counts_post_landing_moves(env):
     """落地之后生效的调课会随快照回滚 —— 必须计数报出，不静默吞。"""
-    db, client, _ = env
+    _db, client, _ = env
     client.post("/api/reschedule/parallel/land",
                 json={"schedule": _plan_a()}, headers=_admin())
     # 落地后批一条调课：把已落地的 项目B（W2 周二 567 A412）挪到第 5 周
@@ -407,7 +405,7 @@ def test_second_landing_diffs_against_first(env):
 
 def test_upload_discards_landed_plan(env, monkeypatch, tmp_path):
     """换了安排表，旧表上的落地方案必须作废（方案里的单元在新表可能不存在）。"""
-    db, client, _ = env
+    _db, client, _ = env
     client.post("/api/reschedule/parallel/land",
                 json={"schedule": _plan_a()}, headers=_admin())
     monkeypatch.setattr(api, "_DATA_DIR", str(tmp_path / "uploads"))

@@ -26,9 +26,8 @@
 """
 
 import json
-import os
 import sqlite3
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from app.master_data import is_schedulable_project
 from app.utils.excel_parser import PendingTask, ScheduleEntry
@@ -233,7 +232,8 @@ def snapshot(db) -> dict:
                      "class_name": e.class_name, "group": e.group,
                      "experiment": e.experiment, "room": e.room, "teacher": e.teacher,
                      "time_raw": getattr(e, "time_raw", "") or "",
-                     "blocked": list(getattr(e, "blocked", None) or [e.time_slot])}
+                     "blocked": list(getattr(e, "blocked", None) or [e.time_slot]),
+                     "course": getattr(e, "course", "") or ""}
                     for e in db.entries],
         "pending": [{"class_name": t.class_name, "experiment": t.experiment,
                      "group": t.group, "teacher": t.teacher, "room": t.room,
@@ -253,6 +253,7 @@ def restore(db, snap: dict) -> None:
         experiment=r.get("experiment") or "", room=r.get("room") or "",
         teacher=r.get("teacher") or "", time_raw=r.get("time_raw") or "",
         blocked=list(r.get("blocked") or [r["time_slot"]]),
+        course=r.get("course") or "",
     ) for r in snap.get("entries") or []]
     db.pending = [PendingTask(
         class_name=p.get("class_name") or "", experiment=p.get("experiment") or "",

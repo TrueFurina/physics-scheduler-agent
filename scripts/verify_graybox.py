@@ -29,9 +29,9 @@ import sys
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import audit_conflicts as ac  # noqa: E402  （独立解析器，见其文件头说明）
+import audit_conflicts as ac
 
-import openpyxl  # noqa: E402
+import openpyxl
 
 SITE = "http://127.0.0.1:8023"
 GRAYBOX_CLASS = "2025级灰箱试验班"

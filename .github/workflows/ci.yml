@@ -1,0 +1,83 @@
+# CI（2026-10-24 交付评审 P1-4：入库 ruff 配置与 CI）
+#
+# 为什么有这份文件：仓库原先没有 CI，质量门只存在于作者本地（.ruff_cache
+# 有痕迹、规则却没进版本库）⇒ "按文档从零安装"的贡献者无法复现同一个门。
+# 本工作流把门禁固化成两个 job：
+#   backend  —— py3.12 + requirements(+dev) → ruff 门 → pytest
+#   frontend —— node 22 + npm ci → tsc -b && vitest run
+#
+# 与本地的一致性约定（改了 CI 行为必须同步改文档，反之亦然）：
+#   * ruff 规则唯一来源是仓库根 ruff.toml（含逐条 ignore 理由），本文件不重复配置
+#   * pytest 从 backend/ 目录跑；OPENBLAS_NUM_THREADS=1 是 CP-SAT/numpy 在
+#     Linux runner 上的既定环境（本地 Windows 同约定，见 README 测试节）
+#   * 干净检出不含 schedule.xlsx（.gitignore 第 35 行）⇒ 真实表用例 skip、
+#     其余全过：CI 期望形态是「passed + skipped，零 failed」
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (ruff + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Import smoke test (python-multipart 在场)
+        # P0-1 回归：缺 python-multipart 时 import app.main 直接 RuntimeError，
+        # 服务起不来。安装步漏依赖时在这里炸，而不是等到跑测试才莫名红一片。
+        # 数 OpenAPI 路径而非 app.routes：本版本 FastAPI 的 include_router 在
+        # app.routes 里是懒加载对象（实测只有 8 条），openapi 路径数才是真实端点面。
+        run: |
+          python -c "import sys; sys.path.insert(0, 'backend'); from app.main import app; n = len(app.openapi()['paths']); assert n >= 40, f'routes dropped: {n}'; print(f'import smoke OK: {n} endpoints')"
+
+      - name: Ruff lint gate
+        run: ruff check --config ruff.toml .
+
+      - name: Pytest
+        working-directory: backend
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: frontend (tsc + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type check + unit tests
+        working-directory: frontend
+        run: npm run verify

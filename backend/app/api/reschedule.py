@@ -4,12 +4,13 @@ import os
 import io
 import json
 import re
+import sqlite3
 import threading
 from datetime import datetime
 from collections import Counter
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -48,6 +49,37 @@ router = APIRouter()
 # 阈值刻意放宽，真人演示碰不到，脚本刷量会立刻 429。
 # ---------------------------------------------------------------------------
 _ADMIN_ONLY = [Depends(require_admin)]
+
+
+# ---------------------------------------------------------------------------
+# 整表读取/导出端点的免鉴权开关（2026-10-24 交付评审 P1-2）
+#
+# 背景：评审方实测 48 个端点里 25 个免鉴权，其中 6 个能匿名整表拉走
+# （433 条真实排课 + 13 位真实教师姓名）：四个 /export/*、/auto-schedule/export、
+# /parallel/land/preview。"教秘演示主路径免登录"是已文档化的产品取舍
+# （docs/安全风险清单 门禁边界一节），但**匿名批量下载整表**超出了演示的
+# 合理边界，且"客户以为有鉴权"的概率很高。
+#
+# 处置：默认行为不变（PUBLIC_READONLY 缺省 = 开，演示主路径照旧免登录）；
+# `PUBLIC_READONLY=0` 一键把这 6 个端点收紧为需管理员会话（改后重启生效）。
+# 这给验收方一个**不用改代码**的收紧路径，也让"接受风险"成为显式动作。
+# 锁死见 backend/tests/test_api_auth.py（默认放行 + 收紧即 401 + 带令牌照常）。
+# ---------------------------------------------------------------------------
+
+def _public_readonly_enabled() -> bool:
+    return os.getenv("PUBLIC_READONLY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+async def export_gate(request: Request):
+    """整表读取/导出门禁：默认放行；PUBLIC_READONLY=0 时要求管理员会话。
+
+    在**请求时**读开关（不是路由定义时）——否则测试里改环境变量不生效，
+    这个开关就没法被自动化验证。收紧态复用 require_admin 的候选令牌逻辑
+    （边缘代理注入 Authorization 的坑已在 security.py 处理）。
+    """
+    if _public_readonly_enabled():
+        return None
+    return await require_admin(request)
 
 # 全局排课数据库
 _db = ScheduleDatabase()
@@ -247,7 +279,7 @@ async def upload_schedule(file: UploadFile = File(...)):
             "load_report": rep,
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"文件解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"文件解析失败：{e!s}")
 
 
 @router.post("/upload-master", summary="上传教学大纲/主数据清单（从零排课的输入）",
@@ -268,7 +300,7 @@ async def upload_master(file: UploadFile = File(...)):
 
         tasks, report = parse_master_tasks(save_path)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
 
     _master_tasks.clear()
     _master_tasks.extend(tasks)
@@ -480,7 +512,7 @@ async def master_import_preview(file: UploadFile = File(...)):
 
         report = preview_workbook(io.BytesIO(content))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"台账解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"台账解析失败：{e!s}")
     return {"success": True, "kind": "workbook", "data": report}
 
 
@@ -500,9 +532,9 @@ async def master_tasks_preview(file: UploadFile = File(...)):
 
         report = preview_master_tasks(io.BytesIO(content))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"清单解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
     return {"success": True, "kind": "tasks", "data": report}
 
 
@@ -530,14 +562,14 @@ async def master_import(file: UploadFile = File(...)):
 
         tables, report = parse_workbook(save_path)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"台账解析失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"台账解析失败：{e!s}")
 
     _ensure_loaded()
     _ensure_master_data()
     try:
         stats = apply_tables(_master_data, tables)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"台账写入失败：{str(e)}")
+        raise HTTPException(status_code=400, detail=f"台账写入失败：{e!s}")
     _persist_master_state()
 
     total = sum(s.get("rows", 0) for s in stats.values())
@@ -553,7 +585,7 @@ async def master_import(file: UploadFile = File(...)):
 
 
 @router.get("/export/master-workbook", summary="导出可编辑主数据台账（改完可导回）",
-            dependencies=[Depends(rate_limit("standard-export"))])
+            dependencies=[Depends(export_gate), Depends(rate_limit("standard-export"))])
 async def export_master_workbook():
     """五张实体表（课程/实验项目/教师/场地/班级）的可编辑台账，改完可导回。
 
@@ -1165,7 +1197,7 @@ def _land_plan_or_400(req: LandPlanRequest) -> List[dict]:
 
 
 @router.post("/parallel/land/preview", summary="落地预览：方案与当前安排表的差异（不写入）",
-             dependencies=[Depends(rate_limit("parallel-land"))])
+             dependencies=[Depends(export_gate), Depends(rate_limit("parallel-land"))])
 async def land_preview(req: LandPlanRequest):
     """差异预览：新增 / 调整 / 未覆盖 / 原样保留四类账 + 警告。绝不写入。"""
     _ensure_loaded()
@@ -1316,7 +1348,7 @@ def _course_gap_note(cov: dict) -> str:
 
 
 @router.get("/export/class-schedule", summary="导出班级课表（教务标准课表之一）",
-            dependencies=[Depends(rate_limit("standard-export"))])
+            dependencies=[Depends(export_gate), Depends(rate_limit("standard-export"))])
 async def export_class_schedule(class_name: Optional[str] = None):
     """按班级导出课表：每个班一个 sheet，行=该班全部实验安排（按周次/星期/节次排序）。
 
@@ -1383,7 +1415,7 @@ async def export_class_schedule(class_name: Optional[str] = None):
 
 
 @router.get("/export/room-schedule", summary="导出场地课表（教务标准课表之二）",
-            dependencies=[Depends(rate_limit("standard-export"))])
+            dependencies=[Depends(export_gate), Depends(rate_limit("standard-export"))])
 async def export_room_schedule(room: Optional[str] = None):
     """按场地导出课表：每间实验室一个 sheet，行=该场地的全部占用。
 
@@ -1418,7 +1450,7 @@ async def export_room_schedule(room: Optional[str] = None):
 
 
 @router.get("/export/master-data", summary="导出基础数据台账（数据库重构的起始材料）",
-            dependencies=[Depends(rate_limit("standard-export"))])
+            dependencies=[Depends(export_gate), Depends(rate_limit("standard-export"))])
 async def export_master_data():
     """把现有安排表**反推**成四张实体台账：实验项目 / 教师 / 场地 / 班级。
 
@@ -1542,7 +1574,6 @@ async def data_audit():
     """一键审计现有实验安排表：教室冲突 / 教师时间冲突 / 数据覆盖情况"""
     _ensure_loaded()
 
-    from collections import defaultdict
 
     weeks, teachers, rooms = set(), set(), set()
     missing_room = []                # 无场地条目：不能参与"同室"判定，但要作为数据缺口报出来
@@ -1930,7 +1961,7 @@ class AutoScheduleExportRequest(BaseModel):
 
 
 @router.post("/auto-schedule/export", summary="自动排课初稿导出 Excel（总表 + 每班一页）",
-             dependencies=[Depends(rate_limit("standard-export"))])
+             dependencies=[Depends(export_gate), Depends(rate_limit("standard-export"))])
 async def auto_schedule_export(req: AutoScheduleExportRequest):
     """把一键自动排课的初稿导出成可发班级群的 Excel。
 
@@ -2074,8 +2105,6 @@ class ApplyMoveRequest(BaseModel):
 
 
 # SQLite 存储（重启不丢数据）
-import sqlite3
-
 _DB_PATH = os.path.join(_APP_DIR, "data", "requests.db")
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
 
@@ -2213,11 +2242,11 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
             return False
         if parsed["weekday"] and e.weekday != parsed["weekday"]:
             return False
-        if parsed["time_slot"]:
-            # 按**真实占住的节次**比，不是主标签相等：`14:00-17:00` 主标签 567，
-            # 但它同时占着 678 的前 1 小时 15 分，卡片上回显的就是 "14:00-17:00"。
-            if parsed["time_slot"] not in set(getattr(e, "blocked", None) or [e.time_slot]):
-                return False
+        # 按**真实占住的节次**比，不是主标签相等：`14:00-17:00` 主标签 567，
+        # 但它同时占着 678 的前 1 小时 15 分，卡片上回显的就是 "14:00-17:00"。
+        if parsed["time_slot"] and \
+                parsed["time_slot"] not in set(getattr(e, "blocked", None) or [e.time_slot]):
+            return False
         if parsed["room"] and e.room != parsed["room"]:
             return False
         if class_name:

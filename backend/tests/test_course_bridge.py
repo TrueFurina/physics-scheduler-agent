@@ -23,6 +23,14 @@
    所以 `core_conflict_count` **不得**把它重复计一遍。用例 7 锁死。
 4. 主数据未初始化时课程全部回落默认 ⇒ 跨课程恒 0 处。那是"没查"，不是"没问题"，
    必须由 `course_coverage.master_ready=False` 说出来（R-35 同族错误）。用例 5。
+
+R-66 更新（显式课程外键）
+--------------------------
+`ScheduleEntry` 现在**有** course 字段：源安排表自带课程列时逐行落入，成为权威归属；
+`resolve_course` 优先用它，没有才回落主数据 `experiment.course` 反推。这修掉了
+"主数据 experiments 以项目名为 key、同名项目跨两门课会塌缩"的歧义（见下方
+`test_same_project_two_courses_disambiguated_by_entry_course`）。真实表无课程列 ⇒
+全部回落反推，行为与 R-57 一致（向后兼容）。
 """
 
 import asyncio
@@ -310,3 +318,107 @@ def test_real_table_baseline():
     blocks = group_by_course(
         [e for e in d.entries if e.class_name == d.entries[0].class_name], md)
     assert len(blocks) == 1
+
+
+# ---------------------------------------------------------------- 8. R-66 显式课程外键
+
+def test_resolve_course_prefers_explicit_entry_course():
+    """条目自带 course（源表课程列）时**优先**用它，不靠项目名反推。
+
+    缺陷版（resolve_course 忽略 entry.course）下会回落到主数据反推的默认课 ⇒ 本用例红。
+    """
+    e = _e(1, "周二", "567", "C1", "C1_1", "扭摆法")
+    e.course = "光学实验"                       # 源表显式给出
+    courses = {"扭摆法": DEFAULT_COURSE}        # 主数据反推会给默认课
+    assert resolve_course(e, courses) == "光学实验"
+    # 主数据整个没初始化时，显式 course 仍然权威
+    assert resolve_course(e, None) == "光学实验"
+
+
+def test_resolve_course_falls_back_to_master_when_entry_course_empty():
+    """条目无显式 course（真实表无课程列）→ 回落主数据反推（向后兼容）。"""
+    e = _e(1, "周二", "567", "C1", "C1_1", "扭摆法")   # course 默认 ""
+    assert e.course == ""
+    assert resolve_course(e, {"扭摆法": "大学物理实验A"}) == "大学物理实验A"
+
+
+def test_same_project_two_courses_disambiguated_by_entry_course():
+    """同名项目分属两门课：主数据 name-keyed 会塌缩，靠 entry.course 区分（R-66 核心价值）。
+
+    缺陷版（resolve_course 忽略 entry.course）下两条都反推到同一门默认课 ⇒
+    by_course 只有 1 个 key ⇒ 不报跨课程撞车 ⇒ 本用例红。
+    """
+    e1 = _e(1, "周二", "567", "C1", "C1_1", "设计性实验")
+    e2 = _e(1, "周二", "567", "C1", "C1_1", "设计性实验")
+    e1.course = "物理实验A"
+    e2.course = "物理实验B"
+    md = MasterData().build_from_entries([e1, e2])
+    # 主数据里"设计性实验"只有一门课（name-keyed 塌缩）—— 正是歧义来源
+    assert md.experiments["设计性实验"]["course"] == DEFAULT_COURSE
+
+    res = scan_cross_course([e1, e2], md)
+    assert len(res["conflicts"]) == 1, res["conflicts"]
+    assert set(res["conflicts"][0]["involved"]) == {"物理实验A", "物理实验B"}
+
+
+def test_course_coverage_counts_explicit_in_entry():
+    """coverage 要能区分"源表显式给课程"与"反推"——显式最可信，单独计数。"""
+    e1 = _e(1, "周二", "567", "C1", "C1_1", "扭摆法")
+    e1.course = "光学实验"
+    e2 = _e(1, "周三", "567", "C1", "C1_1", "声速测量")   # 无显式 course
+    md = _md({"扭摆法": DEFAULT_COURSE, "声速测量": DEFAULT_COURSE})
+    cov = course_coverage([e1, e2], md)
+    assert cov["explicit_in_entry"] == 1, cov
+    assert cov["total_entries"] == 2
+
+
+def test_parser_reads_course_column_when_present(tmp_path, monkeypatch):
+    """源安排表**自带课程列**时，按表头别名逐行落进 ScheduleEntry.course（R-66 探测）。
+
+    课程列刻意放在第 9 列（索引 8，非固定列序）—— 验证靠表头别名而非列序。
+    """
+    import openpyxl
+    from app.utils import parse_cache
+    monkeypatch.setenv("PARSE_CACHE", "0")     # 隔离：不写默认缓存目录
+    parse_cache.reset_memo()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["周次", "星期", "时段", "班级", "组别", "实验项目", "场地", "教师", "课程"])
+    ws.append([None] * 9)                       # 第二行表头（解析从第 3 行读数据）
+    ws.append([1, "周二", "567", "C1", "g1", "扭摆法", "A504", "吴琳", "光学实验"])
+    ws.append([2, "周三", "678", "C1", "g1", "声速测量", "A516", "陈老师", "声学实验"])
+    p = tmp_path / "sched_with_course.xlsx"
+    wb.save(str(p))
+
+    db = ScheduleDatabase()
+    db.load_from_excel(str(p))
+    assert len(db.entries) == 2
+    assert {e.course for e in db.entries} == {"光学实验", "声学实验"}
+    # 显式 course 无需主数据即权威
+    assert resolve_course(db.entries[0], None) in {"光学实验", "声学实验"}
+
+
+def test_parser_without_course_column_leaves_entry_course_empty(tmp_path, monkeypatch):
+    """源表**没有**课程列（真实表情形）→ 全部条目 course 留空，回落反推（向后兼容）。"""
+    import openpyxl
+    from app.utils import parse_cache
+    monkeypatch.setenv("PARSE_CACHE", "0")
+    parse_cache.reset_memo()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["周次", "星期", "时段", "班级", "组别", "实验项目", "场地", "教师"])
+    ws.append([None] * 8)
+    ws.append([1, "周二", "567", "C1", "g1", "扭摆法", "A504", "吴琳"])
+    p = tmp_path / "sched_no_course.xlsx"
+    wb.save(str(p))
+
+    db = ScheduleDatabase()
+    db.load_from_excel(str(p))
+    assert len(db.entries) == 1
+    assert db.entries[0].course == ""
+    # 回落主数据反推
+    assert resolve_course(db.entries[0], {"扭摆法": "大学物理实验A"}) == "大学物理实验A"

@@ -109,7 +109,7 @@ def test_real_table_capacity_covers_weekends(monkeypatch):
     data = _stats()
     assert data["schedulable_days"] == 7, f"真实表应覆盖 7 天，实际 {data['schedulable_days']}"
     assert data["schedulable_slots"] == 4, f"真实表应有 4 个时段，实际 {data['schedulable_slots']}"
-    assert "16 周 × 7 天 × 4 时段 = 448 格/间" == data["capacity_basis"]
+    assert data["capacity_basis"] == "16 周 × 7 天 × 4 时段 = 448 格/间"
 
     # 占用格数按 blocked 计（跨节次算 2 格）；avg 是**各教室利用率的均值**，不是总格数/总容量
     per_room = {}
@@ -118,7 +118,6 @@ def test_real_table_capacity_covers_weekends(monkeypatch):
             per_room[e.room] = per_room.get(e.room, 0) + len(
                 getattr(e, "blocked", None) or [e.time_slot]
             )
-    cells = sum(per_room.values())
     expect_new = sum(c / 448 * 100 for c in per_room.values()) / len(per_room)
     old_style = sum(c / (16 * 5 * 3) * 100 for c in per_room.values()) / len(per_room)
     assert data["avg_room_utilization"] < old_style, \

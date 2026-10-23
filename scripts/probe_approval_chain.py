@@ -88,9 +88,9 @@ def find_movable_week(site: str, teacher: str, course: dict):
     weekday = m.group(1) if m else ""
     room = course.get("room", "")
     for wk in (2, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16):
-        code, resp = http("POST", f"{site}/api/reschedule/chat",
-                          {"message": f"我是{teacher}，把{course['course_name']}调到第{wk}周",
-                           "fast": True})
+        _code, resp = http("POST", f"{site}/api/reschedule/chat",
+                           {"message": f"我是{teacher}，把{course['course_name']}调到第{wk}周",
+                            "fast": True})
         data = (resp or {}).get("data") or {}
         for s in data.get("available_slots") or []:
             if s.get("weekday") == weekday and s.get("room") == room:

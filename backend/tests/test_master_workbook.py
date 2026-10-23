@@ -248,7 +248,7 @@ def test_real_schedule_roundtrip_does_not_shatter_class_names(tmp_path):
     p = tmp_path / "real.xlsx"
     build_workbook(md).save(p)
     md2 = MasterData()
-    tables, report = parse_workbook(p)
+    tables, _report = parse_workbook(p)
     apply_tables(md2, tables)
 
     assert len(md2.classes) == len(md.classes) == 17, (

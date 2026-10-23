@@ -20,16 +20,14 @@
 前置：后端已启动且 load-default 完成。退出码 0=全过，1=有核查不过。
 """
 
-import json
 import os
 import sys
 import tempfile
-import urllib.request
 
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from verify_master_roundtrip import _get, _post_file, _post_json  # noqa: E402
+from verify_master_roundtrip import _get, _post_file, _post_json
 
 SITE = "http://127.0.0.1:8023"  # 仅作默认值展示；实际目标由 base.API 控制
 

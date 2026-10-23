@@ -123,7 +123,7 @@ def main() -> int:
         token = login()
         _delete(f"/master/experiments/{urllib.parse.quote(NEW_PROJECT)}", token)
         _delete(f"/master/teachers/{urllib.parse.quote(NEW_TEACHER)}", token)
-        print(f"✅ 已删除测试实体；落盘文件请手动删除：backend/app/data/master_store.json")
+        print("✅ 已删除测试实体；落盘文件请手动删除：backend/app/data/master_store.json")
         if os.path.exists(MARKER):
             os.remove(MARKER)
         return 0
@@ -132,7 +132,8 @@ def main() -> int:
         if not os.path.exists(MARKER):
             print("❌ 没有找到上一次导入的标记文件，先跑一次不带参数的核查")
             return 1
-        m = json.load(open(MARKER, encoding="utf-8"))
+        with open(MARKER, encoding="utf-8") as f:
+            m = json.load(f)
         ov = overview()
         check(NEW_PROJECT in {e["name"] for e in ov["experiments"]},
               "R4 重启后导入的实验项目仍在", f"项目数 {len(ov['experiments'])}")
@@ -153,7 +154,8 @@ def main() -> int:
     with urllib.request.urlopen(req, timeout=120) as r:
         wb_bytes = r.read()
     tmp = os.path.join(tempfile.gettempdir(), "master_roundtrip.xlsx")
-    open(tmp, "wb").write(wb_bytes)
+    with open(tmp, "wb") as f:
+        f.write(wb_bytes)
 
     # ── 编辑：加一个新项目 + 改一间场地的容量 ──
     wb = openpyxl.load_workbook(tmp)
@@ -168,7 +170,9 @@ def main() -> int:
     print(f"编辑：新增项目「{NEW_PROJECT}」（适用班级 {first_cls}），{CAPACITY_ROOM} 容量 → {CAPACITY_VALUE}")
 
     # ── 导回 ──
-    res = _post_file("/master/import", "master.xlsx", open(tmp, "rb").read(), token)
+    with open(tmp, "rb") as f:
+        master_bytes = f.read()
+    res = _post_file("/master/import", "master.xlsx", master_bytes, token)
     after = res["data"]
     print(f"导入回执：{res['message']}")
     for w in (res.get("report") or {}).get("warnings") or []:
@@ -187,9 +191,10 @@ def main() -> int:
           "R1 项目数只多出新增的那一个",
           f"{counts(base)['experiments']} → {counts(after)['experiments']}")
 
-    json.dump({"counts": counts(after), "capacity_room": CAPACITY_ROOM,
-               "capacity_value": CAPACITY_VALUE},
-              open(MARKER, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(MARKER, "w", encoding="utf-8") as f:
+        json.dump({"counts": counts(after), "capacity_room": CAPACITY_ROOM,
+                   "capacity_value": CAPACITY_VALUE},
+                  f, ensure_ascii=False)
 
     print("\n" + ("Go —— 台账可导回。下一步：重启后端后跑 "
                   "`--after-restart` 验证持久化，再跑 `--cleanup` 清理"

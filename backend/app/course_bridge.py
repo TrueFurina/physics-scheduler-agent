@@ -68,9 +68,19 @@ def project_courses(master) -> Dict[str, str]:
 def resolve_course(entry, courses: Optional[Dict[str, str]] = None) -> str:
     """一条记录属于哪门课。
 
-    查不到（主数据未初始化 / 项目不在主数据里）一律回落 `DEFAULT_COURSE` ——
-    宁可把它归到默认课，也不让一行记录变成"没有课程的幽灵行"被静默丢掉。
+    优先级（R-66 显式外键）：
+      ① 条目**自带** course（源安排表有课程列时解析而来）—— 权威、无歧义，直接用；
+      ② 否则按项目名查主数据 `experiment.course` 反推；
+      ③ 都查不到（主数据未初始化 / 项目不在主数据里）回落 `DEFAULT_COURSE` ——
+         宁可把它归到默认课，也不让一行记录变成"没有课程的幽灵行"被静默丢掉。
+
+    为什么 ① 优先：主数据 `experiments` 以**项目名**为 key、每个项目只有单一 course，
+    同名项目跨两门课时会在主数据里塌缩成一门。条目自带的 course 是逐行的事实，
+    不受这层塌缩影响 —— 这正是"显式外键"要解决的歧义。
     """
+    explicit = _norm(getattr(entry, "course", ""))
+    if explicit:
+        return explicit
     if not courses:
         return DEFAULT_COURSE
     return courses.get(_norm(getattr(entry, "experiment", "")), DEFAULT_COURSE)
@@ -83,6 +93,8 @@ def course_coverage(entries, master) -> Dict[str, int]:
     named = sum(1 for e in entries if _norm(getattr(e, "experiment", "")))
     known = sum(1 for e in entries
                 if _norm(getattr(e, "experiment", "")) in courses) if courses else 0
+    # 源表自带课程列、逐行显式归属的条数（R-66）：这部分不依赖项目名反推，最可信。
+    explicit_in_entry = sum(1 for e in entries if _norm(getattr(e, "course", "")))
     explicit = 0
     for e in entries:
         c = resolve_course(e, courses)
@@ -92,7 +104,8 @@ def course_coverage(entries, master) -> Dict[str, int]:
         "total_entries": total,
         "named_project": named,
         "project_in_master": known,
-        "explicit_course": explicit,          # 归到非默认课程的条数
+        "explicit_in_entry": explicit_in_entry,  # 源表课程列直接给出的条数（最可信）
+        "explicit_course": explicit,          # 归到非默认课程的条数（含显式 + 反推到的非默认）
         "fallback_default": total - explicit,  # 回落默认课程的条数
         "master_ready": bool(courses),        # False ⇒ 主数据没初始化，跨课程根本没查
         "distinct_courses": len(set(resolve_course(e, courses) for e in entries)),

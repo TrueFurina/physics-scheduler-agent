@@ -21,8 +21,8 @@ import sys
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import audit_conflicts as ac  # noqa: E402
-import verify_graybox as vg    # noqa: E402
+import audit_conflicts as ac
+import verify_graybox as vg
 
 SITE = "http://127.0.0.1:8023"
 

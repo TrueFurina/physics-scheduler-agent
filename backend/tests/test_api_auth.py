@@ -124,6 +124,54 @@ def test_health_stays_open():
 
 
 # ---------------------------------------------------------------------------
+# 2c. 整表导出端点的 PUBLIC_READONLY 一键收紧（2026-10-24 交付评审 P1-2）
+#
+# 这 6 个端点默认免鉴权（教秘演示主路径，已文档化为客户接受的风险），
+# 但匿名即可整表拉走 433 条真实排课。开关把"接受风险"变成显式动作：
+# PUBLIC_READONLY=0 时它们要求管理员会话，其余演示端点不受影响。
+# ---------------------------------------------------------------------------
+
+# (method, path, body)：四个导出 + 落地预览 + 自动排课初稿导出
+_FULL_TABLE_EXPORTS = [
+    ("GET", "/api/reschedule/export/class-schedule", None),
+    ("GET", "/api/reschedule/export/room-schedule", None),
+    ("GET", "/api/reschedule/export/master-workbook", None),
+    ("GET", "/api/reschedule/export/master-data", None),
+    ("POST", "/api/reschedule/parallel/land/preview", {"schedule": []}),
+    ("POST", "/api/reschedule/auto-schedule/export", {"schedule": []}),
+]
+
+
+@pytest.mark.parametrize("method,path,body", _FULL_TABLE_EXPORTS)
+def test_full_table_exports_stay_open_by_default(method, path, body):
+    """默认形态（PUBLIC_READONLY 缺省）：不被 401 挡住——演示主路径不变。"""
+    r = client.request(method, path, json=body)
+    assert r.status_code != 401, f"{path} 默认形态就被门禁挡住（开关Regression）"
+
+
+@pytest.mark.parametrize("method,path,body", _FULL_TABLE_EXPORTS)
+def test_full_table_exports_require_admin_when_tightened(method, path, body, monkeypatch):
+    """PUBLIC_READONLY=0：匿名 401（门禁先于请求体校验）；带管理员令牌放行。"""
+    monkeypatch.setenv("PUBLIC_READONLY", "0")
+
+    anon = client.request(method, path, json=body)
+    assert anon.status_code == 401, f"{path} 收紧后匿名竟可访问（{anon.status_code}）"
+    assert "管理员" in anon.json().get("detail", "")
+
+    authed = client.request(method, path, json=body, headers=_admin_headers())
+    assert authed.status_code != 401, f"{path} 收紧后管理员也被挡住"
+
+
+def test_tightening_does_not_touch_other_demo_paths(monkeypatch):
+    """收紧只影响那 6 个整表端点；/status、/teachers、/stats 等主路径照旧。"""
+    monkeypatch.setenv("PUBLIC_READONLY", "0")
+    for path in ("/api/reschedule/status", "/api/reschedule/stats",
+                 "/api/reschedule/data-audit"):
+        r = client.get(path)
+        assert r.status_code != 401, f"{path} 被导出开关误伤"
+
+
+# ---------------------------------------------------------------------------
 # 3. 管理员登录
 # ---------------------------------------------------------------------------
 

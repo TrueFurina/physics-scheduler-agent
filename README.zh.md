@@ -82,7 +82,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 371 个测试 + 前端 85 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 399 个测试 + 前端 85 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
@@ -101,7 +101,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # 调课智能体、LLM 意图解析
 │   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel 解析器 / 时间模型
-│   └── tests/                      # 371 个 pytest 测试
+│   └── tests/                      # 399 个 pytest 测试
 ├── frontend/
 │   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
 ├── scripts/                        # 独立审计器 + 发布预检
@@ -142,9 +142,22 @@ physics-scheduler-agent/
 ## 测试
 
 ```bash
+pip install -r requirements.txt -r requirements-dev.txt   # pytest 在 requirements-dev 里
 cd backend
 python -m pytest tests/ -v
 ```
+
+Ruff 质量门（与 CI 同一把尺；`ruff.toml` 里每条 ignore 都附了理由）：
+
+```bash
+ruff check --config ruff.toml .
+```
+
+CI（`.github/workflows/ci.yml`）在每次 push/PR 跑两个 job：**后端**（py3.12 —— ruff → 导入冒烟 → pytest）和**前端**（node 22 —— `npm run verify` ＝ tsc + vitest）。干净检出（无 `schedule.xlsx`）时期望形态是"passed + skipped、零 failed"——真实表用例在设计上就skip。
+
+后端测试不需要联网、不需要 LLM 密钥（`conftest.py` 默认 `LLM_DISABLED=1` /
+`RATELIMIT_DISABLED=1`）。真实 `schedule.xlsx` 被 `.gitignore` 排除；没有它时
+真实表用例**跳过**（干净检出保持绿）而不是报错。
 
 ## 后续规划
 
@@ -152,9 +165,11 @@ python -m pytest tests/ -v
 - [x] 主数据增删改 + 持久化 + 台账 Excel 往返
 - [x] 并行批量排课 + 灰箱补全
 - [x] 班级课表跨课程合并（课程列 + 跨课程撞车标记）
+- [x] 全校一键排课（分片 CP-SAT，171/171 覆盖，初稿导出）
 - [x] 全校一键组级方案 + 方案落地为正式安排表（差异预览/采纳/撤销/重启重放）
 - [x] 排课结果可视化（周课表网格）
-- [ ] 数据上传向导（字段映射，适配不同学校）
+- [x] 数据导入向导（只读字段映射预览 → 管理员提交，预览与写库同一份解析代码）
+- [x] 课程→项目显式外键（源表带课程列时精确解析，解决同名项目跨课程歧义）
 - [ ] 多校数据隔离
 - [ ] 实验讲义 RAG 知识库
 
@@ -191,12 +206,12 @@ python run.py
 1. **沙箱不展开 `$PORT`**：`--port $PORT` 会拿到空值，报 `Option '--port' requires an argument`，发布失败（`SITES_START_FAILED`）。端口必须由进程自己读 —— 这就是仓库根 `run.py` 存在的原因，请勿改回 `--port $PORT`。
 2. **上传只排除 `node_modules` / `.git` / 构建产物，不排除 `.gitignore` 里的文件**：
    - 前端产物若留在 `dist/` 会被当构建产物**排除**，沙箱内就没有 `index.html`。故 `vite.config.ts` 设 `build.outDir: 'webui'`，`main.py` 的 `FRONTEND_DIST` 指向 `frontend/webui`。
-   - `.gitignore` 中的 `schedule.xlsx` **仍会被上传**，因此它**不能**作为默认数据源：默认一律走脱敏表 `schedule.demo.xlsx`；本地要看真实数据须显式 `SCHEDULE_PATH=schedule.xlsx`。
+   - `.gitignore` 中的 `schedule.xlsx` **仍会被上传**（其「教师联系表」携带 17 个真实手机号 —— 交付评审 P0-2；`scripts/preflight_release.py` 在它位于仓库根时会拦截发布）。它**就是**存在时的默认数据源 —— 产品决策（`docs/安全风险清单-公开链接数据暴露-20261015.md` R-09）：教秘演示必须呈现真实教师姓名。脱敏表 `schedule.demo.xlsx`（`教师A…`）只在真实表缺失时兜底。要换数据源用 `SCHEDULE_PATH=<路径>`。
 
 ### 数据与隐私
 
-- 默认数据源是脱敏表 `schedule.demo.xlsx`（由 `scripts/make_demo_schedule.py` 生成，教师为 `教师A…`，无手机号）。
-- 线上核验：`GET /api/reschedule/status` 返回的教师全为化名。
+- 默认数据源是存在时的**真实表** `schedule.xlsx`（产品决策 R-09：真实教师姓名是教秘演示的业务主体数据），仅在真实表缺失时兜底脱敏表 `schedule.demo.xlsx`（由 `scripts/make_demo_schedule.py` 生成，教师为 `教师A…`，无手机号）。因此线上显示的是真实教师姓名（如吴琳）——**这是预期行为，不是泄露**。教师联系方式（「教师联系表」的手机号/邮箱列）从不进入任何 API 响应，由 `backend/tests/test_privacy_export.py` 锁死。
+- 线上核验：`GET /api/reschedule/status` 返回的教师为真实姓名（R-09 产品决策）；若看到化名 `教师A…`，说明回退到了脱敏表（真实表缺失）。
 - 云端能力（登录 / 数据 / 大模型）受**服务端 Origin 精确匹配**约束：只有发布域名被放行，其他来源 403。故本地 `localhost` 只能验证公网调用，微信登录须在线上域名下验证。
 
 > 重新发布须由用户明确要求「发布 / 上线」（发布同意不跨轮次延续）。

@@ -1,6 +1,5 @@
 """调课智能体 - 处理教师调课请求，筛选空闲时段"""
 
-import json
 from datetime import date, timedelta
 from typing import List, Dict, Optional, Tuple
 from app.utils.excel_parser import ScheduleDatabase
@@ -557,7 +556,7 @@ class RescheduleAgent:
                         })
 
         if ai_plans:
-            summary_lines.append(f"\n\n🤖 推荐候选方案：")
+            summary_lines.append("\n\n🤖 推荐候选方案：")
             for i, p in enumerate(ai_plans[:3], 1):
                 summary_lines.append(
                     f"  {i}. {p['weekday']} {p['time_slot']} · {p['room']} — {p.get('reason', '')}"

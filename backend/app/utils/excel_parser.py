@@ -1,8 +1,7 @@
 """解析实验安排表 Excel，构建排课占用数据"""
 
 import openpyxl
-from typing import List, Dict, Optional
-from datetime import datetime
+from typing import List, Dict, Optional, Tuple
 
 from app.utils import parse_cache
 from app.utils.time_model import span_labels, primary_label, clock_text
@@ -149,6 +148,32 @@ def _norm_header(cell) -> str:
     return str(cell or "").strip().replace(" ", "").replace("：", "").replace(":", "")
 
 
+def _detect_course_col(sheet) -> Optional[int]:
+    """在安排表前两行表头里找「课程」列的索引；找不到返回 None。
+
+    为什么需要（R-66 显式课程外键）：真实安排表是**固定列序**（周/星期/时段/班级/
+    组/项目/场地/教师），没有课程列 —— 课程只能靠项目名查主数据反推，同名项目跨
+    两门课时会歧义。若某校的安排表**自带**课程列，这里就把它认出来，逐行落进
+    `ScheduleEntry.course`，成为权威归属（resolve_course 优先用它，不再反推）。
+
+    ⚠️ **精确匹配别名，不做模糊子串**（与 parse_master_tasks 的宽松匹配刻意不同）：
+    真实表第 8 列叫「课程类别」（值 C/B/普物3，是课程**分类码**而非课程名），
+    模糊匹配 `课程 in 课程类别` 会把它误认成课程列 ⇒ 433 条全落密码值、锁定基线
+    distinct_courses 从 1 变 3、导出课程列显示"C"。是否采用「课程类别」是**产品决策**
+    （需码→名映射），不能被一次表头匹配悄悄改掉。故这里只认表头**恰好等于**课程名别名。
+    """
+    aliases = MASTER_FIELDS["course"]
+    for r in (1, 2):
+        try:
+            cells = next(sheet.iter_rows(min_row=r, max_row=r, values_only=True))
+        except StopIteration:
+            continue
+        for i, c in enumerate(cells):
+            if _norm_header(c) in aliases:
+                return i
+    return None
+
+
 def parse_master_tasks(filepath: str):
     """解析教学大纲/主数据清单 → (PendingTask 列表, 解析报告)。
 
@@ -193,21 +218,24 @@ def parse_master_tasks(filepath: str):
             f"（当前识别到的列：{sorted(set(mapping)) or '无'}）"
         )
 
+    # cell 定义在循环外、显式收 row 参数：不在循环内闭包循环变量
+    # （B023 延迟绑定模式——虽然原写法是同步调用不会真踩坑，但这个模式
+    # 一旦被后人改成延迟调用就是隐形 bug，趁 lint 门固化的机会修掉）
+    def cell(row, field):
+        i = mapping.get(field)
+        return row[i] if i is not None and i < len(row) else None
+
     tasks, blanks = [], 0
     for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-        def cell(field):
-            i = mapping.get(field)
-            return row[i] if i is not None and i < len(row) else None
-
-        cls = str(cell("class_name") or "").strip()
-        exp = str(cell("experiment") or "").strip()
+        cls = str(cell(row, "class_name") or "").strip()
+        exp = str(cell(row, "experiment") or "").strip()
         if not cls and not exp:
             blanks += 1
             continue
         if not cls or not exp:
             blanks += 1
             continue
-        week = cell("week")
+        week = cell(row, "week")
         try:
             week = int(week) if week not in (None, "") else None
         except (TypeError, ValueError):
@@ -215,12 +243,12 @@ def parse_master_tasks(filepath: str):
         tasks.append(PendingTask(
             class_name=cls,
             experiment=exp,
-            group=str(cell("group") or "1组").strip(),
-            teacher=str(cell("teacher") or "").strip(),
-            room=str(cell("room") or "").strip(),
-            course=str(cell("course") or "").strip(),
+            group=str(cell(row, "group") or "1组").strip(),
+            teacher=str(cell(row, "teacher") or "").strip(),
+            room=str(cell(row, "room") or "").strip(),
+            course=str(cell(row, "course") or "").strip(),
             week=week,
-            weekday=str(cell("weekday") or "").strip(),
+            weekday=str(cell(row, "weekday") or "").strip(),
             source="master",
         ))
     claimed = set(mapping.values())
@@ -285,7 +313,8 @@ class ScheduleEntry:
     """
     def __init__(self, week: int, weekday: str, time_slot: str, class_name: str,
                  group: str, experiment: str, room: str, teacher: str,
-                 time_raw: str = "", blocked: Optional[List[str]] = None):
+                 time_raw: str = "", blocked: Optional[List[str]] = None,
+                 course: str = ""):
         self.week = week
         self.weekday = weekday
         self.time_slot = time_slot
@@ -298,6 +327,11 @@ class ScheduleEntry:
         # 否则教秘看到自己的课被写成 13:30-15:45，会以为系统读错了。
         self.time_raw = time_raw or ""
         self.blocked = list(blocked) if blocked else [time_slot]
+        # 显式课程外键（R-66）：源安排表**有**课程列时直接落在这里，权威、无歧义；
+        # 没有时为空串，由 course_bridge.resolve_course 回落主数据 experiment.course 反推。
+        # 为什么不在解析时就用主数据物化：主数据可被 CRUD 改，物化会陈旧；
+        # 只有"源表自带"的课程才配当条目的显式属性。
+        self.course = course or ""
 
     def blocks(self, slot: str) -> bool:
         """这条记录是否占用 `slot` 这个节次。"""
@@ -416,9 +450,16 @@ class ScheduleDatabase:
         self.skipped = []
         self.pending = []
 
+        # 课程列（R-66 显式外键）：源表自带就认出来逐行落 course，没有则全程留空回落反推。
+        course_col = _detect_course_col(sheet)
+
         for row in sheet.iter_rows(min_row=3, values_only=True):
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
                 row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
+
+            course_str = ""
+            if course_col is not None and len(row) > course_col and row[course_col]:
+                course_str = str(row[course_col]).strip()
 
             class_str = str(class_name).strip() if class_name else ""
             exp_str = str(experiment).strip() if experiment else ""
@@ -434,7 +475,7 @@ class ScheduleDatabase:
                 if class_str and exp_str:
                     self.pending.append(PendingTask(
                         class_name=class_str, experiment=exp_str, group=group_str,
-                        teacher=teacher_str, room=room_str,
+                        teacher=teacher_str, room=room_str, course=course_str,
                         source="schedule",
                     ))
                 continue
@@ -484,6 +525,7 @@ class ScheduleDatabase:
                 teacher=teacher_str,
                 time_raw=time_raw,
                 blocked=blocked,
+                course=course_str,
             )
             self.entries.append(entry)
 

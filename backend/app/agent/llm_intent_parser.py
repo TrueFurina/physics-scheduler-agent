@@ -36,7 +36,6 @@
 import json
 import os
 import re
-from typing import Optional
 
 import httpx
 
@@ -253,7 +252,7 @@ class LLMIntentParser:
                 content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 return self._extract_json(content)
         except Exception as e:
-            return {"error": f"LLM 调用异常：{str(e)}", "needs_followup": False}
+            return {"error": f"LLM 调用异常：{e!s}", "needs_followup": False}
 
     def _extract_json(self, content: str) -> dict:
         """从 LLM 输出中提取 JSON"""
@@ -327,7 +326,7 @@ class LLMIntentParser:
                 content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 return {"reply": content}
         except Exception as e:
-            return {"error": f"LLM 调用异常：{str(e)}"}
+            return {"error": f"LLM 调用异常：{e!s}"}
 
     def suggest_plans(self, teacher: str, course: str, target_week: int,
                       available_slots: list) -> dict:
@@ -388,4 +387,4 @@ class LLMIntentParser:
                     return {"plans": result["plans"]}
                 return {"error": "LLM 未返回候选方案", "raw": content[:150]}
         except Exception as e:
-            return {"error": f"LLM 调用异常：{str(e)}"}
+            return {"error": f"LLM 调用异常：{e!s}"}

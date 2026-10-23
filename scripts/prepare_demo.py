@@ -119,7 +119,7 @@ def main():
     print()
     print("=" * 50)
     print("演示准备完成！")
-    print(f"  前端: http://localhost:5173")
+    print("  前端: http://localhost:5173")
     print(f"  后端: {BASE_URL}")
     print("  演示路径：身份选择 → 我的课程 → 调课 → 审批台")
     print("=" * 50)

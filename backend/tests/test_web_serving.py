@@ -92,7 +92,7 @@ def test_path_traversal_is_blocked(path):
     assert "text/html" in r.headers["content-type"]
     # 反向验证：没有泄露后端依赖清单或 Excel 的二进制内容
     assert "fastapi==" not in r.text
-    assert "PK" != r.text[:2]
+    assert r.text[:2] != "PK"
 
 
 # ---------------------------------------------------------------------------

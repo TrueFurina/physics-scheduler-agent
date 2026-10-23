@@ -50,10 +50,19 @@ def slots_of(entry) -> Set[str]:
 
 
 def _same_teacher(a: str, b: str) -> bool:
+    """判"同一位教师"：归一化（去空白）后**精确相等**。
+
+    为什么不再用子串包含（2026-10-24 交付评审 P2-1）：旧写法
+    `a == b or a in b or b in a` 在出现"李娜 / 李娜娜"时会把两位教师判成
+    同一人 ⇒ 假冲突（或反向：真同名漏判）。当前 13 位教师姓名实测互不为
+    子串，所以旧写法暂时不误判——但那是数据巧合，不是逻辑正确。
+    归一化只做去空白（姓名里的全/半角差异属数据质量问题，应由录入侧修）；
+    要支持"吴琳/吴琳老师"这类别名，走显式别名表，不靠子串猜。
+    """
     a, b = (a or "").strip(), (b or "").strip()
     if not a or not b:
         return False
-    return a == b or a in b or b in a
+    return a == b
 
 
 def _holder(o) -> dict:

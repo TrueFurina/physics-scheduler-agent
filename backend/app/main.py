@@ -173,7 +173,7 @@ class _HashedAssetFiles(StaticFiles):
     Starlette 默认只发 ETag/Last-Modified，浏览器每次仍要发一次条件请求（304）。
     """
 
-    async def get_response(self, path, scope):  # noqa: D102 - 仅追加响应头
+    async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
         if response.status_code in (200, 304):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"

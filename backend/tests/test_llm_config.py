@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.agent.llm_intent_parser import (  # noqa: E402
+from app.agent.llm_intent_parser import (
     _CHANNELS,
     LLMIntentParser,
     resolve_llm_config,

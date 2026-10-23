@@ -33,9 +33,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "bac
 # 本地开发直接 `uvicorn app.main:app` 不经过本文件，文档保持可用。
 os.environ.setdefault("DISABLE_DOCS", "1")
 
-import uvicorn  # noqa: E402
+# 注意：这里没有抑制 E402 的 noqa 指令 —— ruff 的 E402 对「import 前只做
+# os.environ 环境变量设置」有专门宽容（实测：普通 x=1 会触发，setdefault 不触发），
+# 加了反而会被 RUF100（unused noqa）抓成死指令。换 pycodestyle/flake8 时需重新评估。
+import uvicorn
 
-from app.main import app  # noqa: E402
+from app.main import app
 
 
 def main() -> None:

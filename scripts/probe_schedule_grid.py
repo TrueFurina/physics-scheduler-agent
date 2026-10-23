@@ -106,7 +106,7 @@ def load_oracle():
     classes, rooms = set(), set()
     week_min, week_max = None, None
     for r in ws.iter_rows(min_row=3, values_only=True):
-        week, weekday, ts, cls, group, exp, room, teacher = (
+        week, weekday, ts, cls, group, exp, room, _teacher = (
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7])
         if not isinstance(week, (int, float)) or not weekday or not cls:
             continue
@@ -176,7 +176,7 @@ def main():
         return rep.done()
 
     # ① 独立重算（oracle）
-    per_week, rows_per_week, unknown_per_week, classes, rooms, wk_min, wk_max = load_oracle()
+    per_week, rows_per_week, unknown_per_week, classes, rooms, _wk_min, _wk_max = load_oracle()
     n_rows = sum(rows_per_week.values())
     rep.add(True, "独立 oracle 就绪",
             f"{len(per_week)} 周 / {n_rows} 条可解析行 / {sum(unknown_per_week.values())} 条时段无法识别"

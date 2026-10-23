@@ -126,7 +126,8 @@ def test_preview_accepts_file_like_object(tmp_path):
     """端点走 BytesIO 解析（预览不落盘）—— 这里锁 file-like 入参可用。"""
     md = _base_md()
     p = _dump(md, tmp_path / "wb.xlsx")
-    rep = preview_workbook(io.BytesIO(open(p, "rb").read()))
+    with open(p, "rb") as f:
+        rep = preview_workbook(io.BytesIO(f.read()))
     assert rep["tables"]["experiments"]["rows"] == 2
 
 
@@ -179,7 +180,7 @@ def test_parse_master_tasks_report_is_structured(tmp_path):
     ws.append(["大学物理实验", "25级新专业", "迈克耳孙干涉", "1组", "吴老师", "A410"])
     wb.save(p)
 
-    tasks, report = parse_master_tasks(str(p))
+    _tasks, report = parse_master_tasks(str(p))
     assert report["tasks"] == 1
     assert report["samples"] == [{
         "class_name": "25级新专业", "experiment": "迈克耳孙干涉", "group": "1组",

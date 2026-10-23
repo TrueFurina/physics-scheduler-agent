@@ -224,3 +224,36 @@ def test_data_audit_exposes_group_dimension_and_parallel_note(db):
         assert d2["parallel_group_count"] == 47
         assert d2["group_conflict_count"] == 0
         assert "47" in d2["parallel_note"]
+
+
+# ---------------------------------------------------------------- 11. 教师同名判定（P2-1）
+
+def test_same_teacher_is_exact_after_stripping():
+    """归一化后精确匹配：空白差异算同一人，名字互为子串的两个人不算。
+
+    回归（2026-10-24 交付评审 P2-1）：旧写法 `a in b or b in a` 会把
+    "李娜 / 李娜娜"判成同一人 ⇒ 一位老师撞两位老师的课（假冲突）；
+    当前 13 位教师姓名互不为子串只是数据巧合，不是逻辑正确。
+    """
+    from app.conflict_model import _same_teacher
+    assert _same_teacher("吴琳", "吴琳") is True
+    assert _same_teacher(" 吴琳 ", "吴琳") is True        # 空白归一化
+    assert _same_teacher("李娜", "李娜娜") is False       # 子串 ≠ 同一人
+    assert _same_teacher("李娜娜", "李娜") is False
+    assert _same_teacher("吴琳", "") is False
+    assert _same_teacher(None, "吴琳") is False
+
+
+def test_substring_teacher_names_do_not_create_false_conflict():
+    """端到端：目标格只有"李娜"的课，调"李娜娜"的课进去不得报教师冲突。
+
+    旧写法（子串包含）下 "李娜" in "李娜娜" ⇒ 假冲突，本用例红。
+    """
+    entries = [
+        _e(9, "周二", "567", "别的班", "别班_1", "A504", teacher="李娜", exp="声速测量"),
+        _e(9, "周二", "567", "本班", "本班_1", "A410", teacher="李娜娜", exp="光的衍射"),
+    ]
+    hits = classify_move(entries, week=9, weekday="周二", slots={"567"},
+                         room="A410", teacher="李娜娜", class_name="本班", group="本班_1",
+                         exclude=entries[1])
+    assert [h["kind"] for h in hits] == [], f"子串姓名被误判成同一人：{hits}"

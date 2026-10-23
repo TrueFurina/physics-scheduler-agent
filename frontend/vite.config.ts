@@ -6,6 +6,9 @@ export default defineConfig({
   build: {
     // 刻意不叫 dist/build：发布上传会排除「构建产物」（node_modules/.git/dist…），
     // 而本项目由 FastAPI 同源托管，产物必须随源码一起进沙箱，故改用 webui。
+    // ⚠️ 改回 dist 的后果：本地 dev 一切正常（vite dev 不走 outDir），
+    // 线上却因产物被当构建产物排除而白屏 —— 交付评审 P2-3 点名的隐式约定，
+    // 改这里前先读 docs/安全风险清单 第二节根因第 2 条。
     outDir: 'webui',
     emptyOutDir: true,
     rollupOptions: {

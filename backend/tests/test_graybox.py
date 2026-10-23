@@ -18,7 +18,6 @@
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -140,7 +139,7 @@ def test_enrich_reports_when_no_pool(monkeypatch):
     md.upsert_experiment("全新无主项目")  # 有项目但没登记任何教师
     monkeypatch.setattr(api, "_master_data", md)
 
-    tasks, assumptions = api._enrich_extra_tasks()
+    tasks, _assumptions = api._enrich_extra_tasks()
     assert tasks[0].teacher == ""
 
 

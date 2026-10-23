@@ -1,0 +1,55 @@
+# ruff 质量门（2026-10-24 交付评审 P1-4）
+#
+# 为什么入库：仓库原先只有 .ruff_cache（作者本地跑过 ruff），规则集与阈值
+# 没进版本库 ⇒ 质量门不可复现。本文件把门禁固化成 CI 与本地同一份规则。
+#
+# 选码原则：抓真 bug，不与既定设计对抗。
+#   选：F（未用导入/未定义名字/未用变量——今天就抓到一个真的：Tuple 用了
+#       没导入）、E4/E7/E9（语法与错误类）、W、B（bugbear 常见陷阱）、
+#       SIM（可简化且易错）、RUF（ruff 专属陷阱）。
+#
+# 逐条 ignore 的理由（都是"规则与该项目先天冲突"，不是懒）：
+#   RUF001/002/003  ambiguous-unicode：中文注释/字符串里的「」——、⇒ 等字符
+#                   被判"歧义"。这是中文项目的先天冲突，全仓 6800+ 条，
+#                   开了这个门永远是红的，等于没有门。
+#   B008             function-call-in-default-argument：FastAPI 的
+#                    Depends()/File() 默认参数是框架既定用法（业界公认的
+#                    ruff×FastAPI 误报）。
+#   B904             raise-without-from：HTTPException 的 detail 文案是产品
+#                   契约；异常链只影响服务端 traceback，加 from 纯属样式
+#                   批次，不混进质量门。
+#   B905             zip-without-strict：加 strict= 会改变运行期行为
+#                    （长度不齐从静默截断变抛错），不在 lint 门里动语义。
+#   SIM105           suppressible-exception：try/except/pass 是本项目
+#                    fail-closed 的既定手法（"缓存不能成为新的故障源"，
+#                    见 app/utils/parse_cache.py 模块 docstring）。
+#   RUF005           collection-literal-concatenation：key + [x] vs
+#                    [*key, x] 纯样式，无语义差异。
+#   RUF015           unnecessary-iterable-allocation：建议的 next(gen) 改法
+#                    会把 IndexError 变成 StopIteration——是行为变化，不是
+#                    纯样式。
+#
+# 刻意不选的整类（留作独立的结构性批次，不与质量门混）：
+#   UP*（pep585/604 现代化：List→list、Optional→X|None）：全仓 400+ 处，
+#       纯样式 churn；I（导入排序）：会重排十几个文件的 import 块。
+#   ASYNC/PERF/PLC/PLW/DTZ/FURB/C4：或误报多、或与运行期决策相关。
+#
+# 收敛记录（2026-10-24）：入门时按上述规则集有 ~60 条，已全部处置——
+# 自动修 38（F401/RUF010/RUF100/F541/SIM300/RUF046），手工修 23
+# （B007 循环变量改名/B023 闭包循环变量/F841/RUF059/SIM115/E402/E702/
+# SIM102），并借 F821 抓到真 bug：excel_parser.py 的 Tuple 用了没导入。
+
+target-version = "py312"
+
+[lint]
+select = ["E4", "E7", "E9", "F", "W", "B", "SIM", "RUF"]
+
+ignore = [
+    "RUF001", "RUF002", "RUF003",
+    "B008",
+    "B904",
+    "B905",
+    "SIM105",
+    "RUF005",
+    "RUF015",
+]

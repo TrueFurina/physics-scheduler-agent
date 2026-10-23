@@ -5,6 +5,11 @@
 # --- Web 框架 ---
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
+# Form 数据解析（8 个 UploadFile 端点依赖它：/upload、/upload-master、
+# /master/import-preview、/master/tasks-preview、/master/import 等）。
+# FastAPI 不内嵌它 —— 缺这个包时 `from app.main import app` 直接
+# RuntimeError，服务起不来（2026-10-24 交付评审 P0-1，干净环境复现两次）。
+python-multipart==0.0.20
 
 # --- 配置与数据校验 ---
 pydantic==2.13.4
@@ -16,7 +21,5 @@ httpx==0.28.1
 # --- 排课求解（并行排课 CP-SAT 模型） ---
 ortools==9.15.6755
 
-# --- Excel / PDF 解析 ---
+# --- Excel 解析 ---
 openpyxl==3.1.5
-pypdf==6.19.0
-PyMuPDF==1.28.2

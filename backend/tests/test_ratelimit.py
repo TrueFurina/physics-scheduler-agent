@@ -27,7 +27,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.ratelimit import (  # noqa: E402
+from app.ratelimit import (
     LIMITER,
     RULES,
     SlidingWindowLimiter,

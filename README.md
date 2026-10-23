@@ -84,7 +84,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **371 backend tests + 85 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **399 backend tests + 85 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -102,7 +102,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 371 pytest tests
+│   └── tests/                      # 399 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -146,9 +146,22 @@ physics-scheduler-agent/
 ## Tests
 
 ```bash
+pip install -r requirements.txt -r requirements-dev.txt   # pytest lives in requirements-dev
 cd backend
 python -m pytest tests/ -v
 ```
+
+Ruff gate (the same rules CI enforces; every `ignore` is justified in `ruff.toml`):
+
+```bash
+ruff check --config ruff.toml .
+```
+
+CI (`.github/workflows/ci.yml`) runs on every push/PR: **backend** (py3.12 — ruff → import smoke → pytest) and **frontend** (node 22 — `npm run verify` = tsc + vitest). In a clean checkout (no `schedule.xlsx`) the expected CI shape is "passed + skipped, zero failed" — real-table cases skip there by design.
+
+Backend tests need no network and no LLM key (`conftest.py` defaults `LLM_DISABLED=1` /
+`RATELIMIT_DISABLED=1`). The real `schedule.xlsx` is gitignored; without it, the real-table
+cases **skip** (clean checkouts stay green) instead of erroring.
 
 Independent auditors (they re-read the raw Excel / re-solve from scratch instead of reusing
 backend code, so a green pytest run alone is not trusted):
@@ -218,14 +231,23 @@ Publish parameters:
    - Frontend output left in `dist/` is treated as build output and **excluded**, leaving no
      `index.html` in the sandbox. Hence `build.outDir: 'webui'` in `vite.config.ts` and
      `FRONTEND_DIST = frontend/webui` in `main.py`.
-   - The gitignored `schedule.xlsx` **is still uploaded**, so it must never be the default data
-     source: the default is always the sanitized `schedule.demo.xlsx`. Use
-     `SCHEDULE_PATH=schedule.xlsx` locally to load real data.
+   - The gitignored `schedule.xlsx` **is still uploaded** (its 教师联系表 carries 17 real
+     teacher phone numbers — delivery-review P0-2; `scripts/preflight_release.py` blocks
+     release while it sits in the repo root). It **is** the default data source when
+     present — a product decision (docs/安全风险清单-…-20261015.md R-09): the
+     teaching-office demo must show real teacher names. `schedule.demo.xlsx` (sanitized,
+     `教师A…`) is only the fallback when the real table is absent. Use
+     `SCHEDULE_PATH=<path>` to point elsewhere.
 
 ### Data & privacy
 
-- Default dataset is the sanitized `schedule.demo.xlsx` (built by `scripts/make_demo_schedule.py`;
-  teachers appear as `教师A…`, no phone numbers).
+- Default dataset is the **real** `schedule.xlsx` when present (product decision R-09: real
+  teacher names are the business data of the teaching-office demo), falling back to the
+  sanitized `schedule.demo.xlsx` (built by `scripts/make_demo_schedule.py`; teachers appear
+  as `教师A…`, no phone numbers) only when the real table is absent. So the live site shows
+  real teacher names (e.g. 吴琳) — expected behavior, not a leak. Teacher contact info
+  (phone / e-mail columns of 教师联系表) is never parsed into any API response; locked by
+  `backend/tests/test_privacy_export.py`.
 - Cloud capabilities (auth / database / LLM) are gated by **exact server-side Origin match**:
   only the published domain is allowed, other origins get 403. So `localhost` can only verify the
   public data plane — WeChat login must be verified on the live domain.
