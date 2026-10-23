@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.api.reschedule import (
     _DATA_DIR,
     _EXCEL_SUFFIXES,
-    _STUDENT_SUFFIXES,
     _safe_upload_name,
     _upload_target,
 )
@@ -44,8 +43,6 @@ def _admin_headers() -> dict:
 # (method, path, kwargs) —— 带合法请求体，确保被拒原因是"缺鉴权"而不是"参数不合法"
 _PROTECTED = [
     ("POST", "/api/reschedule/upload", {"files": {"file": ("a.xlsx", b"x", "application/vnd.ms-excel")}}),
-    ("POST", "/api/reschedule/upload-student", {"files": {"file": ("a.xlsx", b"x", "application/vnd.ms-excel")}}),
-    ("GET", "/api/reschedule/student-status", {}),
     ("POST", "/api/reschedule/requests", {"json": {
         "teacher": "t", "course_name": "c", "class_name": "k",
         "original_time": "周一 567", "target_week": 3, "reason": "r",
@@ -152,7 +149,6 @@ def test_admin_login_issues_working_token():
 
     headers = {"Authorization": f"Bearer {body['token']}"}
     assert client.get("/api/reschedule/requests", headers=headers).status_code == 200
-    assert client.get("/api/reschedule/student-status", headers=headers).status_code == 200
 
 
 def test_token_accepts_x_admin_token_header():
@@ -223,12 +219,6 @@ def test_upload_name_neutralised(evil):
     assert os.path.dirname(os.path.abspath(target)) == os.path.abspath(_DATA_DIR)
 
 
-def test_upload_name_keeps_chinese_stem():
-    """学生姓名来自文件名主干，不能被洗成乱码或空串。"""
-    name = _safe_upload_name("张敏杰课表.pdf", _STUDENT_SUFFIXES, prefix="student_")
-    assert name == "student_张敏杰课表.pdf"
-
-
 @pytest.mark.parametrize("bad", ["evil.exe", "x.xlsx.exe", "noext", ""])
 def test_upload_suffix_whitelist(bad):
     from fastapi import HTTPException
@@ -239,7 +229,7 @@ def test_upload_suffix_whitelist(bad):
 
 
 def test_upload_rejects_pdf_for_schedule_table():
-    """/upload 只收 Excel；.pdf 是学生课表专用的，不能因为共用净化函数就放开。"""
+    """/upload 只收 Excel；.pdf 不在白名单内，共用净化函数也不会放开。"""
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException):

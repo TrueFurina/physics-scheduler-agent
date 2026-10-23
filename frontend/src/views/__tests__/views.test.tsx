@@ -298,7 +298,6 @@ describe('RescheduleView', () => {
           affected_classes: ['24软件1班'],
           affected_rooms: ['A101'],
           affected_teachers: ['陈老师'],
-          affected_students: ['高等数学A2'],
           self_busy_count: 1,
           self_busy_slots: [
             { weekday: '周二', time_slot: '567', class_name: '24电子1班', experiment: '示波器的使用' },
@@ -320,7 +319,7 @@ describe('RescheduleView', () => {
         {...baseProps}
         impact={{
           conflict_count: 1, affected_classes: [], affected_rooms: [], affected_teachers: [],
-          affected_students: [], self_busy_count: 0, self_busy_slots: [], conflict_slots: [],
+          self_busy_count: 0, self_busy_slots: [], conflict_slots: [],
         }}
       />,
     );
@@ -409,10 +408,9 @@ describe('ParallelView', () => {
 });
 
 describe('ConsultView', () => {
-  it('两个模块的标题与占位文案不同（选课 vs 实验辅导）', () => {
-    const { rerender } = render(
+  it('渲染「实验规范查询」标题', () => {
+    render(
       <ConsultView
-        mode="course_select"
         question=""
         answer=""
         loading={false}
@@ -424,30 +422,13 @@ describe('ConsultView', () => {
         onToggleLogs={() => {}}
       />,
     );
-    expect(screen.getByText('🎓 选课咨询')).toBeTruthy();
-
-    rerender(
-      <ConsultView
-        mode="tutor"
-        question=""
-        answer=""
-        loading={false}
-        logs={[]}
-        showLogs={false}
-        onQuestionChange={() => {}}
-        onAsk={() => {}}
-        onStop={() => {}}
-        onToggleLogs={() => {}}
-      />,
-    );
-    expect(screen.getByText('🔬 实验辅导')).toBeTruthy();
+    expect(screen.getByText('🔬 实验规范查询')).toBeTruthy();
   });
 
   it('空问题不能提问；生成中改显示「停止生成」并走 onStop', () => {
     const onAsk = vi.fn();
     const onStop = vi.fn();
     const props = {
-      mode: 'tutor' as const,
       answer: '',
       logs: [],
       showLogs: false,

@@ -116,7 +116,7 @@ begin
 
   -- consult_logs 隔离：写一条自己的，自己读得到
   insert into public.consult_logs(module, question, answer, owner_name)
-  values ('course_select', '__probe__', '__probe__', '__probe__')
+  values ('tutor', '__probe__', '__probe__', '__probe__')
   returning id into v_cid;
   select count(*) into v_c_other from public.consult_logs where id = v_cid;
 

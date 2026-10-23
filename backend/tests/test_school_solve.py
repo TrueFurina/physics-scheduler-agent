@@ -118,7 +118,6 @@ def api_env(monkeypatch):
     monkeypatch.setattr(api, "_db", db)
     monkeypatch.setattr(api, "_master_data", md)
     monkeypatch.setattr(api, "_master_tasks", [])
-    monkeypatch.setattr(api, "_student", api.StudentSchedule())
     return db, md
 
 
@@ -143,7 +142,6 @@ def test_api_solve_all_reports_failed_classes_honestly(monkeypatch):
     monkeypatch.setattr(api, "_db", db)
     monkeypatch.setattr(api, "_master_data", md)
     monkeypatch.setattr(api, "_master_tasks", [])
-    monkeypatch.setattr(api, "_student", api.StudentSchedule())
 
     out = asyncio.run(api.parallel_solve_all())
     # 要么排下（多周窗口）要么如实报失败，但绝不能静默少排

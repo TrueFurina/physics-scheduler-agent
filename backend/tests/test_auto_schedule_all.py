@@ -92,7 +92,6 @@ def test_empty_db_reports_no_tasks():
 def api_db(monkeypatch):
     db = _synthetic_db()
     monkeypatch.setattr(api, "_db", db)
-    monkeypatch.setattr(api, "_student", api.StudentSchedule())
     monkeypatch.setattr(api, "_master_tasks", [])
     md = MasterData()
     monkeypatch.setattr(api, "_master_data", md)

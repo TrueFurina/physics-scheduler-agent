@@ -40,7 +40,6 @@ function ViewFallback() {
 
 function App() {
   const [view, setView] = useState<View>('identity');
-  const [module, setModule] = useState('');  // 当前咨询模块: course_select / tutor
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [currentTeacher, setCurrentTeacher] = useState<string>('');
   const [courses, setCourses] = useState<TeacherCourse[]>([]);
@@ -124,7 +123,7 @@ function App() {
   const [consultLogs, setConsultLogs] = useState<CloudConsultLog[]>([]);
   const [showLogs, setShowLogs] = useState(false);
 
-  const consultKey: ConsultModuleKey = module === 'course_select' ? 'course_select' : 'tutor';
+  const consultKey: ConsultModuleKey = 'tutor';
   const userName: string | null = session?.user?.name ?? null;
 
   // 云端调课申请 → 界面结构（与原后端返回字段保持一致）
@@ -523,7 +522,7 @@ function App() {
     return rows;
   };
 
-  // 云服务：选课咨询 / 实验辅导（免密钥大模型，流式输出，可中途停止）
+  // 云服务：实验规范查询（免密钥大模型，流式输出，可中途停止）
   const handleConsult = async () => {
     const q = consultQ.trim();
     if (!q) return;
@@ -577,12 +576,11 @@ function App() {
   };
 
 
-  // 打开选课咨询 / 实验辅导模块
-  const handleOpenModule = (m: string) => {
-    setModule(m);
+  // 打开实验规范查询模块
+  const handleOpenModule = () => {
     setConsultMsg('');
     setConsultQ('');
-    setView(m === 'course_select' ? 'course_select' : 'tutor');
+    setView('tutor');
   };
 
   // 进入时自动加载默认数据
@@ -1008,13 +1006,13 @@ function App() {
           </div>
         </div>
 
-        {/* 四大模块导航（排课/选课/调课/辅导） */}
+        {/* 主导航（排课调课 / 并行排课 / 数据看板 / 周课表 / 主数据 / 实验规范查询 / 审批） */}
         <div className="max-w-4xl mx-auto px-4 pb-3">
           <div className="flex items-center gap-2 text-sm">
             <button
               onClick={() => setView('identity')}
               className={`px-4 py-2 rounded-lg transition-colors ${
-                ['identity', 'courses', 'reschedule'].includes(view) && !['course_select', 'tutor', 'admin'].includes(view)
+                ['identity', 'courses', 'reschedule'].includes(view) && !['tutor', 'admin'].includes(view)
                   ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
@@ -1053,20 +1051,12 @@ function App() {
               🗂️ 主数据
             </button>
             <button
-              onClick={() => handleOpenModule('course_select')}
-              className={`px-4 py-2 rounded-lg transition-colors ${
-                view === 'course_select' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              🎓 选课咨询
-            </button>
-            <button
-              onClick={() => handleOpenModule('tutor')}
+              onClick={() => handleOpenModule()}
               className={`px-4 py-2 rounded-lg transition-colors ${
                 view === 'tutor' ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              🔬 实验辅导
+              🔬 实验规范查询
             </button>
             <button
               onClick={handleOpenAdmin}
@@ -1369,11 +1359,10 @@ function App() {
             </Suspense>
           )}
 
-          {/* 页面7：选课咨询 / 实验辅导（云端大模型，流式问答） */}
-          {(view === 'course_select' || view === 'tutor') && (
+          {/* 页面7：实验规范查询（云端大模型，流式问答） */}
+          {view === 'tutor' && (
             <Suspense fallback={<ViewFallback />}>
               <ConsultView
-                mode={view === 'course_select' ? 'course_select' : 'tutor'}
                 question={consultQ}
                 answer={consultMsg}
                 loading={loading}

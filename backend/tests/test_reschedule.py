@@ -1,6 +1,6 @@
 """冲突筛选核心逻辑 pytest 单测
 
-覆盖：周次解析、时间归一化、三重冲突筛选（教室/学生/教师）、
+覆盖：周次解析、时间归一化、冲突筛选（教室/教师）、
       自然语言解析（含中文数字）、申请单审批流
 """
 
@@ -11,7 +11,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.utils.excel_parser import ScheduleDatabase
-from app.agent.student_schedule import StudentSchedule
 from app.agent.reschedule_agent import RescheduleAgent
 
 # 测试数据路径（项目根目录 schedule.xlsx）
@@ -23,7 +22,7 @@ def agent():
     """加载真实实验安排表，构建调课智能体"""
     db = ScheduleDatabase()
     db.load_from_excel(SCHEDULE_PATH)
-    return RescheduleAgent(db, student=StudentSchedule())
+    return RescheduleAgent(db)
 
 
 # ---------- 1. 周次解析 ----------
@@ -70,7 +69,7 @@ def test_parse_direct_week_when_db_not_loaded():
     0 是假值，下游就当成"没解析出周次"→ 白调一次 LLM（实测每次约 5 秒）
     并回一句"请补充信息"，正确答复应是"排课数据尚未加载"。
     """
-    agent_empty = RescheduleAgent(ScheduleDatabase(), student=None)  # 刻意不 load
+    agent_empty = RescheduleAgent(ScheduleDatabase())  # 刻意不 load
     assert agent_empty.parse_request("第六周")["target_week"] == 6
     assert agent_empty.parse_request("调到第十周")["target_week"] == 10
 
@@ -97,7 +96,7 @@ def test_time_normalization(agent):
         assert e.time_slot in valid_slots, f"时间格式未归一化: {e.time_slot}"
 
 
-# ---------- 3. 三重冲突筛选 ----------
+# ---------- 3. 冲突筛选 ----------
 
 def test_classroom_conflict(agent):
     """教室占用冲突应被标记并给出原因"""
@@ -105,14 +104,6 @@ def test_classroom_conflict(agent):
     classroom_excluded = [e for e in result["excluded"] if e["reason_type"] == "classroom_busy"]
     assert len(classroom_excluded) > 0, "应检测到教室占用冲突"
     assert all("占用" in e["reason"] for e in classroom_excluded), "教室冲突原因应包含占用信息"
-
-
-def test_student_busy_conflict(agent):
-    """学生课表冲突应被标记（张敏杰周四5-7节有物理实验课）"""
-    result = agent.find_slots_with_reasons(5)
-    student_excluded = [e for e in result["excluded"]
-                        if e["reason_type"] == "student_busy" and e["weekday"] == "周四"]
-    assert len(student_excluded) > 0, "周四学生有课时段应被筛掉"
 
 
 def test_teacher_busy_conflict(agent):

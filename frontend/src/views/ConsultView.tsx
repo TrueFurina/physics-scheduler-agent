@@ -2,8 +2,6 @@ import ReactMarkdown from 'react-markdown';
 import type { CloudConsultLog } from '../cloudApi';
 
 interface Props {
-  /** 'course_select' = 选课咨询，'tutor' = 实验辅导；只影响文案。 */
-  mode: 'course_select' | 'tutor';
   question: string;
   answer: string;
   loading: boolean;
@@ -15,25 +13,23 @@ interface Props {
   onToggleLogs: () => void;
 }
 
-/** 选课咨询 / 实验辅导（云大模型流式问答 + 云端咨询历史）。 */
+/** 实验规范查询（云大模型流式问答 + 云端咨询历史）。面向排课人员/教师。 */
 export default function ConsultView({
-  mode, question, answer, loading, logs, showLogs,
+  question, answer, loading, logs, showLogs,
   onQuestionChange, onAsk, onStop, onToggleLogs,
 }: Props) {
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-lg font-semibold text-gray-900">
-          {mode === 'course_select' ? '🎓 选课咨询' : '🔬 实验辅导'}
+          🔬 实验规范查询
         </h2>
         <span className="text-xs px-2 py-1 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200">
           ☁️ 云端大模型
         </span>
       </div>
       <p className="text-sm text-gray-500 mb-6">
-        {mode === 'course_select'
-          ? '咨询选课资格、先修课程、学分要求等问题（免密钥云端大模型，回答流式生成）'
-          : '咨询实验原理、数据处理、误差分析、报告规范等问题（免密钥云端大模型，回答流式生成）'}
+        面向排课人员/教师，查询实验项目的学时、所需场地、操作步骤、数据处理与误差分析规范、报告规范等问题（免密钥云端大模型，回答流式生成）
       </p>
 
       <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200">
@@ -42,9 +38,7 @@ export default function ConsultView({
             value={question}
             onChange={(e) => onQuestionChange(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && onAsk()}
-            placeholder={mode === 'course_select'
-              ? '如：为什么我选不了大学物理实验课？'
-              : '如：扭摆法测转动惯量的误差来源？'}
+            placeholder="如：扭摆法测转动惯量需要几学时、用哪间实验室、数据处理与报告规范是什么？"
             className="flex-1 min-w-0 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
             disabled={loading}
           />

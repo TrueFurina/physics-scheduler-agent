@@ -112,7 +112,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_db", db)
     monkeypatch.setattr(api, "_master_data", md)
     monkeypatch.setattr(api, "_master_tasks", [])
-    monkeypatch.setattr(api, "_student", api.StudentSchedule())
     monkeypatch.setattr(api, "_DB_PATH", str(tmp_path / "t.db"))
     monkeypatch.setattr(api, "_landing_store", None)
     api._init_db()  # 在临时库上建 requests/applied_moves/landed_plans

@@ -24,7 +24,6 @@ from collections import defaultdict, Counter
 from ortools.sat.python import cp_model
 
 from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
-from app.agent.student_schedule import StudentSchedule
 
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 # 真实表 433 条里 71 条（16%）在周六/周日 —— 一所学校"金工 5、6 周排周六"是常态。
@@ -44,10 +43,9 @@ def _is_intro(project: str) -> bool:
 class ParallelScheduler:
     """并行排课：一门课的全部实验项目 × 学生组别，一键统一排课"""
 
-    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None,
+    def __init__(self, db: ScheduleDatabase,
                  extra_tasks: Optional[List] = None):
         self.db = db
-        self.student = student
         # 待排任务（PendingTask）：表里没排时间的行 + 上传的教学大纲/主数据清单。
         # 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表。
         self.extra_tasks = list(extra_tasks or [])

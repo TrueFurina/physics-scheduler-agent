@@ -67,7 +67,7 @@ def test_chat_dispatches_llm_work_off_event_loop(monkeypatch):
         "多轮追问的 context 没透传到 agent（位置参数错位？）"
 
 
-def test_course_select_consult_off_event_loop(monkeypatch):
+def test_experiment_tutor_consult_off_event_loop(monkeypatch):
     seen = {}
 
     def fake_consult(question, context=None, role=None):
@@ -76,10 +76,11 @@ def test_course_select_consult_off_event_loop(monkeypatch):
 
     monkeypatch.setattr(api._agent.llm_parser, "consult", fake_consult)
 
-    resp, loop_thread = _run(api.course_select_consult(api.ConsultRequest(question="为什么我选不了？")))
+    resp, loop_thread = _run(api.experiment_tutor_consult(
+        api.ConsultRequest(question="声速测量实验的数据处理规范是什么？")))
 
     assert resp.success is True
-    assert seen["thread"] is not loop_thread, "选课咨询（LLM）跑在事件循环线程上"
+    assert seen["thread"] is not loop_thread, "实验规范查询（LLM）跑在事件循环线程上"
 
 
 def test_parallel_solve_off_event_loop(monkeypatch):

@@ -5,7 +5,7 @@
 本服务发布在公网单端口上，链接是**零门槛公开**的（无登录、无白名单），
 而其中若干接口带**真实资源代价**：
 
-    /chat、/course-select、/experiment-tutor   后端直连 LLM（消耗额度/费用）
+    /chat、/experiment-tutor   后端直连 LLM（消耗额度/费用）
     /auto-schedule                             CP-SAT 求解，单次最多 10 秒 CPU
     /parallel/solve                            CP-SAT 求解，单次最多 10 秒 CPU
     /impact-analysis                           影响分析（规则 + LLM）
@@ -77,7 +77,6 @@ from fastapi import HTTPException, Request, status
 RULES: Dict[str, Tuple[int, int, int]] = {
     # LLM 类：慢（60s 超时）但单价低 → 给足余量，正常演示日均也碰不到
     "chat": (120, 1200, 60),
-    "course-select": (120, 1200, 60),
     "experiment-tutor": (120, 1200, 60),
     # 影响分析只走规则计算（不调 LLM），成本很低
     "impact-analysis": (180, 1800, 60),

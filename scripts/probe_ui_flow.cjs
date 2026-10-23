@@ -1,7 +1,7 @@
 /**
  * 线上主流程 UI 点测（只读，不改任何数据）
  * 覆盖：首屏 → 一键自动排课 → 我的课程(F1/F2) → 并行排课(总览+一键排课) → 数据看板
- *      → 选课咨询(懒加载) → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
+ *      → 实验规范查询(懒加载) → 懒加载 chunk 失败降级（故意 abort 一个按需 chunk，验证不白屏）
  */
 const { launch } = require('./_browser.cjs');
 const path = require('path');
@@ -294,20 +294,20 @@ function rec(ok, name, detail, opts = {}) {
     rec(false, '📊 数据看板', `${why}：${String(e).slice(0, 90)}`);
   }
 
-  // 选课咨询（懒加载视图）：验证按需 chunk 真的能到达且正常渲染。
-  // 等待条件必须只在目标视图里出现 —— "选课咨询" 是导航按钮文案，页面一进来就有，
-  // 用它会立刻命中造成假通过；"咨询选课资格" 只出现在 ConsultView 的说明文字里。
+  // 实验规范查询（懒加载视图）：验证按需 chunk 真的能到达且正常渲染。
+  // 等待条件必须只在目标视图里出现 —— "实验规范查询" 是导航按钮文案，页面一进来就有，
+  // 用它会立刻命中造成假通过；"查询实验项目的学时" 只出现在 ConsultView 的说明文字里。
   try {
-    await page.getByRole('button', { name: /选课咨询/ }).first().click();
+    await page.getByRole('button', { name: /实验规范查询/ }).first().click();
     await page.waitForFunction(
-      () => /咨询选课资格/.test(document.body.innerText),
+      () => /查询实验项目的学时/.test(document.body.innerText),
       { timeout: 30000 },
     );
-    const inputCount = await page.locator('input[placeholder*="为什么我选不了"]').count();
-    rec(inputCount > 0, '🎓 选课咨询（懒加载）', `视图已渲染，提问框 ${inputCount} 个`);
+    const inputCount = await page.locator('input[placeholder*="扭摆法测转动惯量需要几学时"]').count();
+    rec(inputCount > 0, '🔬 实验规范查询（懒加载）', `视图已渲染，提问框 ${inputCount} 个`);
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-consult.png') });
   } catch (e) {
-    rec(false, '🎓 选课咨询（懒加载）', String(e).slice(0, 120));
+    rec(false, '🔬 实验规范查询（懒加载）', String(e).slice(0, 120));
   }
 
   // ⑨ 懒加载 chunk 取不到时的降级：这条是**故意制造故障**，因此单独开一个上下文，
@@ -339,7 +339,7 @@ function rec(ok, name, detail, opts = {}) {
     );
     const txt2 = await p2.evaluate(() => document.body.innerText);
     // 顶部导航是边界的兄弟节点，必须仍然可用 —— 这才是"降级"与"白屏"的区别
-    const navAlive = /数据看板/.test(txt2) && /选课咨询/.test(txt2);
+    const navAlive = /数据看板/.test(txt2) && /实验规范查询/.test(txt2);
     const hasCard = /重新加载|重试/.test(txt2);
     if (!chunkAborted) {
       rec(true, '🛟 懒加载失败降级', '当前产物是单包（没有 ParallelView-*.js），本项不适用', { skip: true });

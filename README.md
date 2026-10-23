@@ -1,6 +1,6 @@
 # Physics Lab Schedule Agent System
 
-> AI-powered assistant for university physics experiment scheduling: course arrangement, course selection consultation, class rescheduling, and lab tutoring.
+> AI-powered assistant for university physics experiment scheduling: course arrangement, class rescheduling, and lab-spec query.
 
 [🇨🇳 中文版 README (Chinese)](README.zh.md)
 
@@ -8,7 +8,10 @@
 
 ## What is this?
 
-A **multi-module intelligent system** for university physics experiment teaching:
+A **three-module intelligent system** for university physics experiment teaching:
+**scheduling, rescheduling, and lab-spec query** (the scheduling module covers parallel batch
+scheduling, whole-school one-click scheduling, master data, plan landing, the weekly timetable grid,
+the data audit and standard-timetable export):
 
 | Module | Capability |
 |--------|-----------|
@@ -16,8 +19,7 @@ A **multi-module intelligent system** for university physics experiment teaching
 | ⚡ **Parallel batch scheduling** | CP-SAT solves one class's *all experiments × student groups* in one shot (the #1 pain point from the advisor interview); missing teacher/room info is auto-completed with every assumption surfaced |
 | 🗂️ **Master data** | Courses / experiments / teachers / rooms / classes as first-class CRUD entities, reverse-derived from the schedule, persisted across restarts, exportable to Excel and importable back |
 | 🔄 **Rescheduling** | Template + natural language flow, graded conflict detection (room / teacher / whole-group), admin approval that actually lands in the schedule |
-| 🎓 **Course Selection** | AI-powered Q&A on prerequisites, credits, eligibility |
-| 🔬 **Lab Tutoring** | AI-powered Q&A on experiment principles, data processing, error analysis |
+| 🔬 **Lab-spec query** | Lab staff / teachers look up an experiment's contact hours, required room, procedure, data-processing and error-analysis rules, and report spec — used to cross-check a schedule |
 
 **Design principle**: rule engine guarantees correctness (conflict filtering), LLM enhances experience (intent parsing, candidate plans, consultation).
 
@@ -34,7 +36,7 @@ A **multi-module intelligent system** for university physics experiment teaching
 | Backend | Python FastAPI + openpyxl + python-constraint |
 | Frontend | React + Vite + TypeScript + Tailwind CSS |
 | LLM | TokenRhythm (OpenAI-compatible) / replaceable via env vars |
-| Data | Excel schedule (433 entries) + student timetable |
+| Data | Excel schedule (433 entries) + five-table master data (no student data) |
 
 ## Quick Start
 
@@ -70,7 +72,7 @@ Open **http://localhost:5173**
 4. **Results** — green available slots + gray excluded slots with reasons + AI candidate plans
 5. **Submit** — create reschedule request
 6. **Admin approval** — approve/reject (requires admin login)
-7. **Course selection / Lab tutoring** — ask AI questions with knowledge context
+7. **Lab-spec query** — experiment-spec Q&A for lab staff / teachers
 
 ## Key Features
 
@@ -82,7 +84,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **381 backend tests + 85 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **371 backend tests + 85 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -97,10 +99,10 @@ physics-scheduler-agent/
 │   │   ├── master_workbook.py      # Excel ledger export / import (round-trip)
 │   │   ├── conflict_model.py       # Graded conflict classification (core 3 kinds)
 │   │   ├── course_bridge.py        # Course attribution + cross-course clash scan
-│   │   ├── agent/                  # RescheduleAgent, LLM parser, student schedule
+│   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
-│   │   └── utils/                  # Excel/PDF parsers
-│   └── tests/                      # 381 pytest tests
+│   │   └── utils/                  # Excel parser / time model
+│   └── tests/                      # 371 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -138,8 +140,7 @@ physics-scheduler-agent/
 | GET | `/api/reschedule/schedule-grid` | View | Weekly timetable grid: one week as weekday × period cells (7 days × 4 periods, cross-period entries appear in every occupied cell, conflict marks from the audit) |
 | POST | `/api/reschedule/auto-schedule/export` | Export | Draft workbook (master sheet + one sheet per class) |
 | POST | `/api/reschedule/admin-login` | Auth | Admin login (approval desk) |
-| POST | `/api/reschedule/course-select` | Selection | Course selection Q&A (LLM) |
-| POST | `/api/reschedule/experiment-tutor` | Tutoring | Lab tutoring Q&A (LLM) |
+| POST | `/api/reschedule/experiment-tutor` | Lab-spec | Lab-spec query (LLM, for lab staff/teachers) |
 | GET | `/health` | - | Health check |
 
 ## Tests
@@ -165,7 +166,7 @@ node ../scripts/probe_ui_newviews.cjs   # UI wiring of the two new views (local 
 
 ## Roadmap
 
-- [x] Conflict grading (core conflicts must-adjust / light per-student conflicts blocked on student-timetable PII)
+- [x] Conflict grading (room / teacher / whole-group core conflicts must-adjust; student affairs are permanently out of scope — there is no "light per-student conflict" tier and no force-override)
 - [x] Master data CRUD + persistence + Excel ledger round-trip
 - [x] Parallel batch scheduling with gray-box completion
 - [x] Multi-course consolidation in class timetables (course column + cross-course clash marking)

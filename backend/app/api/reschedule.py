@@ -15,7 +15,6 @@ from starlette.concurrency import run_in_threadpool
 
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.reschedule_agent import RescheduleAgent
-from app.agent.student_schedule import StudentSchedule
 from app.master_data import MasterData, is_schedulable_project
 from app.security import check_admin_credentials, issue_admin_token, require_admin
 from app.ratelimit import rate_limit
@@ -32,8 +31,7 @@ router = APIRouter()
 # 缺失时回退脱敏表）。
 #
 # 而下列接口挂 `Depends(require_admin)`，因为它们要么能改数据、要么吐真实师生身份：
-#   - /upload、/upload-student   替换排课表/学生课表（写）
-#   - /student-status            吐真实学生姓名与学号（PII）
+#   - /upload                   替换排课表（写）
 #   - GET/POST/DELETE /requests  工单读写与清空（写，DELETE 会清全表）
 #   - /requests/{id}/approve     审批并自动应用调课，直接改排课结果（写）
 #   - POST /parallel/land        把排课方案写回安排表（写，真实排课数据）
@@ -44,16 +42,15 @@ router = APIRouter()
 # 因此加门禁不影响任何演示流程，只是把"匿名可写"改成"需管理员会话"。
 #
 # 第二道边界是**限流**（见 app/ratelimit.py）：免鉴权的演示接口里有几个
-# 带真实资源代价——/chat、/course-select、/experiment-tutor 会调外部 LLM
+# 带真实资源代价——/chat、/experiment-tutor 会调外部 LLM
 # （烧额度），/auto-schedule、/parallel/solve 是 CP-SAT 求解（单次最多 10 秒 CPU），
 # /admin-login 可被爆破。它们不能加鉴权（会废掉演示），所以按 IP + 全站双维度限流。
 # 阈值刻意放宽，真人演示碰不到，脚本刷量会立刻 429。
 # ---------------------------------------------------------------------------
 _ADMIN_ONLY = [Depends(require_admin)]
 
-# 全局排课数据库 + 学生课表
+# 全局排课数据库
 _db = ScheduleDatabase()
-_student = StudentSchedule()
 # 主数据（教学大纲清单）里的待排任务：与"上一次排完的课表行"并列的一类输入。
 # 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表 —— 这是
 # 导师座谈后换轨的核心（见 docs/战略复盘-20261022.md）。
@@ -63,7 +60,7 @@ _master_tasks: List = []
 # 重启自愈恢复 —— 落盘失效的唯一条件是安排表本身被替换（指纹变化，见 master_store）。
 _master_data = MasterData()
 _schedule_fp: Optional[str] = None  # 当前安排表指纹（路径+mtime），落盘失效判定用
-_agent = RescheduleAgent(_db, student=_student)
+_agent = RescheduleAgent(_db)
 
 # 落地方案存储（landed_plans 表，与 requests.db 同库同目录同 gitignore）。
 # 懒建 + 跟随 _DB_PATH：测试会 monkeypatch _DB_PATH 到临时库，store 必须跟着走。
@@ -89,7 +86,8 @@ def _landings() -> plan_landing.LandingStore:
 #   - 教师联系表只取「姓名 + 备注」两个字段（见 ScheduleDatabase.get_teacher_roles），
 #     手机号与邮箱列从不被读取；
 #   - "学生所在系系办电话"整张表不在解析范围内。
-# 学生个人身份（姓名 + 学号）来自独立数据源，其接口已挂管理员门禁（见 _ADMIN_ONLY）。
+# 学生个人身份数据已随学生事务硬边界整体移除（2026-10-23 用户拍板"永远不管
+# 学生事务"：本工具只做教务给定时间范围内的实验项目×组 → 教师×场地分配）。
 # 真实表缺失时回退脱敏表，保证任何环境都能启动。相对路径一律按仓库根解析。
 def _find_repo_root(module_file: str) -> str:
     """从模块文件向上定位仓库根（同时含 backend/app 的那一层）。
@@ -177,14 +175,13 @@ _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_APP_DIR, "data")
 
 _EXCEL_SUFFIXES = (".xlsx", ".xls")
-_STUDENT_SUFFIXES = (".xlsx", ".xls", ".pdf")
 
 
 def _safe_upload_name(filename: str, allowed: tuple, prefix: str = "") -> str:
     """把调用方给的文件名压成安全文件名（只保留白名单后缀 + 清洗过的主干）。
 
-    保留中文主干是有意的：`upload-student` 会用 `os.path.splitext(filename)[0]`
-    当作学生姓名，全换成随机串会把这个信息丢掉。
+    保留中文主干是有意的：`/master/import-preview` 等入口的文件名会原样
+    出现在解析报告里，全换成随机串会让教秘对不上号。
     """
     raw = str(filename or "")
     # 两种分隔符都切，取最后一段——反斜杠路径（`..\..\x.xlsx`）同样被切掉。
@@ -634,55 +631,6 @@ async def get_status():
     }
 
 
-@router.post("/upload-student", summary="上传学生课表 Excel/PDF", dependencies=_ADMIN_ONLY)
-async def upload_student_schedule(file: UploadFile = File(...)):
-    """上传学生课表文件
-    - Excel（.xlsx/.xls）：表头 [课程名, 星期, 节次, 周次]
-    - PDF（.pdf）：教务系统导出的课表，自动解析（尽力）
-    """
-    # 文件名净化后再落盘：切掉目录部分并只保留白名单后缀。
-    # 学生姓名取自**净化后**的主干，避免把 `..`/路径片段写进展示字段。
-    safe_name = _safe_upload_name(file.filename, _STUDENT_SUFFIXES, prefix="student_")
-    save_path = _upload_target(file.filename, _STUDENT_SUFFIXES, prefix="student_")
-
-    content = await file.read()
-    with open(save_path, "wb") as f:
-        f.write(content)
-
-    try:
-        if safe_name.lower().endswith('.pdf'):
-            from app.utils.pdf_schedule_parser import PdfScheduleParser
-            parser = PdfScheduleParser()
-            courses = parser.parse(save_path)
-            if not courses:
-                raise ValueError("PDF 解析出 0 门课程，请确认是教务系统导出的课表")
-            _student.name = os.path.splitext(safe_name)[0].removeprefix("student_")
-            _student.courses = courses
-            count = len(courses)
-        else:
-            count = _student.load_from_excel(save_path)
-
-        return {
-            "success": True,
-            "message": f"✅ 成功加载 {count} 门课程，已更新学生课表",
-            "total_courses": count,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"文件解析失败：{str(e)}")
-
-
-@router.get("/student-status", summary="查看学生课表状态", dependencies=_ADMIN_ONLY)
-async def get_student_status():
-    """查看学生课表信息"""
-    return {
-        "name": _student.name,
-        "student_id": _student.student_id,
-        "semester": _student.semester,
-        "total_courses": len(_student.courses),
-        "sample_courses": _student.courses[:5],
-    }
-
-
 _load_lock = threading.Lock()
 
 
@@ -971,46 +919,26 @@ def _build_knowledge_context() -> str:
         f"- 实验项目（{len(experiments)}个）：{'、'.join(sorted(experiments)[:15])}\n"
         f"- 实验室（{len(rooms)}间）：{'、'.join(sorted(rooms)[:10])}\n"
         f"- 实验教师（{len(teachers)}位）：{'、'.join(sorted(teachers)[:10])}\n"
-        f"- 涉及学生课表：{len(_student.students)}人（多学生课表）"
     )
     return context
 
 
-@router.post("/course-select", response_model=ConsultResponse, summary="选课咨询（四大模块之一）",
-             dependencies=[Depends(rate_limit("course-select"))])
-async def course_select_consult(req: ConsultRequest):
-    """选课咨询：LLM 回答选课资格/先修课程/学分要求等问题"""
-    if not req.question.strip():
-        return ConsultResponse(success=False, message="请输入问题")
-
-    # 构建学生课表 + 实验知识源上下文
-    context = (
-        f"当前学生：{_student.name}（{_student.semester}），课表共 {len(_student.courses)} 门课程。\n"
-        + _build_knowledge_context()
-    )
-    result = await run_in_threadpool(_agent.llm_parser.consult, req.question,
-                                     context=context, role="course_select")
-
-    if "error" in result:
-        return ConsultResponse(success=False, message=result["error"])
-    return ConsultResponse(success=True, message="选课咨询完成", reply=result.get("reply", ""))
-
-
-@router.post("/experiment-tutor", response_model=ConsultResponse, summary="实验辅导（四大模块之一）",
+@router.post("/experiment-tutor", response_model=ConsultResponse, summary="实验规范查询（面向排课人员/教师）",
              dependencies=[Depends(rate_limit("experiment-tutor"))])
 async def experiment_tutor_consult(req: ConsultRequest):
-    """实验辅导：LLM 回答实验原理/数据处理/误差分析/报告规范等问题"""
+    """实验规范查询助手：面向排课人员/教师，回答实验项目的学时、所需场地、
+    操作步骤、数据处理与误差分析规范、报告规范等问题，服务于排课核对。"""
     if not req.question.strip():
         return ConsultResponse(success=False, message="请输入问题")
 
-    # 实验辅导基于实验知识源上下文
+    # 实验规范查询基于实验知识源上下文
     context = _build_knowledge_context()
     result = await run_in_threadpool(_agent.llm_parser.consult, req.question,
                                      context=context, role="experiment_tutor")
 
     if "error" in result:
         return ConsultResponse(success=False, message=result["error"])
-    return ConsultResponse(success=True, message="实验辅导完成", reply=result.get("reply", ""))
+    return ConsultResponse(success=True, message="实验规范查询完成", reply=result.get("reply", ""))
 
 
 # 管理员固定账号（演示用，生产可换数据库）
@@ -1070,7 +998,7 @@ async def parallel_overview():
 
     # 待排任务（表里没排时间的行 + 上传的大纲清单）与已排记录一起进总览
     extra = _schedulable_extra_tasks()
-    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+    ps = ParallelScheduler(_db, extra_tasks=extra)
     return {
         "success": True,
         "data": {
@@ -1093,7 +1021,7 @@ async def parallel_solve(req: ParallelSolveRequest):
     from app.engine.parallel_scheduler import ParallelScheduler
 
     extra, task_assumptions = _enrich_extra_tasks()
-    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+    ps = ParallelScheduler(_db, extra_tasks=extra)
 
     # 教务给定的「课程总时间范围」：主数据里该班的星期 / 节次 / 周次，是求解器的可用时间空间。
     # 请求显式指定的优先；否则用主数据基线（反推自安排表，教秘可在「主数据」里改）。
@@ -1137,7 +1065,7 @@ async def parallel_solve_all():
     from app.engine.parallel_scheduler import ParallelScheduler
 
     extra, task_assumptions = _enrich_extra_tasks()
-    ps = ParallelScheduler(_db, student=_student, extra_tasks=extra)
+    ps = ParallelScheduler(_db, extra_tasks=extra)
 
     class_names = sorted(_master_data.classes) if _master_data.initialized else \
         sorted({e.class_name for e in _db.entries if e.class_name})
@@ -1882,7 +1810,6 @@ async def impact_analysis(req: ChatRequest):
     affected_classes = set()      # 受影响班级（教室被占）
     affected_rooms = set()        # 受影响教室
     affected_teachers = set()     # 受影响教师（占着那间教室的教师）
-    affected_students = set()     # 学生课表里被占用的课程
     self_busy = []                # 教师本人该时段已有课 —— 是「自身冲突」，不是「别人受影响」
     conflict_slots = []
 
@@ -1905,12 +1832,6 @@ async def impact_analysis(req: ChatRequest):
                 "class_name": e.get("class_name", ""),
                 "experiment": e.get("experiment", ""),
             })
-        elif reason_type == "student_busy":
-            courses = [c for c in (e.get("courses") or []) if c]
-            if courses:
-                affected_students.update(courses)
-            else:
-                affected_students.add("学生课表（该时段有课）")
 
     return {
         "success": True,
@@ -1921,7 +1842,6 @@ async def impact_analysis(req: ChatRequest):
             "affected_classes": sorted(a for a in affected_classes if a),
             "affected_rooms": sorted(r for r in affected_rooms if r),
             "affected_teachers": sorted(t for t in affected_teachers if t),
-            "affected_students": sorted(affected_students),
             "self_busy_count": len(self_busy),
             "self_busy_slots": self_busy[:5],
             "conflict_slots": conflict_slots[:10],
@@ -1943,7 +1863,7 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
     from app.engine.auto_scheduler import AutoScheduler
     extra_tasks, task_assumptions = _enrich_extra_tasks()
     scheduler = AutoScheduler(
-        _db, student=_student,
+        _db,
         extra_tasks=extra_tasks,
     )
     if req and req.max_sections:
@@ -1998,7 +1918,6 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
             "weeks": result.get("weeks", []),
             "conflicts": result.get("conflicts", []),
             "schedule": result.get("schedule", []),
-            "student_checked": result.get("student_checked", False),
             "capacity_checked": result.get("capacity_checked", False),
             "real_entries": real_entries,
         },

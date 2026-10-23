@@ -284,12 +284,6 @@ export default function RescheduleView({
                 <div className="text-sm text-purple-600">{impact.affected_teachers.join('、')}</div>
               </div>
             )}
-            {impact.affected_students.length > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <div className="text-xs font-medium text-blue-700 mb-1">🎓 学生课表已有课程</div>
-                <div className="text-sm text-blue-600">{impact.affected_students.join('、')}</div>
-              </div>
-            )}
           </div>
         )}
       </div>

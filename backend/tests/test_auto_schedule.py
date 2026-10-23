@@ -18,9 +18,10 @@ R-38 容量是编的
     而原因统一写成"资源不足或约束过紧"，把编造的数字伪装成资源问题。
     安排表里根本没有容量字段。
 
-R-39 学生维度只是名义上的
-    `self.student` 默认空对象（上传学生课表是管理员接口，前端从不调用），
-    `get_busy_slots(1)` 恒为空。note 却写着"教室/教师/学生三重不冲突"。
+R-39 学生维度已移除（2026-10-23 产品边界）
+    学生事务永久移出本系统范围 —— 课程由教务系统事先分配好，我们这边只分配
+    实验项目与老师。原学生维度恒为空对象（上传接口前端从不调用），学生冲突
+    从未生效，故移除它零行为回归。
 
 判据刻意分两类：
   - 用内存小表构造的**因果**用例（放回旧实现必然失败），证明约束真的在起作用；
@@ -188,33 +189,6 @@ def test_intro_lessons_are_excluded_and_counted():
     assert res["intro_excluded"] == 1
     assert res["total_sections"] == 1
     assert [x["course"] for x in res["schedule"]] == ["声速测量"]
-
-
-# ---------------------------------------------------------------------------
-# R-39 学生维度如实标注
-# ---------------------------------------------------------------------------
-
-def test_student_dimension_reported_as_unchecked_without_data():
-    db = _db([_entry(1, "周一", "567", "一班", "A410", "张老师")])
-    res = AutoScheduler(db).solve(max_sections=1)
-    assert res["student_checked"] is False
-    text = AutoScheduler(db).summary(res)
-    assert "未校验" in text and "学生" in text, "没校验就必须写出来，不能继续声称三重不冲突"
-
-
-def test_student_busy_slots_are_avoided_when_data_exists():
-    class _StubStudent:
-        students = {"某人": object()}
-
-        def get_busy_slots(self, week):
-            if week == 1:
-                return {"周一": {"567"}}
-            return {}
-
-    db = _db([_entry(1, "周一", "567", "占位", "A410", "别人")])
-    res = AutoScheduler(db, student=_StubStudent()).solve(max_sections=1)
-    assert res["student_checked"] is True
-    assert (1, "周一", "567") not in _cells(res["schedule"])
 
 
 # ---------------------------------------------------------------------------

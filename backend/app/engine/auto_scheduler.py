@@ -1,6 +1,6 @@
 """排课自动生成 —— OR-Tools CP-SAT 求解器
 
-本文件在第十三批里被整体重写。原实现有四个"自述与事实不符"的问题：
+本文件在第十三批里被整体重写。原实现有三个"自述与事实不符"的问题：
 
 1. **没有周次维度**（R-37）。决策变量只有 (星期, 时段, 教室)，返回的方案里
    没有 `week` 字段 —— 教秘拿到一份"不知道属于哪一周"的课表。用真实表实测：
@@ -12,8 +12,6 @@
    （A410…A516）没有一个含"大"字 ⇒ 全部按 60 人 ⇒ 所有合班任务永久不可排，
    实测 30 个任务里 15 个排不进，而原因统一写成"资源不足或约束过紧"。
    安排表里**根本没有容量字段**，这两个数字都是凭空造的。
-4. **学生维度只是名义上的**（R-39）。`self.student` 默认空对象（上传学生课表是
-   管理员接口，前端从不调用），`get_busy_slots(1)` 恒为空 ⇒ 学生冲突从未生效。
 
 现在：
   决策：任务 i → (第 w 周, 星期 d, 时段 t)；教室在求解后按可用清单分配
@@ -24,7 +22,6 @@
     3. 同一教师、同一周、同一星期、同一时段最多一个任务
     4. 同一班级、同一周、同一星期、同一时段最多一个任务
     5. 与**现有安排表**对齐：该周该天该时段教室/教师已被占 → 该格不进候选域
-    6. 学生课表（已上传才生效）：该周该天该时段有课 → 该格不进候选域
   目标：最大化排入数量
 
 为什么教室只做"并发数"约束：10 间教室对任务是可互换的，逐教室建变量会让
@@ -52,7 +49,6 @@ from typing import Dict, List, Optional, Set, Tuple
 from ortools.sat.python import cp_model
 
 from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
-from app.agent.student_schedule import StudentSchedule
 
 # 可排课时段（工作日 3 个下午时段）
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
@@ -101,10 +97,9 @@ def _is_intro(project: str) -> bool:
 class AutoScheduler:
     """排课自动生成器（CP-SAT 求解，带周次维度）"""
 
-    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None,
+    def __init__(self, db: ScheduleDatabase,
                  extra_tasks: Optional[List] = None):
         self.db = db
-        self.student = student
         # 待排任务（PendingTask）：没排过时间的教学任务，与已排记录并列的一类输入
         self.extra_tasks = list(extra_tasks or [])
 
@@ -198,18 +193,6 @@ class AutoScheduler:
                     teacher_busy.add((wk, wd, ts, tn))
         return room_busy, teacher_busy
 
-    def _student_busy(self, weeks: List[int]) -> Optional[Dict[int, Dict[str, Set[str]]]]:
-        """学生占用（按周）。**没有学生数据时返回 None**，并在响应里如实标注
-        未校验 —— 而不是假装"三重不冲突"。"""
-        if not self.student:
-            return None
-        if not getattr(self.student, "students", None):
-            return None
-        try:
-            return {w: (self.student.get_busy_slots(w) or {}) for w in weeks}
-        except Exception:
-            return None
-
     # ------------------------------------------------------------------ 求解
     def solve(self, max_sections: int = 30, sections_override: Optional[List[Dict]] = None,
               extra_room_busy: Optional[Set[Tuple]] = None,
@@ -232,7 +215,6 @@ class AutoScheduler:
         room_busy |= set(extra_room_busy or ())
         teacher_busy |= set(extra_teacher_busy or ())
         class_busy = set(extra_class_busy or ())
-        student_busy = self._student_busy(weeks)
 
         # 限制规模保证求解速度（全表 171 个任务 × 16 周 × 15 时段过重，单次会超时）
         sections = sections_override if sections_override is not None \
@@ -248,12 +230,6 @@ class AutoScheduler:
                     for r in rooms:
                         if (w, d, t, r) in room_busy:
                             continue
-                        if student_busy is not None:
-                            # 学生课表只标到 567：567 与 678 相邻，宁可一起避让
-                            check_ts = "567" if t in ("567", "678") else t
-                            busy = (student_busy.get(w) or {}).get(d) or set()
-                            if check_ts in busy:
-                                continue
                         idle.append(r)
                     free_rooms[(w, d, t)] = idle
 
@@ -399,11 +375,9 @@ class AutoScheduler:
             "solved": len(schedule),
             "conflicts": conflicts,
             "schedule": schedule,
-            "student_checked": student_busy is not None,
             "capacity_checked": False,
             "note": (
                 "OR-Tools CP-SAT 约束求解：教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
-                + ("；学生课表已校验" if student_busy is not None else "；学生维度未校验（未上传学生课表）")
                 + "；容量未校验（安排表无容量字段）"
             ),
         }
@@ -490,13 +464,10 @@ class AutoScheduler:
             "chunks": chunk_reports,
             "chunked": len(chunks) > 1,
             "elapsed_s": round(time.time() - t_start, 1),
-            "student_checked": self._student_busy(self._get_weeks()) is not None,
             "capacity_checked": False,
             "note": (
                 f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学任务分 {len(chunks)} 片求解，"
                 f"片间回填教室/教师/班级占用；教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
-                + ("；学生课表已校验" if self._student_busy(self._get_weeks()) is not None
-                   else "；学生维度未校验（未上传学生课表）")
                 + "；容量未校验（安排表无容量字段）"
             ),
         }
@@ -513,8 +484,6 @@ class AutoScheduler:
             f"（第{lo}–{hi}周）",
         ]
         unchecked = []
-        if not result.get("student_checked"):
-            unchecked.append("学生冲突（未上传学生课表）")
         if not result.get("capacity_checked"):
             unchecked.append("教室容量（安排表无容量字段）")
         if unchecked:

@@ -9,12 +9,11 @@
 
     👨‍🏫 受影响教师：2024级应用化学1、2班
 
-三条结论锁死在这里：
+两条结论锁死在这里：
 1. `affected_teachers` 只允许出现真实教师姓名，绝不允许是班级名；
-2. 「本人该时段已有课」是**自身冲突**，单列 `self_busy_slots`，不混进"别人受影响"；
-3. 学生冲突要给出**具体课程名**（不是「学生课表课程」这种占位文案）。
+2. 「本人该时段已有课」是**自身冲突**，单列 `self_busy_slots`，不混进"别人受影响"。
 
-数据是构造的（两条 ScheduleEntry + 一份可控学生课表），不依赖 schedule.xlsx，
+数据是构造的（两条 ScheduleEntry），不依赖 schedule.xlsx，
 这样换真实表/脱敏表都不会让断言漂移。
 """
 
@@ -28,7 +27,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
 from app.agent.reschedule_agent import RescheduleAgent
-from app.agent.student_schedule import StudentSchedule
 from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
 
 WEEK = 3
@@ -36,7 +34,6 @@ MY_NAME = "吴琳"
 OCCUPY_TEACHER = "陈老师"
 OCCUPY_CLASS = "24软件1班"
 SELF_CLASS = "24电子1班"
-STUDENT_COURSE = "高等数学A2"
 
 
 @pytest.fixture()
@@ -53,20 +50,11 @@ def env(monkeypatch):
     ]
     db.loaded = True
 
-    student = StudentSchedule()
-    # 学生课表压成一条可控记录：周五 5-7 节有「高等数学A2」
-    student.students = [{
-        "name": "测试学生", "student_id": "000",
-        "courses": [(STUDENT_COURSE, "周五", "5-7节", "1-16周")],
-    }]
-    student.courses = student.students[0]["courses"]
-
-    agent = RescheduleAgent(db, student=student)
+    agent = RescheduleAgent(db)
     # 只替换模块级单例，不动 _ensure_loaded：让「数据已加载」这条真实分支参与测试
     monkeypatch.setattr(api, "_db", db)
-    monkeypatch.setattr(api, "_student", student)
     monkeypatch.setattr(api, "_agent", agent)
-    return db, student, agent
+    return db, agent
 
 
 def _run_impact() -> dict:
@@ -97,16 +85,9 @@ def test_self_busy_is_its_own_bucket(env):
     assert MY_NAME not in data["affected_teachers"], "自己不该出现在受影响教师里"
 
 
-def test_student_conflict_carries_course_name(env):
-    """学生冲突要能说出是哪门课挡路，而不是占位文案。"""
-    data = _run_impact()
-    assert data["affected_students"] == [STUDENT_COURSE], \
-        f"学生冲突应给出具体课程名，实际：{data['affected_students']}"
-
-
 def test_reason_text_names_the_teacher(env):
     """teacher_busy 的文案里也要有人名 —— 原文案只写"教师该时段已有课"，看不出是谁。"""
-    _, _, agent = env
+    _, agent = env
     result = agent.find_slots_with_reasons(WEEK, teacher_name=MY_NAME)
     teacher_busy = [e for e in result["excluded"] if e["reason_type"] == "teacher_busy"]
     assert teacher_busy, "第3周周二567应被判为教师自身冲突"
@@ -118,7 +99,7 @@ def test_reason_text_names_the_teacher(env):
 
 def test_room_conflict_reason_keeps_structured_fields(env):
     """教室冲突同时给结构化字段与中文原因，两者不冲突。"""
-    _, _, agent = env
+    _, agent = env
     result = agent.find_slots_with_reasons(WEEK, teacher_name=MY_NAME)
     room_busy = [e for e in result["excluded"] if e["reason_type"] == "classroom_busy"]
     assert room_busy
@@ -127,14 +108,3 @@ def test_room_conflict_reason_keeps_structured_fields(env):
     assert e["class_name"] == OCCUPY_CLASS
     assert e["teacher"] == OCCUPY_TEACHER
     assert OCCUPY_CLASS in e["reason"]
-
-
-def test_student_busy_slots_still_blocked_without_names(monkeypatch, env):
-    """取不到课程名时必须仍然判冲突（退回占位文案），不能因缺名字放行。"""
-    _, student, agent = env
-    monkeypatch.delattr(StudentSchedule, "get_busy_courses", raising=False)
-    result = agent.find_slots_with_reasons(WEEK, teacher_name=MY_NAME)
-    student_busy = [e for e in result["excluded"] if e["reason_type"] == "student_busy"]
-    assert student_busy, "学生有课的时段必须仍被排除"
-    assert all(e["courses"] == [] for e in student_busy)
-    assert "学生课表课程" in student_busy[0]["reason"]

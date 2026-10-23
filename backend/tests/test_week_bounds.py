@@ -33,7 +33,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
 from app.agent.reschedule_agent import RescheduleAgent
-from app.agent.student_schedule import StudentSchedule
 from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
 
 MY_NAME = "吴琳"
@@ -70,12 +69,8 @@ class _FakeLlmParser:
 @pytest.fixture()
 def agent(monkeypatch):
     db = _db()
-    student = StudentSchedule()
-    student.students = []
-    student.courses = []
-    a = RescheduleAgent(db, student=student)
+    a = RescheduleAgent(db)
     monkeypatch.setattr(api, "_db", db)
-    monkeypatch.setattr(api, "_student", student)
     monkeypatch.setattr(api, "_agent", a)
     return a
 
@@ -173,7 +168,7 @@ def test_boundaries_are_inclusive(agent):
 def test_unloaded_db_is_not_treated_as_range_00(agent, monkeypatch):
     """未加载时 `get_week_range()` 返回 (0,0)：不许把它当成"有效区间 0–0"。"""
     empty = ScheduleDatabase()          # loaded=False, entries=[]
-    a = RescheduleAgent(empty, student=None)
+    a = RescheduleAgent(empty)
     monkeypatch.setattr(api, "_db", empty)
     monkeypatch.setattr(api, "_agent", a)
 

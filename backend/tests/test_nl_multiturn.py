@@ -34,7 +34,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
 from app.agent.reschedule_agent import RescheduleAgent
-from app.agent.student_schedule import StudentSchedule
 from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
 
 WEEK = 3
@@ -56,16 +55,8 @@ def agent(monkeypatch):
     ]
     db.loaded = True
 
-    student = StudentSchedule()
-    student.students = [{
-        "name": "测试学生", "student_id": "000",
-        "courses": [("高等数学A2", "周五", "5-7节", "1-16周")],
-    }]
-    student.courses = student.students[0]["courses"]
-
-    a = RescheduleAgent(db, student=student)
+    a = RescheduleAgent(db)
     monkeypatch.setattr(api, "_db", db)
-    monkeypatch.setattr(api, "_student", student)
     monkeypatch.setattr(api, "_agent", a)
     return a
 

@@ -5,7 +5,6 @@ from datetime import date, timedelta
 from typing import List, Dict, Optional, Tuple
 from app.utils.excel_parser import ScheduleDatabase
 from app.utils.time_model import parse_clock_range
-from app.agent.student_schedule import StudentSchedule
 from app.agent.llm_intent_parser import LLMIntentParser
 
 # 学期起始日（第1周周一）默认值；实际从 schedule.xlsx 解析覆盖
@@ -53,14 +52,12 @@ class RescheduleAgent:
     核心逻辑：
     1. 教师说"调到下周" → 解析出目标周次（规则解析优先，失败时降级到 LLM）
     2. 从排课数据库中查出该周所有已占用时段
-    3. 结合学生课表，筛掉学生有课的时段
-    4. 剩余 = 教室空闲 + 学生没课 = 可用时段
+    3. 剩余 = 教室空闲 + 教师自身时间空闲 = 可用时段
     """
 
-    def __init__(self, db: ScheduleDatabase, student: Optional[StudentSchedule] = None,
+    def __init__(self, db: ScheduleDatabase,
                  llm_parser: Optional[LLMIntentParser] = None):
         self.db = db
-        self.student = student
         self.llm_parser = llm_parser or LLMIntentParser()
         # 学期起始日：缓存一次解析结果，避免每次筛选都重新打开 Excel（慢）
         self._semester_start_cache = None
@@ -201,7 +198,7 @@ class RescheduleAgent:
     def find_available_slots(self, target_week: int,
                              exclude_rooms: Optional[List[str]] = None,
                              teacher_name: Optional[str] = None) -> List[Dict]:
-        """查找指定周的空闲时段（教室空闲 + 学生没课 + 教师自身时间空闲）"""
+        """查找指定周的空闲时段（教室空闲 + 教师自身时间空闲）"""
         if not self.db.loaded:
             return []
 
@@ -225,11 +222,6 @@ class RescheduleAgent:
                     if teacher_name and e.teacher and teacher_name in e.teacher:
                         teacher_occupied.add(f"{e.weekday}_{slot}")
 
-        # 学生忙碌时段：{weekday: {time_slot, ...}}
-        student_busy = {}
-        if self.student:
-            student_busy = self.student.get_busy_slots(target_week)
-
         available = []
         for wd in weekdays:
             for ts in time_slots:
@@ -240,11 +232,6 @@ class RescheduleAgent:
                     # 检查1：教室空闲
                     if f"{wd}_{ts}_{rm}" in occupied:
                         continue
-                    # 检查2：学生没课（567/678 归入 567 检查）
-                    if self.student and wd in student_busy:
-                        check_ts = "567" if ts in ("567", "678") else ts
-                        if check_ts in student_busy[wd]:
-                            continue
                     available.append({
                         "weekday": wd,
                         "time_slot": ts,
@@ -317,25 +304,6 @@ class RescheduleAgent:
                 if teacher_name and te and teacher_name in te:
                     teacher_occupied.setdefault(f"{wd}_{ts}", {**info, "unparsed": True})
 
-        # 学生忙碌时段：{weekday: {time_slot: 课程名文案}}
-        # 优先用"带课程名"的查询（教秘要拿课程名去跟教师解释）；取不到时退回占位文案，
-        # 但**绝不因为取不到名字就放行**——冲突判定仍然以 get_busy_slots 为准。
-        student_busy = {}
-        student_busy_courses: Dict[str, Dict[str, list]] = {}
-        if self.student:
-            busy = self.student.get_busy_slots(target_week)
-            get_names = getattr(self.student, "get_busy_courses", None)
-            if callable(get_names):
-                try:
-                    student_busy_courses = get_names(target_week) or {}
-                except Exception:
-                    student_busy_courses = {}
-            for wd, slots in busy.items():
-                student_busy[wd] = {}
-                for s in slots:
-                    names = student_busy_courses.get(wd, {}).get(s) or []
-                    student_busy[wd][s] = "、".join(names) if names else "学生课表课程"
-
         available = []
         excluded = []
         for wd in weekdays:
@@ -383,18 +351,6 @@ class RescheduleAgent:
                             "reason": why,
                         })
                         continue
-                    # 检查2：学生没课（567/678 归入 567 检查）
-                    if self.student and wd in student_busy:
-                        check_ts = "567" if ts in ("567", "678") else ts
-                        if check_ts in student_busy[wd]:
-                            excluded.append({
-                                "weekday": wd, "time_slot": ts, "room": rm,
-                                "date": week_to_date(target_week, wd, self._get_semester_start()),
-                                "reason_type": "student_busy",
-                                "courses": student_busy_courses.get(wd, {}).get(check_ts) or [],
-                                "reason": f"学生该时段有课（{student_busy[wd][check_ts]}）",
-                            })
-                            continue
                     available.append({
                         "weekday": wd,
                         "time_slot": ts,
@@ -485,8 +441,8 @@ class RescheduleAgent:
         #
         # 实测（真实数据，第 1–16 周）：`我是吴琳，把声速测量调到第-1周` 返回
         # **150 个可用 / 0 个被排除**；而正常周次是 118 可用 / 32 排除（第2周）、
-        # 78 / 36（第7周）。也就是说负数周次下**三重冲突检查一条都没命中**：
-        # 教室/教师占用是按 `e.week == target_week` 过滤的，学生课表按周查，
+        # 78 / 36（第7周）。也就是说负数周次下**冲突检查一条都没命中**：
+        # 教室/教师占用是按 `e.week == target_week` 过滤的，
         # 周次落在表外就全查不到 → 冲突检查静默空转 → 满屏绿格。
         #
         # 成因是两条解析路径此前待遇不同：规则路径有 `min(target_week, 上界)` 夹取，
@@ -597,7 +553,7 @@ class RescheduleAgent:
                             "weekday": s["weekday"],
                             "time_slot": s["time_slot"],
                             "room": s["room"],
-                            "reason": "系统推荐：该时段教室空闲且学生无课",
+                            "reason": "系统推荐：该时段教室空闲",
                         })
 
         if ai_plans:

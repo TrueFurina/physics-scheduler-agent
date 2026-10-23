@@ -78,7 +78,7 @@ def test_real_sheet_unparsed_rows_are_kept_not_dropped():
 # ---------------------------------------------------------------------------
 
 def _agent(db: ScheduleDatabase) -> RescheduleAgent:
-    return RescheduleAgent(db, student=None)
+    return RescheduleAgent(db)
 
 
 def test_teacher_busy_at_afternoon_late_blocks_the_same_slot():

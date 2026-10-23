@@ -98,14 +98,6 @@ export interface UploadResponse {
   week_range: number[];
 }
 
-export interface StudentStatus {
-  name: string;
-  student_id: string;
-  semester: string;
-  total_courses: number;
-  sample_courses: [string, string, string, string][];
-}
-
 export interface Teacher {
   name: string;
   title: string;
@@ -161,18 +153,6 @@ export const rescheduleApi = {
     });
   },
 
-  // 上传学生课表
-  uploadStudent: (file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    return api.post<{ success: boolean; message: string; total_courses: number }>('/reschedule/upload-student', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-  },
-
-  // 学生课表状态
-  getStudentStatus: () => api.get<StudentStatus>('/reschedule/student-status'),
-
   // 教师列表（F1 身份选择）
   getTeachers: () => api.get<{ success: boolean; teachers: Teacher[]; total: number }>('/reschedule/teachers'),
 
@@ -214,26 +194,22 @@ export const rescheduleApi = {
     data: { applied: number; skipped: number; details: string[] };
   }>('/reschedule/apply-move', data),
 
-  // 选课咨询（四大模块之一）
-  courseSelect: (question: string) =>
-    api.post<{ success: boolean; message: string; reply: string }>('/reschedule/course-select', { question }),
-
-  // 实验辅导（四大模块之一）
+  // 实验规范查询（端点保留、面向排课人员/教师）
   experimentTutor: (question: string) =>
     api.post<{ success: boolean; message: string; reply: string }>('/reschedule/experiment-tutor', { question }),
 
   // 排课自动生成（P1）
   //
   // 方案条目现在带 `week`：不带周次的课表教秘不知道该用到哪一周，也无法跟
-  // 已有安排表比对（R-37）。`student_checked / capacity_checked` 是"没校验
-  // 就别声称校验过"的显式交代，界面上直接由 message 呈现。
+  // 已有安排表比对（R-37）。`capacity_checked` 是"没校验就别声称校验过"的显式
+  // 交代，界面上直接由 message 呈现。
   autoSchedule: () =>
     api.post<{ success: boolean; message: string; data: {
       total_sections: number; total_sections_all: number; intro_excluded: number;
       solved: number; truncated?: boolean; coverage?: string; chunks?: any[];
       elapsed_s?: number | null;
       weeks: number[]; conflicts: any[]; schedule: any[];
-      student_checked: boolean; capacity_checked: boolean; real_entries: number;
+      capacity_checked: boolean; real_entries: number;
     } }>('/reschedule/auto-schedule'),
 
   // 自动排课初稿导出（总表 + 每班一页）：教秘拿到 171 行文本无法落地，
@@ -255,7 +231,6 @@ export const rescheduleApi = {
       affected_classes: string[];
       affected_rooms: string[];
       affected_teachers: string[];
-      affected_students: string[];
       conflict_slots: any[];
     } }>('/reschedule/impact-analysis', { message }),
 
