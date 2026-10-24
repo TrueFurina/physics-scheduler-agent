@@ -11,6 +11,7 @@ import {
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
 import { describeApiError } from './utils/apiError';
+import { clearStaleLoadBanner } from './utils/msg';
 import ErrorBoundary from './components/ErrorBoundary';
 import type { View, ImpactResult, AiPlan, NlSlotContext, ScheduleGrid } from './types';
 import IdentityView from './views/IdentityView';
@@ -603,7 +604,10 @@ function App() {
       });
       setTeachers(t.data.teachers);
       setDataLoaded(true);
-      setMsg('');
+      // 只清"自己留下的"加载失败横幅：首屏后台加载的成功可能晚于用户的一次点击
+      // （冷启动沙箱上 /status 可拖数秒），无条件清空会把用户刚看到的错误提示静默
+      // 吞掉 —— 提示出现又消失等于没提示（R-30 同族，probe_faults solve 场景抓到）。
+      setMsg((prev) => clearStaleLoadBanner(prev));
     } catch (err: any) {
       const why = describeApiError(err);
       setLoadError(why);
