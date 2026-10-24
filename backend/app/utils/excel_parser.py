@@ -157,10 +157,14 @@ def _detect_course_col(sheet) -> Optional[int]:
     `ScheduleEntry.course`，成为权威归属（resolve_course 优先用它，不再反推）。
 
     ⚠️ **精确匹配别名，不做模糊子串**（与 parse_master_tasks 的宽松匹配刻意不同）：
-    真实表第 8 列叫「课程类别」（值 C/B/普物3，是课程**分类码**而非课程名），
+    真实表第 9 列叫「课程类别」（值 C/B/普物3，是课程**分类码**而非课程名），
     模糊匹配 `课程 in 课程类别` 会把它误认成课程列 ⇒ 433 条全落密码值、锁定基线
-    distinct_courses 从 1 变 3、导出课程列显示"C"。是否采用「课程类别」是**产品决策**
-    （需码→名映射），不能被一次表头匹配悄悄改掉。故这里只认表头**恰好等于**课程名别名。
+    distinct_courses 从 1 变 3、导出课程列显示"C"。
+
+    分类码列的采用是**独立的产品决策**（2026-10-24 用户拍板选 B，见
+    docs/决策-课程类别归属-20261024.md）：走 `_detect_course_category_col` +
+    `translate_course_code` 翻译，与这里的课程名列探测**刻意分开**（码翻译 ≠
+    列探测，混在一起会把 R-66 的精确匹配教训搞糊）。真课程列永远优先。
     """
     aliases = MASTER_FIELDS["course"]
     for r in (1, 2):
@@ -172,6 +176,53 @@ def _detect_course_col(sheet) -> Optional[int]:
             if _norm_header(c) in aliases:
                 return i
     return None
+
+
+# ---------------------------------------------------------------------------
+# 课程分类码 → 课程名（产品决策 B，2026-10-24 用户拍板）
+#
+# 真实安排表第 9 列「课程类别」携带 C/B/普物3 三门课的分班码。三轴分离证据
+# （教师/班级/项目，见决策文档 §2.2）表明这是三门不同的课，不是一门课的两个
+# 轨；学校自己的公文（「任课老师安排表」公共课程名称）与考试班名
+# （「大物实验B/C班级」）给出映射值。映射待教秘终判 —— 若学校出带真「课程」
+# 列的新表，本映射自然退场（_detect_course_col 优先，见上）。
+# ---------------------------------------------------------------------------
+COURSE_CODE_MAP = {
+    "C": "大学物理实验C",
+    "B": "大学物理实验B",
+    "普物3": "普通物理实验3",
+}
+
+COURSE_CATEGORY_HEADER = "课程类别"
+
+
+def _detect_course_category_col(sheet) -> Optional[int]:
+    """在安排表前两行表头里找「课程类别」列（分类码列）的索引；找不到返回 None。
+
+    与 `_detect_course_col`（课程名列）刻意分开：语义上这是"分类码翻译"不是
+    "课程列探测"。精确等于表头别名，同样不做模糊子串。
+    """
+    for r in (1, 2):
+        try:
+            cells = next(sheet.iter_rows(min_row=r, max_row=r, values_only=True))
+        except StopIteration:
+            continue
+        for i, c in enumerate(cells):
+            if _norm_header(c) == COURSE_CATEGORY_HEADER:
+                return i
+    return None
+
+
+def translate_course_code(raw) -> str:
+    """分类码 → 课程名；未知码**原样返回**（不静默吞成默认课）。
+
+    原样返回让异常值在 data-audit / 导出里可见（教秘能看见表里出现了没听说过的
+    码），吞成默认课就是把问题藏起来（R-35「时段看不懂就静默丢弃」同族）。
+    """
+    code = str(raw or "").strip()
+    if not code:
+        return ""
+    return COURSE_CODE_MAP.get(code, code)
 
 
 def parse_master_tasks(filepath: str):
@@ -452,6 +503,9 @@ class ScheduleDatabase:
 
         # 课程列（R-66 显式外键）：源表自带就认出来逐行落 course，没有则全程留空回落反推。
         course_col = _detect_course_col(sheet)
+        # 产品决策 B（2026-10-24）：没有真课程列时，采用「课程类别」分类码列并逐行
+        # 翻译成课程名。两列探测刻意分开（码翻译 ≠ 课程列探测），课程列永远优先。
+        category_col = None if course_col is not None else _detect_course_category_col(sheet)
 
         for row in sheet.iter_rows(min_row=3, values_only=True):
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
@@ -460,6 +514,8 @@ class ScheduleDatabase:
             course_str = ""
             if course_col is not None and len(row) > course_col and row[course_col]:
                 course_str = str(row[course_col]).strip()
+            elif category_col is not None and len(row) > category_col and row[category_col]:
+                course_str = translate_course_code(row[category_col])
 
             class_str = str(class_name).strip() if class_name else ""
             exp_str = str(experiment).strip() if experiment else ""

@@ -4,11 +4,12 @@
 
 先说清楚这条测的是什么（不粉饰现状）
 ------------------------------------
-安排表行**不带课程**，`ScheduleEntry` 没有 course 字段；课程只存在于主数据的
-`experiment.course` 上，靠项目名反推。所以：
+课程归属以 R-66 显式外键（`ScheduleEntry.course`）为权威，主数据
+`experiment.course` 反推为兜底。2026-10-24 产品决策 B 起，真实表经「课程
+类别」分类码列逐行显式归属三门课（大学物理实验B/C、普通物理实验3，见
+test_course_category.py）；无该列的学校仍全部归默认课程「大学物理实验」。
 
-- 当前真实表所有项目都归默认课程「大学物理实验」（课程数 1），跨课程恒 0 处 ——
-  那是**数据现状**，不是"功能生效了"。
+- 跨课程撞车恒 0 是**数据现状**（每班单一类别），不是"功能生效了"。
 - 教秘一旦用 R-55 的台账导回把某个项目改归另一门课，跨课程立刻会真实出现。
   所以能力必须先落地，且**必须能证明它真的会报**，而不是永远 0。
 
@@ -29,8 +30,11 @@ R-66 更新（显式课程外键）
 `ScheduleEntry` 现在**有** course 字段：源安排表自带课程列时逐行落入，成为权威归属；
 `resolve_course` 优先用它，没有才回落主数据 `experiment.course` 反推。这修掉了
 "主数据 experiments 以项目名为 key、同名项目跨两门课会塌缩"的歧义（见下方
-`test_same_project_two_courses_disambiguated_by_entry_course`）。真实表无课程列 ⇒
-全部回落反推，行为与 R-57 一致（向后兼容）。
+`test_same_project_two_courses_disambiguated_by_entry_course`）。
+
+2026-10-24 产品决策 B 追加：真实表无真课程列、但有「课程类别」分类码列 ⇒ 经
+`COURSE_CODE_MAP` 翻译后 433 条全部显式归属三门课，不再回落反推（向后兼容：
+两列都没有的学校行为与 R-57 一致）。
 """
 
 import asyncio
@@ -292,9 +296,13 @@ def test_audit_says_course_is_fallback_when_project_not_in_master(db, monkeypatc
 # ---------------------------------------------------------------- 7. 真实表基线
 
 def test_real_table_baseline():
-    """真实 433 条：所有项目归同一门课，跨课程撞车 0 处（口径锁死）。
+    """真实 433 条：三门课程显式归属，跨课程撞车 0 处（口径锁死）。
 
-    ⚠️ 这 0 处是**数据现状**，不是"功能生效" —— 功能生效由上面的用例证明。
+    ⚠️ distinct_courses==3 是**产品决策 B**（2026-10-24 用户拍板：采用「课程
+    类别」分类码列 + COURSE_CODE_MAP 翻译），不是代码漂移 —— 决策文档
+    docs/决策-课程类别归属-20261024.md，反假绿判据见 test_course_category.py。
+    改这个数字前先读那份文档。
+    ⚠️ 0 处撞车是**数据现状**（每班单一类别），不是"功能生效" —— 功能生效由上面的用例证明。
     """
     real = os.path.join(os.path.dirname(__file__), "..", "..", "schedule.xlsx")
     if not os.path.exists(real):
@@ -307,14 +315,20 @@ def test_real_table_baseline():
     assert res["conflicts"] == [], res["conflicts"]
     assert res["coverage"]["total_entries"] == len(d.entries)
     assert res["coverage"]["master_ready"] is True
-    assert res["coverage"]["distinct_courses"] == 1, res["coverage"]
+    # 产品决策 B：C→大学物理实验C / B→大学物理实验B / 普物3→普通物理实验3
+    assert res["coverage"]["distinct_courses"] == 3, res["coverage"]
+    # 433 条全部显式归属（源表分类码列逐行给出），零回落默认
+    assert res["coverage"]["explicit_in_entry"] == res["coverage"]["total_entries"], res["coverage"]
+    assert res["coverage"]["fallback_default"] == 0, res["coverage"]
+    courses = {e.course for e in d.entries}
+    assert courses == {"大学物理实验C", "大学物理实验B", "普通物理实验3"}, courses
     # 口径锁死（R-58 后）：3 个绪论类项目也登记为主数据实体 ⇒ 433 条全部查得课程，
     # 不再有"回落默认而非查得"的 17 条缺口。绪论项目 marked schedulable=False。
     assert res["coverage"]["project_in_master"] == res["coverage"]["total_entries"], res["coverage"]
     for intro in ("绪论-光学实验预备知识", "绪论课（教室已安排，请查系统）", "绪论课（教室自己申请）"):
         assert intro in md.experiments, intro
         assert md.overview()  # overview 可渲染
-    # 单课程时也只有一个块，不产生分块标题
+    # 每班单一类别（决策文档 §2.4-1）⇒ 即使 3 门课，单班仍只有一个块，无分块标题
     blocks = group_by_course(
         [e for e in d.entries if e.class_name == d.entries[0].class_name], md)
     assert len(blocks) == 1

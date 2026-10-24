@@ -52,7 +52,11 @@ from typing import Any, Dict, List, Optional
 #     表现为 test_real_table_baseline 莫名红（distinct_courses==3），
 #     隔离实验（PARSE_CACHE=0）却全绿。v5 从未发布、只是本地中间态产物，
 #     统一作废即可。教训：签名里的 v 必须跟随**任何**解析逻辑变化，不止结构变化。
-CACHE_VERSION = 6
+# v7：产品决策 B（2026-10-24）—— 没有真课程列时采用「课程类别」分类码列，
+#     逐行翻译成课程名（COURSE_CODE_MAP）。解析**行为**又变了（course 从空串
+#     变三门课名），同 v6 的教训：不 bump 则 v6 磁盘缓存（course 全空）签名仍
+#     "有效"被命中，映射静默不生效。
+CACHE_VERSION = 7
 
 # ScheduleEntry 序列化后的字段数（entries_to_rows 产出 / _validate 校验 / ScheduleEntry(*row) 反序列化
 # 三处必须一致）。字段顺序即 ScheduleEntry.__init__ 的位置参数顺序：
