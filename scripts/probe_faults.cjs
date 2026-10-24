@@ -19,6 +19,17 @@
  *                失败提示若出现在页面顶端而用户没滚动，等于没提示
  *
  * 用法：SITE=http://127.0.0.1:8023/ npm run probe:faults
+ *
+ * ⚠️ 已知线上 flakes（打默认的线上冻结站时；本地 SITE 不受影响）
+ * --------------------------------------------------------------
+ * 1. `solve` 场景：线上冻结构建里，首屏后台加载成功时会**无条件清空横幅**，
+ *    与 solve 的失败横幅竞态（冷沙箱上 /status 拖数秒，加载成功晚于点击）——
+ *    表现为"界面没有给出任何提示"的假红。本地已修（utils/msg.ts
+ *    clearStaleLoadBanner：只清自己留下的「加载失败」），线上解冻后自愈。
+ *    复现/判据：延迟 /status 数秒再放行，本地修复版横幅必须存活。
+ * 2. `teachers` 场景：withRetry 三连退避约 2.3s，冷沙箱冷启动时 /status 本身
+ *    就要数秒，3200ms 的等待窗口不够（已放宽到 5000ms）。仍是环境性敏感：
+ *    线上偶发红时先看是不是冷启动，别当回归。
  */
 const { launch } = require('./_browser.cjs');
 const path = require('path');
@@ -114,7 +125,9 @@ const SCENARIOS = [
     body: 'Internal Server Error',
     contentType: 'text/plain',
     drive: async (page) => {
-      await page.waitForTimeout(3200);   // withRetry 三连退避约 2.3s，等它走完
+      // 5000ms：withRetry 三连退避约 2.3s + 冷沙箱冷启动时 /status 本身的耗时。
+      // 窗口给足才不会把"慢"误报成"没提示"（断言本身不变：横幅必须有、说中文、可操作）。
+      await page.waitForTimeout(5000);   // withRetry 三连退避约 2.3s，等它走完
     },
   },
   {
@@ -150,7 +163,7 @@ const SCENARIOS = [
     // 页面根本没滚动 —— 那样这条断言从来测不到真场景（R-25：探针的价值等于它敢红的能力）。
     drive: async (page, ctx) => {
       await page.getByRole('button', { name: /并行排课/ }).first().click();
-      await page.waitForFunction(() => /2024级/.test(document.body.innerText), { timeout: 40000 });
+      await page.waitForFunction(() => /2024级/.test(document.body.innerText), null, { timeout: 40000 });
       await ctx.arm();                     // 总览已到，现在才让 solve 开始失败
       const buttons = page.getByRole('button', { name: /^一键排课$/ });
       const n = await buttons.count();
@@ -169,7 +182,7 @@ const SCENARIOS = [
     mode: 'card',
     drive: async (page) => {
       await page.getByRole('button', { name: /数据看板/ }).first().click();
-      await page.waitForFunction(() => /体检没能完成/.test(document.body.innerText), { timeout: 40000 });
+      await page.waitForFunction(() => /体检没能完成/.test(document.body.innerText), null, { timeout: 40000 });
     },
     assert: async (page) => {
       const t = await page.evaluate(() => document.body.innerText);
@@ -190,7 +203,7 @@ const SCENARIOS = [
     mode: 'inline',
     drive: async (page) => {
       await page.getByRole('button', { name: /数据看板/ }).first().click();
-      await page.waitForFunction(() => /共 \d+ 条安排/.test(document.body.innerText), { timeout: 40000 });
+      await page.waitForFunction(() => /共 \d+ 条安排/.test(document.body.innerText), null, { timeout: 40000 });
       await page.waitForTimeout(1200);
     },
     assert: async (page) => {
@@ -210,7 +223,7 @@ const SCENARIOS = [
     inlineMatch: '请求失败',
     drive: async (page) => {
       await page.locator('button', { hasText: TEACHER }).first().click();
-      await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+      await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
       await page.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第3周`);
       await page.getByRole('button', { name: /^发送$/ }).click();
       await page.waitForTimeout(2500);
@@ -228,7 +241,7 @@ const SCENARIOS = [
     inlineMatch: '请求失败',
     drive: async (page) => {
       await page.locator('button', { hasText: TEACHER }).first().click();
-      await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+      await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
       await page.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第3周`);
       await page.getByRole('button', { name: /^发送$/ }).click();
       await page.waitForTimeout(2500);

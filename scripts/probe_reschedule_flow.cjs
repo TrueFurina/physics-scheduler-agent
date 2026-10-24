@@ -57,7 +57,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   let ok = false;
   try {
     await page.locator('button', { hasText: TEACHER }).first().click();
-    await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+    await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
     ok = true;
   } catch (e) {
     rec(false, '前置：进入我的课程', String(e).slice(0, 100));
@@ -76,9 +76,9 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   try {
     const t1 = Date.now();
     await page.getByRole('button', { name: /申请调课/ }).first().click();
-    await page.waitForFunction(() => /调课申请 · 模板表单/.test(document.body.innerText), { timeout: 30000 });
+    await page.waitForFunction(() => /调课申请 · 模板表单/.test(document.body.innerText), null, { timeout: 30000 });
     // 沙盘"画出来"的标志是可用/排除时段已带数字（此时数据已到）
-    await page.waitForFunction(() => /可用时段（\d+）/.test(document.body.innerText), { timeout: 30000 });
+    await page.waitForFunction(() => /可用时段（\d+）/.test(document.body.innerText), null, { timeout: 30000 });
     sandboxMs = Date.now() - t1;
     await page.waitForTimeout(300);
     const t = await text(page);
@@ -115,7 +115,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   try {
     const before = await page.evaluate(() => (document.body.innerText.match(/可用时段（(\d+)）/) || [])[1]);
     await page.getByRole('combobox').first().selectOption({ label: '第4周' });
-    await page.waitForFunction(() => /周课表沙盘（第4周）/.test(document.body.innerText), { timeout: 20000 });
+    await page.waitForFunction(() => /周课表沙盘（第4周）/.test(document.body.innerText), null, { timeout: 20000 });
     await page.waitForTimeout(800);
     const after = await page.evaluate(() => (document.body.innerText.match(/可用时段（(\d+)）/) || [])[1]);
     rec(true, '🔄 切换目标周次', `第2周起手 ${before} 个可用 → 第4周 ${after} 个可用（标题已切到第4周）`);
@@ -128,7 +128,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   try {
     const t2 = Date.now();
     await page.getByRole('button', { name: /分析影响范围/ }).first().click();
-    await page.waitForFunction(() => /共 \d+ 处冲突/.test(document.body.innerText), { timeout: 30000 });
+    await page.waitForFunction(() => /共 \d+ 处冲突/.test(document.body.innerText), null, { timeout: 30000 });
     const impactMs = Date.now() - t2;
     await page.waitForTimeout(400);
     const t = await text(page);
@@ -156,7 +156,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   try {
     const t3 = Date.now();
     // 等**卡片**而不是标题：标题在"正在挑候选…"占位时就已经在了（第一版探针就栽在这）
-    await page.waitForFunction(() => /方案 1/.test(document.body.innerText), { timeout: 60000 });
+    await page.waitForFunction(() => /方案 1/.test(document.body.innerText), null, { timeout: 60000 });
     await page.waitForTimeout(300);
     const t = await text(page);
     const planCount = (t.match(/方案 \d/g) || []).length;
@@ -170,7 +170,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
   // ⑤ 未登录提交 → 必须弹出云端登录（静默失败是最糟的体验）
   try {
     await page.getByRole('button', { name: /提交调课申请/ }).first().click();
-    await page.waitForFunction(() => /云端登录/.test(document.body.innerText), { timeout: 15000 });
+    await page.waitForFunction(() => /云端登录/.test(document.body.innerText), null, { timeout: 15000 });
     const hasPhone = await page.locator('input[placeholder="手机号"]').count();
     rec(hasPhone > 0, '🔐 未登录提交守卫', `弹出云端登录弹窗，手机号输入框 ${hasPhone} 个`);
     await page.screenshot({ path: path.join(SHOT_DIR, 'reschedule-login-guard.png') });
@@ -195,7 +195,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     await p2.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p2.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
     await p2.locator('button', { hasText: TEACHER }).first().click();
-    await p2.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+    await p2.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
 
     const t4 = Date.now();
     await p2.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第3周`);
@@ -203,7 +203,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     // 等"沙盘真的画出来"：周次标题 + 可用时段计数都出现才算数
     await p2.waitForFunction(
       () => /周课表沙盘（第3周）/.test(document.body.innerText) && /可用时段（\d+）/.test(document.body.innerText),
-      { timeout: 30000 },
+      null, { timeout: 30000 },
     );
     const nlMs = Date.now() - t4;
     const t = await p2.evaluate(() => document.body.innerText);
@@ -249,12 +249,12 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     await p3.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p3.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
     await p3.locator('button', { hasText: TEACHER }).first().click();
-    await p3.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+    await p3.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
 
     const input = p3.locator('input[placeholder="输入大白话调课需求..."]');
     await input.fill('帮我调课');
     await p3.getByRole('button', { name: /^发送$/ }).click();
-    await p3.waitForFunction(() => /需要补充信息/.test(document.body.innerText), { timeout: 45000 });
+    await p3.waitForFunction(() => /需要补充信息/.test(document.body.innerText), null, { timeout: 45000 });
     await p3.waitForTimeout(300);
     const t1 = await p3.evaluate(() => document.body.innerText);
     const remembered = (t1.match(/已记住：([^\n]*)/) || [])[1] || '';
@@ -273,7 +273,7 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     await p3.getByRole('button', { name: /^发送$/ }).click();
     await p3.waitForFunction(
       () => /周课表沙盘（第3周）/.test(document.body.innerText) && /可用时段（\d+）/.test(document.body.innerText),
-      { timeout: 45000 },
+      null, { timeout: 45000 },
     );
     rec(true, '🧠 第二轮补一句就出结果', `${Date.now() - t5}ms 出沙盘（教秘只说了"我要调到第3周"）`);
     await p3.screenshot({ path: path.join(SHOT_DIR, 'nl-multiturn.png'), fullPage: true });
@@ -292,13 +292,13 @@ const text = (page) => page.evaluate(() => document.body.innerText);
     await p4.goto(SITE, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await p4.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
     await p4.locator('button', { hasText: TEACHER }).first().click();
-    await p4.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+    await p4.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
 
     await p4.locator('input[placeholder="输入大白话调课需求..."]').fill(`我是${TEACHER}，把声速测量调到第99周`);
     await p4.getByRole('button', { name: /^发送$/ }).click();
     await p4.waitForFunction(
       () => /不在实验安排表范围内/.test(document.body.innerText),
-      { timeout: 30000 },
+      null, { timeout: 30000 },
     );
     await p4.waitForTimeout(400);
     const t = await p4.evaluate(() => document.body.innerText);

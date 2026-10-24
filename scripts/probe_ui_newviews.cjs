@@ -294,7 +294,7 @@ async function fullyInViewport(page, selector) {
     let landedAtEnd = false;
     try {
       await page.getByRole('button', { name: /并行排课/ }).first().click();
-      await page.waitForFunction(() => document.body.innerText.includes('2024级'), { timeout: 40000 });
+      await page.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
 
       // L1：全校求解出方案（LandPlanPanel 的 schedule 来源；单班结果不进该面板）
       const tS = Date.now();
@@ -427,7 +427,7 @@ async function fullyInViewport(page, selector) {
     // 且签名判据比 landed 更强：413 巧合下"写入但条数不变"只有签名能抓住。
     const base2Sig = await fullSignature(p2);
     await p2.getByRole('button', { name: /并行排课/ }).first().click();
-    await p2.waitForFunction(() => document.body.innerText.includes('2024级'), { timeout: 40000 });
+    await p2.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
     await p2.getByRole('button', { name: /一键排全校/ }).first().click();
     await waitForText(p2, /全校一键排课 · \d+\/\d+ 个班排定/, 240000, 'L0 求解');
     await p2.getByRole('button', { name: /落地为正式安排表/ }).first().click();
@@ -438,7 +438,7 @@ async function fullyInViewport(page, selector) {
     await p2.getByRole('button', { name: /确认采纳/ }).first().click();
     let modalShown = false;
     try {
-      await p2.waitForFunction(() => /☁️ 云端登录/.test(document.body.innerText), { timeout: 15000 });
+      await p2.waitForFunction(() => /☁️ 云端登录/.test(document.body.innerText), null, { timeout: 15000 });
       modalShown = true;
     } catch { /* 下面按 false 判 */ }
     const after2 = await getStatus(p2);

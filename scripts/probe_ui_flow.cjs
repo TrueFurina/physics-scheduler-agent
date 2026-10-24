@@ -48,7 +48,7 @@ function rec(ok, name, detail, opts = {}) {
       const names = ['吴琳','吴琼','张妹玉','林晨','林珠云','柯达','洪锦泉','翁铭华','肖刚','郑辉','鄢仁文','钟蔚','陈胜钰'];
       const btns = Array.from(document.querySelectorAll('button'));
       return btns.filter((b) => names.some((n) => (b.textContent || '').includes(n))).length >= 13;
-    }, { timeout: 45000 });
+    }, null, { timeout: 45000 });
     teacherCount = await page.evaluate(() => {
       const names = ['吴琳','吴琼','张妹玉','林晨','林珠云','柯达','洪锦泉','翁铭华','肖刚','郑辉','鄢仁文','钟蔚','陈胜钰'];
       return Array.from(document.querySelectorAll('button')).filter((b) => names.some((n) => (b.textContent || '').includes(n))).length;
@@ -68,7 +68,7 @@ function rec(ok, name, detail, opts = {}) {
     const tA = Date.now();
     await page.getByRole('button', { name: /一键自动排课/ }).first().click();
     // 等待条件必须是"只在结果出现后才有"的串：页面别处没有「个教学任务」
-    await page.waitForFunction(() => /个教学任务/.test(document.body.innerText), { timeout: 120000 });
+    await page.waitForFunction(() => /个教学任务/.test(document.body.innerText), null, { timeout: 120000 });
     await page.waitForTimeout(500);
     const txt = await page.evaluate(() => document.body.innerText);
     const m = txt.match(/成功\s*(\d+)\/(\d+)\s*个教学任务/);
@@ -109,7 +109,7 @@ function rec(ok, name, detail, opts = {}) {
   try {
     const t1 = Date.now();
     await page.locator('button', { hasText: '吴琳' }).first().click();
-    await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), { timeout: 30000 });
+    await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
     await page.waitForTimeout(800);
     const bodyLen = await page.evaluate(() => document.body.innerText.length);
     rec(bodyLen > 800, '② 我的课程', `进入课程页 ${Date.now() - t1}ms，页面文本 ${bodyLen} 字`);
@@ -121,7 +121,7 @@ function rec(ok, name, detail, opts = {}) {
   // 并行排课：总览 + 一键排课
   try {
     await page.getByRole('button', { name: /并行排课/ }).first().click();
-    await page.waitForFunction(() => document.body.innerText.includes('2024级'), { timeout: 40000 });
+    await page.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
     const classCount = await page.evaluate(() => (document.body.innerText.match(/2024级/g) || []).length);
     rec(classCount > 5, '⚡ 并行排课 · 课程总览', `渲染出班级卡片（"2024级" 出现 ${classCount} 次）`);
     await page.screenshot({ path: path.join(SHOT_DIR, 'flow-parallel.png') });
@@ -133,7 +133,7 @@ function rec(ok, name, detail, opts = {}) {
       await page.getByRole('button', { name: /一键排全校/ }).first().click();
       await page.waitForFunction(
         () => /全校一键排课 · \d+\/\d+ 个班排定/.test(document.body.innerText),
-        { timeout: 180000 },
+        null, { timeout: 180000 },
       );
       await page.waitForTimeout(400);
       const stxt = await page.evaluate(() => document.body.innerText);
@@ -161,7 +161,7 @@ function rec(ok, name, detail, opts = {}) {
     // 注意：不能用"周次"之类的泛词做等待条件 —— 页面本来就有这些字，会立刻命中造成假通过。
     await page.waitForFunction(
       () => /个单元已排定/.test(document.body.innerText),
-      { timeout: 150000 },
+      null, { timeout: 150000 },
     );
     await page.waitForTimeout(600);
     const txt = await page.evaluate(() => document.body.innerText);
@@ -229,11 +229,11 @@ function rec(ok, name, detail, opts = {}) {
     await page.getByRole('button', { name: /数据看板/ }).first().click();
     await page.waitForFunction(
       () => /共 \d+ 条安排\s*｜\s*\d+ 位教师/.test(document.body.innerText),
-      { timeout: 40000 },
+      null, { timeout: 40000 },
     );
     await page.waitForFunction(
       () => /平均教室利用率/.test(document.body.innerText),
-      { timeout: 20000 },
+      null, { timeout: 20000 },
     );
     const txt = await page.evaluate(() => document.body.innerText);
     const mEntries = txt.match(/共 (\d+) 条安排\s*｜\s*\d+ 位教师\s*｜\s*(\d+) 间场地/);
@@ -301,7 +301,7 @@ function rec(ok, name, detail, opts = {}) {
     await page.getByRole('button', { name: /实验规范查询/ }).first().click();
     await page.waitForFunction(
       () => /查询实验项目的学时/.test(document.body.innerText),
-      { timeout: 30000 },
+      null, { timeout: 30000 },
     );
     const inputCount = await page.locator('input[placeholder*="扭摆法测转动惯量需要几学时"]').count();
     rec(inputCount > 0, '🔬 实验规范查询（懒加载）', `视图已渲染，提问框 ${inputCount} 个`);
@@ -335,7 +335,7 @@ function rec(ok, name, detail, opts = {}) {
     }
     await p2.waitForFunction(
       () => /页面资源已更新|这个模块遇到了问题/.test(document.body.innerText),
-      { timeout: 30000 },
+      null, { timeout: 30000 },
     );
     const txt2 = await p2.evaluate(() => document.body.innerText);
     // 顶部导航是边界的兄弟节点，必须仍然可用 —— 这才是"降级"与"白屏"的区别
