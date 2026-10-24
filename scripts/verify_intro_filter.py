@@ -27,7 +27,7 @@ import tempfile
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from verify_master_roundtrip import _get, _post_file, _post_json
+from verify_master_roundtrip import _delete, _get, _post_file, _post_json
 
 SITE = "http://127.0.0.1:8023"  # 仅作默认值展示；实际目标由 base.API 控制
 
@@ -85,6 +85,9 @@ def main():
     base.API = f"{args.site.rstrip('/')}/api/reschedule"
 
     token = _post_json("/admin-login", {"username": "admin", "password": "admin123"})["token"]
+    # 先清空残留清单：本脚本断言的是「只剩我这一份」的 pending_total，
+    # 若上一个探针（如 verify_graybox）留了清单，这里会读到 6+1 而误报 No-Go。
+    _delete("/master/tasks", token)
 
     print("\n[1] 上传 1 正常 + 2 绪论/考试")
     rows = [(OK_EXP, "ok")] + BAD_ROWS

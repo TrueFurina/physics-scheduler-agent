@@ -338,7 +338,9 @@ class MasterData:
                                 "week_min": v.get("week_min"), "week_max": v.get("week_max")}
                             for n, v in (d.get("classes") or {}).items()}
             self._rebuild_courses()
-            self.initialized = True
+            # 空表（无项目且无班级）不认作"已初始化"：它多半是历史脏落盘，
+            # 认了就等于用一份空主数据覆盖安排表反推出来的基线（实测清空过 25 个项目）。
+            self.initialized = bool(self.experiments or self.classes)
             return self
         except (TypeError, AttributeError, KeyError) as e:
             print(f"⚠️ 主数据落盘文件损坏（{e}），回退到安排表反推基线")

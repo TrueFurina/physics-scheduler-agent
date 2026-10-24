@@ -314,6 +314,22 @@ async def upload_master(file: UploadFile = File(...)):
     }
 
 
+@router.delete("/master/tasks", summary="清空已导入的教学任务清单（需管理员）",
+               dependencies=_ADMIN_ONLY)
+async def clear_master_tasks():
+    """清空 `_master_tasks`（上传的大纲清单）。
+
+    为什么需要：清单是**整批替换**语义（再传一份就覆盖），但没有"不传新清单、
+    只把旧的清掉"的入口 —— 教秘传错一次只能重启进程；探针之间也会互相污染
+    （上一个探针留下的清单改了下一个探针的 pending_total）。
+    """
+    _ensure_loaded()
+    _ensure_master_data()
+    _master_tasks.clear()
+    _persist_master_state()
+    return {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
+
+
 @router.get("/master-status", summary="主数据（大纲清单）状态")
 async def master_status():
     """当前主数据任务数、覆盖班级，以及安排表里"没排时间"的待排行数。"""
@@ -757,11 +773,16 @@ def _ensure_master_data() -> None:
     if store and _schedule_fp and store.get("schedule_fingerprint") == _schedule_fp:
         try:
             _master_data.from_dict(store.get("master") or {})
-            _master_tasks.clear()
-            _master_tasks.extend(master_store.rows_to_tasks(store.get("tasks")))
-            print(f"✅ 主数据已从落盘恢复（实验项目 {len(_master_data.experiments)}"
-                  f" / 待排任务 {len(_master_tasks)}）")
-            return
+            if _master_data.initialized:
+                _master_tasks.clear()
+                _master_tasks.extend(master_store.rows_to_tasks(store.get("tasks")))
+                print(f"✅ 主数据已从落盘恢复（实验项目 {len(_master_data.experiments)}"
+                      f" / 待排任务 {len(_master_tasks)}）")
+                return
+            # 落盘里是**空主数据**（历史 bug：未初始化时也落盘）→ 不能当权威恢复，
+            # 否则一次重启就把 17 个班/25 个项目全部清空（实测踩过）。丢弃后按表反推。
+            print("⚠️ 落盘里的主数据为空（历史脏数据），丢弃并按安排表反推")
+            master_store.clear()
         except Exception as e:
             print(f"⚠️ 主数据落盘恢复失败（{e}），回退安排表反推基线")
         master_store.clear()
@@ -781,9 +802,11 @@ def _persist_master_state() -> None:
 
     if _schedule_fp is None and _db.loaded and getattr(_db, "_filepath", None):
         _schedule_fp = master_store.schedule_fingerprint(_db._filepath)
+    # 未初始化就不写 master：写一份空表出去，下次启动会把它当权威恢复，
+    # 于是"重启一次主数据全没了"。只落清单，恢复时按表反推基线。
     master_store.save({
         "schedule_fingerprint": _schedule_fp,
-        "master": _master_data.to_dict(),
+        "master": _master_data.to_dict() if _master_data.initialized else None,
         "tasks": master_store.tasks_to_rows(_master_tasks),
     })
 

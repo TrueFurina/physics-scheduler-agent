@@ -139,10 +139,31 @@ def drive_graybox(site):
 
     result = http_json(f"{site}/api/reschedule/parallel/solve",
                        payload={"class_name": GRAYBOX_CLASS}, timeout=180)
-    return result, up
+    return result, up, tok
 
 
 # ---------------------------------------------------------------- 核查
+
+def cleanup(site, tok):
+    """删除本次注入的实体与清单 —— 探针必须自己收尾，否则下一个探针读到脏数据。"""
+    from urllib.parse import quote
+
+    def _delete(path):
+        req = urllib.request.Request(f"{site}/api/reschedule{path}", method="DELETE",
+                                     headers={"Authorization": f"Bearer {tok}"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except Exception as e:  # 清理失败不掩盖核查结论，但要出声
+            print("  ⚠️ 清理失败：", path, e)
+            return {}
+
+    for proj in ("灰箱项目A", "灰箱项目B", "灰箱项目C"):
+        _delete(f"/master/experiments/{quote(proj)}")
+    _delete(f"/master/classes/{quote(GRAYBOX_CLASS)}")
+    _delete("/master/tasks")
+    print("  🧹 已清理灰箱测试数据（实验项目/班级/清单）")
+
 
 def verify(result, baseline):
     problems = []
@@ -198,12 +219,13 @@ def main():
           f" / {len(baseline['rooms'])} 间场地 / {len(baseline['teachers'])} 位教师"
           f"（另有 {len(baseline['unknown'])} 条时段无法识别）")
 
-    result, up = drive_graybox(SITE)
+    result, up, tok = drive_graybox(SITE)
     print(f"灰箱清单上传：{up.get('message', '')}")
     print(f"求解：success={result.get('success')} status={result.get('status')} "
           f"scheduled={result.get('scheduled')}/{result.get('total_units')}")
     if not result.get("success"):
         print("❌ 灰箱求解失败：", result.get("error"))
+        cleanup(SITE, tok)
         return 1
     print(f"假设（assumptions）{len(result.get('assumptions') or [])} 条 —— 决策可见")
 
@@ -213,9 +235,11 @@ def main():
         for p in problems:
             print("  ❌", p)
         print(f"\n❌ No-Go：{len(problems)} 处核查不过")
+        cleanup(SITE, tok)
         return 1
     print("  ✅ W1-W5 词汇/存在性全过；C1/C2 与真实课程零重叠；I1 内部零自撞")
     print("\n✅ Go：灰箱模拟结果与真实数据交叉核查通过")
+    cleanup(SITE, tok)
     return 0
 
 
