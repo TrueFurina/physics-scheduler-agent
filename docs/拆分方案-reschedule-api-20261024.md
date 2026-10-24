@@ -112,12 +112,12 @@ API 契约零变化：各模块各自 `APIRouter()`，main.py 由 1 行 include 
 
 ## 5. 执行计划（10 步，每步独立可回退）
 
-每步完成标准：`pytest 399 passed` + `ruff check .` + `openapi paths == 47` + 至少一个
+每步完成标准：`pytest 408 passed` + `ruff check .` + `openapi paths == 47` + 至少一个
 相关探针绿。建议**每步一个 commit**（回退粒度细；本仓 commit 文化支持）。
 
 | 步 | 动作 | 要点 |
 |---|---|---|
-| 0 | 基线固化 | 记录当前 47 端点清单 + 399 passed + 42 文件耦合清单作对照 |
+| 0 | 基线固化 | 记录当前 47 端点清单 + 408 passed + 42 文件耦合清单作对照 |
 | 1 | 建 `state.py` | 单例/常量/锁/global 改写/加载与派生函数/`data_state` 搬入；reschedule 改为从 state import（此步端点行为不变） |
 | 2 | 建 `gates.py` + `upload_utils.py` | 纯搬运；test_api_auth 的 4 个 import 改指新模块（先红后绿演练） |
 | 3 | 拆 `routes_requests.py` | 最独立（自带 _DB_PATH）；`_DB_PATH` patch（6 处）先迁到 `state` |
