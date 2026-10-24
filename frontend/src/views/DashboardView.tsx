@@ -135,7 +135,7 @@ export default function DashboardView({
             </div>
             <div className="mb-4 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600">
               以上三类均为<strong className="text-gray-800">核心冲突，必须调整</strong>（不可强制通过）；
-              仅涉及个别学生课表的轻微冲突按业务规则可强制通过，本系统暂不判定（需要学生课表，涉及学生隐私）。
+              导师业务规则中「个别学生轻微冲突可强制通过」一档，因本系统<strong className="text-gray-800">永远不管学生事务</strong>（无学生课表数据，且涉及学生隐私）<strong className="text-gray-800">永不判定</strong>。
             </div>
             {!!auditData.parallel_note && (
               <div className="mb-4 px-3 py-2 bg-teal-50 border border-teal-200 rounded-lg text-xs text-teal-800">
