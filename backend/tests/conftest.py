@@ -29,6 +29,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("RATELIMIT_DISABLED", "1")
 os.environ.setdefault("LLM_DISABLED", "1")
+# 默认管理员口令只在演示模式有效（生产未配 ADMIN_PASS 时拒绝，见 security.py）。
+# 测试用演示口令登审批台，所以测试进程统一按演示模式跑。
+os.environ.setdefault("DEMO_MODE", "1")
 
 # 解析缓存写到系统临时目录：否则测试会把 schedule-*.json 落进仓库
 # `backend/app/data/cache/`（而该目录会随发布包上传）。

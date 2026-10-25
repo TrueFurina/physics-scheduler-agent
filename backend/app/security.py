@@ -51,6 +51,25 @@ from fastapi import HTTPException, Request, status
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
+# 默认口令只是**演示**口令：DEMO_MODE=1 时可用，生产（未设 DEMO_MODE）一律拒绝。
+# 起因（2026-10-26 实测）：线上 `POST /admin-login {"admin","admin123"}` 直接换到
+# 管理员 token —— 任何拿到链接的人都能审批/落地/清清单。关掉默认口令比"换个更长的
+# 口令"更硬：没有显式配置，就等于没有口令入口。
+_BUILTIN_DEMO_PASS = "admin123"
+
+
+def is_demo_mode() -> bool:
+    return os.getenv("DEMO_MODE", "") == "1"
+
+
+def admin_password_is_default() -> bool:
+    return hmac_equal(ADMIN_PASS, _BUILTIN_DEMO_PASS)
+
+
+def hmac_equal(a: str, b: str) -> bool:
+    import hmac as _hmac
+    return _hmac.compare_digest(str(a or "").encode(), str(b or "").encode())
+
 try:
     TOKEN_TTL_SECONDS = int(os.getenv("ADMIN_TOKEN_TTL", str(8 * 3600)))
 except ValueError:
@@ -143,7 +162,12 @@ def verify_admin_token(token: str) -> Optional[str]:
 
 
 def check_admin_credentials(username: str, password: str) -> bool:
-    """校验管理员账号口令（定时比较，避免计时侧信道）。"""
+    """校验管理员账号口令（定时比较，避免计时侧信道）。
+
+    ⚠️ 默认演示口令只在 DEMO_MODE=1 下有效；生产必须显式配置 ADMIN_PASS。
+    """
+    if admin_password_is_default() and not is_demo_mode():
+        return False
     user_ok = hmac.compare_digest(str(username or ""), ADMIN_USER)
     pass_ok = hmac.compare_digest(str(password or ""), ADMIN_PASS)
     # 两个比较都要执行完，不能短路——短路会让"账号对不对"从耗时上泄漏出去。

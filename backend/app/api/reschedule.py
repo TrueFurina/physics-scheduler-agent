@@ -1048,6 +1048,14 @@ async def admin_login(req: AdminLoginRequest):
     后续请求依然是匿名的（这正是修复前的问题）。
     """
     if not check_admin_credentials(req.username, req.password):
+        # 生产没配 ADMIN_PASS 时，别说"密码错"——那会让人一直试默认口令。
+        from app.security import admin_password_is_default, is_demo_mode
+        if admin_password_is_default() and not is_demo_mode():
+            raise HTTPException(
+                status_code=403,
+                detail="生产环境未配置管理员口令（ADMIN_PASS）：默认演示口令已禁用。"
+                       "请在部署环境设置 ADMIN_PASS 后重启；本地演示请用 DEMO_MODE=1 启动。",
+            )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     ticket = issue_admin_token(req.username.strip())
     return {
