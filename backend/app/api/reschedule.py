@@ -204,7 +204,9 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR = os.path.join(_APP_DIR, "data")
+from app.paths import DATA_DIR as _RESOLVED_DATA_DIR
+
+_DATA_DIR = _RESOLVED_DATA_DIR
 
 _EXCEL_SUFFIXES = (".xlsx", ".xls")
 
@@ -2172,7 +2174,7 @@ class ApplyMoveRequest(BaseModel):
 
 
 # SQLite 存储（重启不丢数据）
-_DB_PATH = os.path.join(_APP_DIR, "data", "requests.db")
+_DB_PATH = os.path.join(_DATA_DIR, "requests.db")
 os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
 
 

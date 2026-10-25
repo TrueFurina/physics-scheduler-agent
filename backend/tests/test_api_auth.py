@@ -29,7 +29,10 @@ from app.security import issue_admin_token, verify_admin_token
 
 client = TestClient(app)
 
-ADMIN = {"username": "admin", "password": "admin123"}
+from app import security as _security
+
+# 口令不再写死：生产部署会用 .env 覆盖 ADMIN_PASS，字面量测试会假红。
+ADMIN = {"username": _security.ADMIN_USER, "password": _security.ADMIN_PASS}
 
 
 def _admin_headers() -> dict:
@@ -182,7 +185,7 @@ def test_admin_login_rejects_wrong_password():
 
 
 def test_admin_login_rejects_wrong_username():
-    r = client.post("/api/reschedule/admin-login", json={"username": "root", "password": "admin123"})
+    r = client.post("/api/reschedule/admin-login", json={"username": "root", "password": _security.ADMIN_PASS})
     assert r.status_code == 401
 
 

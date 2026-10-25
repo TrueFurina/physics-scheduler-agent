@@ -64,7 +64,9 @@ CACHE_VERSION = 7
 ENTRY_ROW_WIDTH = 11
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
-_DEFAULT_DIR = _APP_DIR / "data" / "cache"
+from app.paths import DATA_DIR as _DATA_DIR
+
+_DEFAULT_DIR = __import__("pathlib").Path(_DATA_DIR) / "cache"
 
 # 进程内记忆：(绝对路径) → {"sig": {...}, "data": {...}}
 _MEMO: Dict[str, Dict[str, Any]] = {}

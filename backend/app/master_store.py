@@ -21,7 +21,9 @@ import os
 import tempfile
 from typing import List, Optional
 
-STORE_PATH = os.path.join(os.path.dirname(__file__), "data", "master_store.json")
+from app.paths import DATA_DIR
+
+STORE_PATH = os.path.join(DATA_DIR, "master_store.json")
 
 # 落盘格式版本。基线反推逻辑变更（如 R-58：绪论/考试类项目开始登记为实体）时
 # 必须 +1：旧版本文件整体作废回退新基线 —— 落盘是"整体恢复"语义，不设版本门的话，

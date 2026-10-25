@@ -1,3 +1,5 @@
+from app import security as _security
+
 """审批闭环的单测：`_apply_reschedule` + `/apply-move`。
 
 为什么单独立一个文件：
@@ -178,7 +180,7 @@ def test_apply_move_endpoint_moves_data_with_token(db):
 
     with TestClient(app) as client:
         login = client.post("/api/reschedule/admin-login",
-                            json={"username": "admin", "password": "admin123"})
+                            json={"username": _security.ADMIN_USER, "password": _security.ADMIN_PASS})
         assert login.status_code == 200, login.text
         token = login.json()["token"]
 
