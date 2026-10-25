@@ -48,3 +48,4 @@ server.err.log
 # 换平台/换版本时自写机制失效也不会误提交缓存垃圾）
 .ruff_cache/
 .pytest_cache/
+.wbapp_*.genie
