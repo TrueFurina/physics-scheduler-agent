@@ -43,7 +43,7 @@ CP-SAT 面对 10! 量级的对称解，实测 30 个任务 5.2 万个布尔变�
 """
 
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 from ortools.sat.python import cp_model
@@ -242,7 +242,7 @@ class AutoScheduler:
                     for t in TIME_SLOTS:
                         if not free_rooms[(w, d, t)]:
                             continue
-                        if sec["teacher"] and (w, d, t, sec["teacher"]) in teacher_busy:
+                        if sec.get("teacher") and (w, d, t, sec["teacher"]) in teacher_busy:
                             continue
                         # 分片求解时，同一班级在前面的片里已排定的格子必须避开
                         if sec["class_name"] and (w, d, t, sec["class_name"]) in class_busy:
@@ -382,6 +382,55 @@ class AutoScheduler:
             ),
         }
 
+    # ------------------------------------------------------------ 确定性兜底
+    def _greedy_fill(self, sections, room_busy, teacher_busy, class_busy) -> List[Dict]:
+        """把 CP-SAT 没排上的单元按确定性贪心补齐（只排"确实有位置"的）。
+
+        为什么需要：CP-SAT 在固定时限下**不稳定** —— 同一片数据这次 60/60、
+        下次 UNKNOWN 0（实测：171 个任务只排定 51 个，前两片全 0，而每片单独看
+        都"成功"）。演示/交付不能接受这种抖动：覆盖优先，质量其次。
+        贪心只做一件事：按"当周负载最轻"选格子，遵守场地容量/教师/班级/同组每周
+        一个实验四条硬约束；排不下就如实留空（不编造）。
+        """
+        rooms_all = self._get_rooms()
+        weeks = self._get_weeks()
+        rows: List[Dict] = []
+        week_load = Counter()
+        group_week = set()
+        for sec in sections:
+            best = None
+            for w in weeks:
+                for d in WEEKDAYS:
+                    for t in TIME_SLOTS:
+                        if sec.get("teacher") and (w, d, t, sec["teacher"]) in teacher_busy:
+                            continue
+                        if sec["class_name"] and (w, d, t, sec["class_name"]) in class_busy:
+                            continue
+                        if (sec.get("class_name"), sec.get("group"), w) in group_week:
+                            continue
+                        free = [r for r in rooms_all if (w, d, t, r) not in room_busy]
+                        if not free:
+                            continue
+                        score = (week_load[w], w, WEEKDAYS.index(d), TIME_SLOTS.index(t))
+                        if best is None or score < best[0]:
+                            best = (score, w, d, t, free[0])
+            if not best:
+                continue
+            _, w, d, t, room = best
+            rows.append({
+                "week": w, "weekday": d, "time_slot": t, "room": room,
+                "teacher": sec["teacher"], "course": sec["course"],
+                "class_name": sec["class_name"],
+            })
+            week_load[w] += 1
+            group_week.add((sec.get("class_name"), sec.get("group"), w))
+            room_busy.add((w, d, t, room))
+            if sec.get("teacher"):
+                teacher_busy.add((w, d, t, sec["teacher"]))
+            if sec.get("class_name"):
+                class_busy.add((w, d, t, sec["class_name"]))
+        return rows
+
     # ------------------------------------------------------------ 全校一键（分片）
     def solve_all(self, chunk_size: int = 60, max_chunks: int = 40,
                   flatten_seconds: float = 5.0) -> Dict:
@@ -417,19 +466,16 @@ class AutoScheduler:
         statuses: List[str] = []
         t_start = time.time()
 
-        for idx, chunk in enumerate(chunks, 1):
-            t0 = time.time()
+        def _place(sub, seconds):
+            """求一个子片并把结果并入全局占用；返回 (rows, conflicts, status)。"""
             r = self.solve(
-                sections_override=chunk,
+                sections_override=sub,
                 extra_room_busy=room_busy,
                 extra_teacher_busy=teacher_busy,
                 extra_class_busy=class_busy,
-                flatten_seconds=flatten_seconds,
+                flatten_seconds=seconds,
             )
             rows = r.get("schedule") or []
-            schedule.extend(rows)
-            conflicts.extend(r.get("conflicts") or [])
-            statuses.append(str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE")))
             for row in rows:
                 key = (row["week"], row["weekday"], row["time_slot"])
                 room_busy.add(key + (row["room"],))
@@ -437,9 +483,33 @@ class AutoScheduler:
                     teacher_busy.add(key + (row["teacher"],))
                 if row.get("class_name"):
                     class_busy.add(key + (row["class_name"],))
+            return rows, (r.get("conflicts") or []), \
+                str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE"))
+
+        for idx, chunk in enumerate(chunks, 1):
+            t0 = time.time()
+            rows, cfs, status = _place(chunk, flatten_seconds)
+            # CP-SAT 只负责"质量"（周次摊平、早周优先）；覆盖由确定性贪心兜底。
+            # 求解失败/漏排时按当周负载最轻补齐 —— 演示不能出现"171 个只排 51 个"。
+            placed_keys = {(r["teacher"], r["course"], r["class_name"]) for r in rows}
+            missing = [x for x in chunk
+                       if (x["teacher"], x["course"], x["class_name"]) not in placed_keys]
+            filled = 0
+            if missing:
+                extra_rows = self._greedy_fill(missing, room_busy, teacher_busy, class_busy)
+                filled = len(extra_rows)
+                rows = list(rows) + extra_rows
+                if filled:
+                    status = "FEASIBLE" if status in ("OPTIMAL", "FEASIBLE") else status
+            retried = filled > 0
+
+            schedule.extend(rows)
+            conflicts.extend(cfs)
+            statuses.append(status)
             chunk_reports.append({
                 "index": idx, "size": len(chunk), "solved": len(rows),
-                "status": statuses[-1], "seconds": round(time.time() - t0, 1),
+                "status": status, "seconds": round(time.time() - t0, 1),
+                "retried": retried,
             })
 
         schedule.sort(key=lambda s: (s["week"], WEEKDAYS.index(s["weekday"]),

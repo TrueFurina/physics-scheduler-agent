@@ -218,6 +218,21 @@ export const rescheduleApi = {
     api.post('/reschedule/auto-schedule/export', { schedule }, { responseType: 'blob' }),
 
   // 管理员登录（审批台）：口令由服务端校验，成功返回会话令牌
+  // 演示模式：审批台走本机工单（DEMO_MODE=1 时后端返回 true）
+  demoMode: () =>
+    api.get<{ success: boolean; demo_mode: boolean }>('/reschedule/demo-mode'),
+
+  localRequests: (token: string) =>
+    api.get<{ success: boolean; requests: any[] }>('/reschedule/requests', {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+
+  approveLocalRequest: (id: number, approve: boolean, comment: string, token: string) =>
+    api.post<{ success: boolean; message: string; request: any }>(
+      `/reschedule/requests/${id}/approve`, { approve, comment },
+      { headers: { Authorization: `Bearer ${token}` } },
+    ),
+
   adminLogin: (username: string, password: string) =>
     api.post<{
       success: boolean; message: string; role: string;

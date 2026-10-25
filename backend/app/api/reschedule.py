@@ -330,6 +330,41 @@ async def clear_master_tasks():
     return {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
 
 
+@router.post("/demo/reset", summary="演示一键复位（仅 DEMO_MODE=1 可用，需管理员）",
+             dependencies=_ADMIN_ONLY)
+async def demo_reset():
+    """把演示态复位到初始：清空申请单 + 撤销所有"已应用"的调课 + 重载安排表。
+
+    为什么需要：审批演示会真的改写课表（调课落库 + applied_moves 重放）。演完
+    第一场，第二场就带着"上一场挪过的课"开局 —— 要么手工收拾，要么重启进程。
+    这个端点就是"下一场之前按一下"的按钮，且**只在 DEMO_MODE=1 时存在**。
+    """
+    if os.getenv("DEMO_MODE", "") != "1":
+        raise HTTPException(status_code=403, detail="演示复位仅在 DEMO_MODE=1 时可用")
+    conn = _get_db()
+    moves = conn.execute("SELECT COUNT(*) AS c FROM applied_moves").fetchone()["c"]
+    reqs = conn.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
+    conn.execute("DELETE FROM applied_moves")
+    conn.execute("DELETE FROM requests")
+    conn.commit()
+    conn.close()
+    _load_default_schedule()
+    return {"success": True,
+            "message": f"✅ 演示已复位：清空 {reqs} 条申请、撤销 {moves} 笔已应用调课，课表已重载",
+            "cleared_requests": reqs, "reverted_moves": moves}
+
+
+@router.get("/demo-mode", summary="演示模式开关状态（免鉴权）")
+async def demo_mode():
+    """演示模式（DEMO_MODE=1）：审批台走本机工单 + 本地管理员口令，不依赖云端登录。
+
+    为什么需要：现场网络/手机验证码不可控，而"审批通过 → 课表真的变了"是产品
+    最有说服力的一段。演示模式把这段变成**离线可跑**，且默认关闭 —— 生产部署不设
+    DEMO_MODE 时行为不变（审批仍走云端身份 + 云表）。
+    """
+    return {"success": True, "demo_mode": os.getenv("DEMO_MODE", "") == "1"}
+
+
 @router.get("/master-status", summary="主数据（大纲清单）状态")
 async def master_status():
     """当前主数据任务数、覆盖班级，以及安排表里"没排时间"的待排行数。"""

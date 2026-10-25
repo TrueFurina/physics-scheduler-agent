@@ -58,6 +58,9 @@ function App() {
   const [loadError, setLoadError] = useState('');
   const [requestStatus, setRequestStatus] = useState('');  // 申请提交后的状态反馈
   const [requests, setRequests] = useState<RescheduleRequest[]>([]);  // 审批台申请列表
+  // 演示模式（DEMO_MODE=1）：审批台走本机工单 + 本地口令，不依赖云端登录。
+  // 现场网络/手机验证码不可控，而"审批通过→课表真的变"是最有说服力的一段。
+  const [demoMode, setDemoMode] = useState(false);
   const [nlInput, setNlInput] = useState('');  // 自然语言调课输入
   const [followupQ, setFollowupQ] = useState<string[]>([]);  // 多轮追问问题
   // 多轮追问的槽位（B2）：后端不存会话，由前端每轮带回，服务端无状态合并。
@@ -140,6 +143,13 @@ function App() {
     admin_comment: r.admin_comment ?? '',
     created_at: r.created_at,
   });
+
+  // 演示模式开关（只读探测；失败按关闭处理，不影响正常流程）
+  useEffect(() => {
+    rescheduleApi.demoMode()
+      .then((r) => setDemoMode(Boolean(r.data?.demo_mode)))
+      .catch(() => setDemoMode(false));
+  }, []);
 
   // 应用启动：先处理第三方登录回调（必须在任何路由守卫之前），再恢复已有登录态
   useEffect(() => {
@@ -856,8 +866,8 @@ function App() {
 
   // F6: 管理员进入审批台（需云登录 + 管理员口令）
   const handleOpenAdmin = async () => {
-    if (!session) {
-      openLogin('admin');   // 第一步：云身份
+    if (!session && !demoMode) {
+      openLogin('admin');   // 第一步：云身份（演示模式下跳过）
       return;
     }
     if (!adminAuthed) {
@@ -891,7 +901,12 @@ function App() {
       setAdminToken(res.data.token);
       setAdminAuthed(true);
       setShowAdminLogin(false);
-      await loadCloudRequests('pending');
+      if (demoMode) {
+        const lr = await rescheduleApi.localRequests(res.data.token);
+        setRequests((lr.data.requests || []).map(toUiRequest));
+      } else {
+        await loadCloudRequests('pending');
+      }
       setView('admin');
     } catch (err: any) {
       // 401 才叫「口令错」；其余（网络/500）不能误导成密码问题。
@@ -913,6 +928,22 @@ function App() {
   // "批了但没生效"是最坏的一种静默失败：审批台显示已同意，课表却没动，谁都不会再查。
   const handleApprove = async (id: number, approve: boolean, comment: string) => {
     setLoading(true);
+    if (demoMode) {
+      // 演示模式：/requests/{id}/approve 在服务端直接把课表改掉（并写 applied_moves），
+      // 前端只需刷新列表 + 提示结果，不用再走云的 approveCloudRequest。
+      try {
+        const token = getAdminToken() || '';
+        const r = await rescheduleApi.approveLocalRequest(id, approve, comment, token);
+        const lr = await rescheduleApi.localRequests(token);
+        setRequests((lr.data.requests || []).map(toUiRequest));
+        setMsg(r.data.message || (approve ? '已同意' : '已驳回'));
+      } catch (err: any) {
+        setMsg(`审批失败：${describeApiError(err)}`);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
     try {
       const row = await approveCloudRequest(id, approve, comment, userName);
       await loadCloudRequests('pending');
