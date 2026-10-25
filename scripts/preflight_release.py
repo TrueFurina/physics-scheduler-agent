@@ -98,20 +98,37 @@ def main():
     # 4b. 上传面敏感文件：发布上传器只排除 node_modules/.git/构建产物，
     #     **不读 .gitignore**（R-02 证据链，docs/安全风险清单）—— 所以
     #     .gitignore 里的文件会被一起打包上传。
-    #     - schedule.xlsx：真实表，「教师联系表」携带 17 个教师手机号
-    #       （2026-10-24 交付评审 P0-2：当前无 HTTP 端点泄露，但属"已上膛
-    #       未击发"）。线上要显示真实姓名是产品目标（R-09/D-2 有决策记录），
-    #       所以这里是**显式拦截**：发布前必须二选一 —— 移出仓库并把
-    #       SCHEDULE_PATH 指向外部路径，或先把联系表手机号列脱敏。
+    #     - schedule.xlsx：真实表，「教师联系表」携带教师手机号（2026-10-24 交付
+    #       评审 P0-2）。线上要显示真实姓名是产品目标（R-09/D-2 有决策记录），
+    #       而且**线上必须带这张表才有数据源**，所以判据改成「按实际号码」：
+    #       明文号码 = 红（先跑 scripts/desensitize_schedule.py --write 脱敏），
+    #       0 个号码 = 绿（可以随包）。R-69 发布时就是按这条走的。
     #     - .env / env.local：智谱密钥明文。沙箱不能注入环境变量，线上 LLM
     #       依赖它随包上传（docs/安全风险清单 v4 记录）；线上不可下载已实测。
     #       按 D-6 当作"可轮换的演示 key"管理 —— 警告级，不拦截。
-    if os.path.exists(os.path.join(ROOT, "schedule.xlsx")):
-        check("上传面·真实排课表（17 个手机号）", False,
-              "仓库根 schedule.xlsx 会被上传（上传器不读 .gitignore）；"
-              "发布前移出仓库+SCHEDULE_PATH 外置，或脱敏「教师联系表」手机号列")
+    xlsx = os.path.join(ROOT, "schedule.xlsx")
+    if not os.path.exists(xlsx):
+        check("上传面·排课表手机号", False, "schedule.xlsx 不存在：线上会没有数据源")
     else:
-        check("上传面·真实排课表（17 个手机号）", True, "不在仓库根（无上传暴露）")
+        import re as _re
+        phone = _re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+        hits = 0
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(xlsx, read_only=True)
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    for v in row:
+                        if isinstance(v, str):
+                            hits += len(phone.findall(v))
+            wb.close()
+            if hits == 0:
+                check("上传面·排课表手机号", True, "0 个明文手机号（已脱敏，可随包）")
+            else:
+                check("上传面·排课表手机号", False,
+                      f"仍有 {hits} 个明文手机号；先跑 scripts/desensitize_schedule.py --write")
+        except Exception as e:
+            check("上传面·排课表手机号", False, f"扫描失败：{e}")
     env_files = [n for n in (".env", "env.local")
                  if os.path.exists(os.path.join(ROOT, n))]
     check("上传面·密钥配置文件", not env_files,
