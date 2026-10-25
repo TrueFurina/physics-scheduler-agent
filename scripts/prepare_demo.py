@@ -69,7 +69,15 @@ def _admin_token():
     """/requests 是管理员接口（_ADMIN_ONLY）——不带令牌就是 401，演示数据造不出来。"""
     r = httpx.post(f"{BASE_URL}/api/reschedule/admin-login",
                    json={"username": "admin", "password": "admin123"}, timeout=10)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise SystemExit(
+            "❌ 管理员登录失败：本地演示口令是 admin123。
+"
+            "   请这样启动后端（环境变量优先于 .env）：
+"
+            "   DEMO_MODE=1 ADMIN_PASS=admin123 python -m uvicorn app.main:app --port 8023
+"
+            f"   服务返回：{r.text[:120]}")
     return r.json()["token"]
 
 
