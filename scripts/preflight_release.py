@@ -129,6 +129,24 @@ def main():
                       f"仍有 {hits} 个明文手机号；先跑 scripts/desensitize_schedule.py --write")
         except Exception as e:
             check("上传面·排课表手机号", False, f"扫描失败：{e}")
+    # 上传面·学生个人材料 / 演示库：这些**绝不能**随包上传
+    # （上传器不读 .gitignore；R-69 发布时人工移出过一次，但本地恢复后又回来了 ——
+    #   靠记性迟早出事，改成发布前硬拦截）。
+    import glob as _glob
+    data_dir = os.path.join(ROOT, "backend", "app", "data")
+    pii = []
+    for pat in ("student_*", "master_store.json"):
+        pii += [os.path.basename(x) for x in _glob.glob(os.path.join(data_dir, pat))]
+    # requests.db：本脚本自己 `import app.main` 会建一个**空库**（几十 KB），
+    # 那不是 PII；只有装过真实工单的库（>100KB）才拦。
+    db = os.path.join(data_dir, "requests.db")
+    if os.path.exists(db) and os.path.getsize(db) > 100_000:
+        pii.append("requests.db(%dKB)" % (os.path.getsize(db) // 1024))
+    pii = sorted(set(pii))
+    check("上传面·学生材料/演示库", not pii,
+          ("发现 %d 个文件（%s…）；发布前先移出仓库" % (len(pii), ", ".join(pii[:3])))
+          if pii else "无学生课表/演示库（可安全上传）")
+
     env_files = [n for n in (".env", "env.local")
                  if os.path.exists(os.path.join(ROOT, n))]
     check("上传面·密钥配置文件", not env_files,
