@@ -1,5 +1,3 @@
-from app import security as _security
-
 """审批闭环的单测：`_apply_reschedule` + `/apply-move`。
 
 为什么单独立一个文件：
@@ -12,13 +10,9 @@ from app import security as _security
 周次有没有变、变了哪几条、冲突时是不是如实跳过、重复调用是不是幂等。
 """
 
-import os
-import sys
-
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
+from app import security as _security
 from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
 
 from app.api import reschedule as R

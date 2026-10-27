@@ -11,13 +11,11 @@
 
 import importlib
 import os
-import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
+from app import security as _security
 from app.api.reschedule import (
     _DATA_DIR,
     _EXCEL_SUFFIXES,
@@ -28,8 +26,6 @@ from app.main import app
 from app.security import issue_admin_token, verify_admin_token
 
 client = TestClient(app)
-
-from app import security as _security
 
 # 口令不再写死：生产部署会用 .env 覆盖 ADMIN_PASS，字面量测试会假红。
 ADMIN = {"username": _security.ADMIN_USER, "password": _security.ADMIN_PASS}
