@@ -1978,23 +1978,30 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
     total_all = result.get("total_sections_all", 0)
     in_scope = result.get("total_sections", 0)
     solved = result.get("solved", 0)
+    # 组课时口径（R-72）：段是求解单位，组课时才是交付单位。
+    # 旧版把两者混成 `solved/total_all`，等于用"压扁后的段"冒充"全部学生组"。
+    solved_groups = result.get("solved_groups", solved)
+    total_groups = result.get("total_groups", total_all)
     if truncated:
-        scope_text = (f"本次取前 {in_scope} 个求解（其余 {max(0, total_all - in_scope)} 个未参与，"
+        scope_text = (f"本次取前 {in_scope} 个教学段求解（其余 {max(0, total_all - in_scope)} 个未参与，"
                       f"如需全部请不传 max_sections）")
     elif result.get("chunks"):
         chunk_desc = "、".join(f"第{c['index']}片 {c['solved']}/{c['size']}"
                                for c in result["chunks"])
-        scope_text = (f"本次全表覆盖：{in_scope} 个任务分 {len(result['chunks'])} 片求解"
+        scope_text = (f"本次全表覆盖：{in_scope} 个教学段分 {len(result['chunks'])} 片求解"
                       f"（{chunk_desc}），用时 {result.get('elapsed_s', 0)} 秒")
     else:
-        scope_text = f"本次求解 {in_scope} 个任务"
+        scope_text = f"本次求解 {in_scope} 个教学段"
 
     note = (
-        f"📌 定位说明：自动排课为辅助初稿生成。全表共 {total_all} 个实验教学任务"
-        f"（另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"
-        f"    {scope_text}；共排定 {solved} 个。方案已逐周避开现有安排表"
-        f"（共 {real_entries} 条记录）占用的教室、教师与班级。\n"
-        f"    未排入的 {len(result.get('conflicts') or [])} 个任务已逐条列出原因；"
+        f"📌 定位说明：自动排课为辅助初稿生成。全表共 {total_all} 个教学段"
+        f"（= {total_groups} 个「实验项目 × 学生组」课时；"
+        f"另有 {result.get('intro_excluded', 0)} 个绪论课任务教室已另行安排，不参与自动排课），\n"
+        f"    {scope_text}；共排定 {solved} 段 / {solved_groups} 个组课时。"
+        f"方案已逐周避开现有安排表（共 {real_entries} 条记录）占用的教室、教师与班级。\n"
+        f"    同一教学段的多个学生组按真实表口径**同周、同教室、连续时段**展开，"
+        f"可直接落地为正式安排表。\n"
+        f"    未排入的 {len(result.get('conflicts') or [])} 个任务/组已逐条列出原因；"
         f"生成结果仅供教秘做初稿参考，落地前请按「我的课程 / 数据体检」复核。"
     )
     # 灰箱补全：替教秘做的默认决定（自动分配教师/场地）附加在定位说明之后，不静默
@@ -2011,8 +2018,10 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
             "total_sections_all": total_all,
             "intro_excluded": result.get("intro_excluded", 0),
             "solved": solved,
+            "solved_groups": solved_groups,
+            "total_groups": total_groups,
             "truncated": truncated,
-            "coverage": f"{solved}/{total_all}",
+            "coverage": f"{solved_groups}/{total_groups} 组课时（{solved}/{total_all} 段）",
             "chunks": result.get("chunks", []),
             "elapsed_s": result.get("elapsed_s"),
             "weeks": result.get("weeks", []),

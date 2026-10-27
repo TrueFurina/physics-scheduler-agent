@@ -108,43 +108,53 @@ class AutoScheduler:
         return self.db.get_all_rooms()
 
     def _get_course_sections(self) -> Tuple[List[Dict], int]:
-        """提取需要排课的教学任务（教师 + 课程 + 班级）。
+        """提取需要排课的教学任务（教师 + 课程 + 班级），并**带上该段的全部学生组**。
 
         返回 (任务列表, 被排除的绪论任务数)。
 
         ⚠️ 任务源除了"已排过的课表行"，还包括**待排任务**（表里没排时间的行 + 上传的
         大纲清单）：否则一键自动排课永远只能重排去年，排不了大纲里新增的实验项目。
+
+        为什么 section 里要带 `groups`（2026-10-28 修）
+        ----------------------------------------------
+        去重键仍是 (教师, 项目, 班级)，所以任务数还是 171 段 —— 但**组别不能再丢**。
+        真实表 433/433 条组别全有，而一个教学段的 k 个组在原表里是**同一周、同一间
+        教室、连续时段**各占一格（实测 171/171 段同教室；5 组的例子铺到周六周日）。
+        此前这里把 `group` 丢在门外，导致两个后果：
+          ① 产出没有 group ⇒ 初稿根本落不进安排表；
+          ② 171 段把 **410 个组课时**压成 171 个，`171/171 全覆盖` 覆盖的是压小的口径。
+        现在 section 记下 groups，排定后由 `_expand_groups` 展开成 k 行（段级求解、
+        组级产出），求解规模与耗时不变。
         """
-        sections, seen = [], set()
+        sections: List[Dict] = []
+        seen: Dict[Tuple, Dict] = {}
+        intro_seen: Set[Tuple] = set()
         excluded_intro = 0
+
+        def _add(teacher: str, experiment: str, class_name: str, group: str) -> None:
+            key = (teacher, experiment, class_name)
+            sec = seen.get(key)
+            if sec is None:
+                sec = {"teacher": teacher, "course": experiment or "未知实验",
+                       "class_name": class_name, "groups": []}
+                seen[key] = sec
+                sections.append(sec)
+            g = (group or "").strip()
+            if g and g not in sec["groups"]:
+                sec["groups"].append(g)
+
         for e in self.db.entries:
             if _is_intro(e.experiment or ""):
                 key = (e.teacher, e.experiment, e.class_name)
-                if key not in seen:
-                    seen.add(key)
+                if key not in intro_seen:
+                    intro_seen.add(key)
                     excluded_intro += 1
                 continue
-            key = (e.teacher, e.experiment, e.class_name)
-            if key in seen:
-                continue
-            seen.add(key)
-            sections.append({
-                "teacher": e.teacher or "",
-                "course": e.experiment or "未知实验",
-                "class_name": e.class_name or "",
-            })
+            _add(e.teacher or "", e.experiment or "", e.class_name or "", e.group or "")
         for t in (self.extra_tasks or []):
             if _is_intro(t.experiment or "") or looks_like_exam(t.experiment or ""):
                 continue
-            key = (t.teacher, t.experiment, t.class_name)
-            if key in seen:
-                continue
-            seen.add(key)
-            sections.append({
-                "teacher": t.teacher or "",
-                "course": t.experiment or "未知实验",
-                "class_name": t.class_name or "",
-            })
+            _add(t.teacher or "", t.experiment or "", t.class_name or "", t.group or "")
         return sections, excluded_intro
 
     def _get_weeks(self) -> List[int]:
@@ -156,16 +166,27 @@ class AutoScheduler:
             return [1]
         return list(range(ws[0], ws[-1] + 1))
 
-    def _occupancy(self) -> Tuple[Set[Tuple], Set[Tuple]]:
+    def _occupancy(self) -> Tuple[Set[Tuple], Set[Tuple], Set[Tuple]]:
         """现有安排表已经占住的格子。
 
-        返回 (room_busy, teacher_busy)：
+        返回 (room_busy, teacher_busy, class_busy)：
             room_busy    = {(week, weekday, time_slot, room), ...}
             teacher_busy = {(week, weekday, time_slot, teacher), ...}
+            class_busy   = {(week, weekday, time_slot, class), ...} —— **只收不参与重排的行**
+
+        为什么 class_busy 只收"不参与重排"的行（2026-10-28 修）
+        ------------------------------------------------------
+        自动排课的产出是**替换**那 410 个非绪论单元，所以它当然可以占用旧单元原来的格子；
+        但绪论课（教室已另行安排、不参与重排）**必须原样保留**，新方案不能排到
+        "这个班那节课正在上绪论"的格子上。
+        此前这里只返回教室与教师两个维度，班级维度只统计了同批任务之间，
+        于是新方案会撞上绪论课 —— 实测真实表 3 处。这不是"多算"，是漏算。
         """
         room_busy: Set[Tuple] = set()
         teacher_busy: Set[Tuple] = set()
+        class_busy: Set[Tuple] = set()
         for e in self.db.entries:
+            keeps = _is_intro(e.experiment or "") or looks_like_exam(e.experiment or "")
             blocks = list(getattr(e, "blocked", None) or [])
             for ts in TIME_SLOTS:
                 # blocked 是解析阶段算出的"真实占住的节次"（跨节次写法会有两个）；
@@ -176,6 +197,8 @@ class AutoScheduler:
                     room_busy.add((int(e.week), e.weekday, ts, e.room))
                 for tn in _teacher_names(e.teacher):
                     teacher_busy.add((int(e.week), e.weekday, ts, tn))
+                if keeps and e.class_name:
+                    class_busy.add((int(e.week), e.weekday, ts, e.class_name))
 
         # 时段看不懂、已被剔除的行：只知道"这天这间教室/这个人在上课"，
         # 不知道具体节次 ⇒ 三个时段全按占用算（宁可少推荐，不可推荐到占用中）。
@@ -191,14 +214,46 @@ class AutoScheduler:
                     room_busy.add((wk, wd, ts, s["room"]))
                 for tn in _teacher_names(s.get("teacher")):
                     teacher_busy.add((wk, wd, ts, tn))
-        return room_busy, teacher_busy
+        return room_busy, teacher_busy, class_busy
+
+    def _kept_busy(self) -> Tuple[Set[Tuple], Set[Tuple], Set[Tuple]]:
+        """只收"不参与重排"的既有课（绪论/考试）在**三个维度**上的占用格。
+
+        为什么组展开要用这个、而不是 `_occupancy()`
+        --------------------------------------------
+        `_occupancy()` 的 room/teacher 收**全部**既有行，供求解器建候选域用
+        （求解器只在原本空着的格子上落段）。但**组展开**不一样：它的产出是替换
+        那 410 个非绪论单元，所以非绪论旧格的教室/教师/班级**都可以复用**
+        （旧课被替换走了）；唯独绪论/考试（`_is_intro` / `looks_like_exam`）
+        必须原样保留。
+        2026-10-28 实测：拿 `_occupancy()` 的 room/teacher（全量）去挡展开，
+        会把可复用的非绪论旧格也挡掉 —— 覆盖从 410/410 掉到 365/410、45 处缺口。
+        只挡 kept 后既消除 5 处绪论碰撞、又保住覆盖。
+        """
+        kr: Set[Tuple] = set()
+        kt: Set[Tuple] = set()
+        kc: Set[Tuple] = set()
+        for e in self.db.entries:
+            if not (_is_intro(e.experiment or "") or looks_like_exam(e.experiment or "")):
+                continue
+            blocks = list(getattr(e, "blocked", None) or [])
+            for ts in TIME_SLOTS:
+                if ts not in blocks and not _spans_overlap(e.time_slot, ts):
+                    continue
+                if e.room:
+                    kr.add((int(e.week), e.weekday, ts, e.room))
+                for tn in _teacher_names(e.teacher):
+                    kt.add((int(e.week), e.weekday, ts, tn))
+                if e.class_name:
+                    kc.add((int(e.week), e.weekday, ts, e.class_name))
+        return kr, kt, kc
 
     # ------------------------------------------------------------------ 求解
     def solve(self, max_sections: int = 30, sections_override: Optional[List[Dict]] = None,
               extra_room_busy: Optional[Set[Tuple]] = None,
               extra_teacher_busy: Optional[Set[Tuple]] = None,
               extra_class_busy: Optional[Set[Tuple]] = None,
-              flatten_seconds: float = 4.0) -> Dict:
+              flatten_seconds: float = 4.0, expand: bool = True) -> Dict:
         sections, intro_excluded = self._get_course_sections()
         if not sections:
             return {"success": False, "error": "没有可排课的教学任务"}
@@ -209,12 +264,13 @@ class AutoScheduler:
 
         total_all = len(sections)
         weeks = self._get_weeks()
-        room_busy, teacher_busy = self._occupancy()
+        room_busy, teacher_busy, kept_class_busy = self._occupancy()
         # 分片求解（solve_all）时把前面片已排定的格子回填进来 —— 否则第 2 片会把
         # 教室/教师/班级排到第 1 片刚占的位置上（片与片之间互相不可见）。
         room_busy |= set(extra_room_busy or ())
         teacher_busy |= set(extra_teacher_busy or ())
-        class_busy = set(extra_class_busy or ())
+        # 班级维度 = 不参与重排的既有课（绪论/考试，必须原样保留）+ 前面片已排定的格子
+        class_busy = kept_class_busy | set(extra_class_busy or ())
 
         # 限制规模保证求解速度（全表 171 个任务 × 16 周 × 15 时段过重，单次会超时）
         sections = sections_override if sections_override is not None \
@@ -353,6 +409,29 @@ class AutoScheduler:
                                      TIME_SLOTS.index(s["time_slot"]),
                                      s["class_name"], s["teacher"]))
 
+        # ---- 段 → 组课时（R-72）----
+        # 求解按段建模（171 个变量、速度可控），但产出必须是「班级 × 项目 × 组」，
+        # 否则既落不了地、又把 410 个组课时压成 171 个。
+        total_groups = sum(len(s.get("groups") or [""]) for s in sections)
+        gaps: List[Dict] = []
+        if expand and schedule:
+            groups_of = {(s["teacher"], s["course"], s["class_name"]):
+                         (s.get("groups") or [""]) for s in sections}
+            ex_rooms, ex_teachers, ex_kept_class = self._occupancy()
+            ex_rooms |= set(extra_room_busy or ())
+            ex_teachers |= set(extra_teacher_busy or ())
+            # 班级维度同样要并入"不参与重排的既有课"（绪论/考试），与 solve() 口径一致
+            ex_class = ex_kept_class | set(extra_class_busy or ())
+            for r in schedule:                      # 预置本批自己的占用（展开时逐段释放）
+                cell = (r["week"], r["weekday"], r["time_slot"])
+                ex_rooms.add(cell + (r["room"],))
+                if r.get("teacher"):
+                    ex_teachers.add(cell + (r["teacher"],))
+                if r.get("class_name"):
+                    ex_class.add(cell + (r["class_name"],))
+            schedule, gaps, total_groups = self._expand_groups(
+                schedule, groups_of, ex_rooms, ex_teachers, ex_class)
+
         placed = {(s["teacher"], s["course"], s["class_name"]) for s in schedule}
         conflicts = []
         for i, sec in enumerate(sections):
@@ -369,10 +448,14 @@ class AutoScheduler:
             "success": ok and bool(schedule),
             "status": solver.StatusName(status),
             "weeks": [weeks[0], weeks[-1]],
-            "total_sections": len(sections),          # 本次参与求解的任务数
-            "total_sections_all": total_all,          # 全表任务数（未截断）
+            "total_sections": len(sections),          # 本次参与求解的**段**数
+            "total_sections_all": total_all,          # 全表段数（未截断）
             "intro_excluded": intro_excluded,         # 绪论课（不参与自动排课）
-            "solved": len(schedule),
+            # solved = 排定的**段**数（口径与旧版一致）；组课时另算
+            "solved": len({(s["teacher"], s["course"], s["class_name"]) for s in schedule}),
+            "solved_groups": len(schedule),           # 排定的**组课时**数（= 产出行数）
+            "total_groups": total_groups,             # 应排的组课时总数
+            "group_gaps": gaps,                       # 同周连续格不够而没排进的组（如实报）
             "conflicts": conflicts,
             "schedule": schedule,
             "capacity_checked": False,
@@ -396,7 +479,9 @@ class AutoScheduler:
         weeks = self._get_weeks()
         rows: List[Dict] = []
         week_load = Counter()
-        group_week = set()
+        # 同一班级同一周只补一个段（保守口径：这一格只是段的起点，组展开会占用同周
+        # 更多的格子；若这里再放第二个段，展开时必然抢格）。
+        class_week = set()
         for sec in sections:
             best = None
             for w in weeks:
@@ -406,7 +491,7 @@ class AutoScheduler:
                             continue
                         if sec["class_name"] and (w, d, t, sec["class_name"]) in class_busy:
                             continue
-                        if (sec.get("class_name"), sec.get("group"), w) in group_week:
+                        if sec["class_name"] and (sec["class_name"], w) in class_week:
                             continue
                         free = [r for r in rooms_all if (w, d, t, r) not in room_busy]
                         if not free:
@@ -423,13 +508,141 @@ class AutoScheduler:
                 "class_name": sec["class_name"],
             })
             week_load[w] += 1
-            group_week.add((sec.get("class_name"), sec.get("group"), w))
+            if sec["class_name"]:
+                class_week.add((sec["class_name"], w))
             room_busy.add((w, d, t, room))
             if sec.get("teacher"):
                 teacher_busy.add((w, d, t, sec["teacher"]))
             if sec.get("class_name"):
                 class_busy.add((w, d, t, sec["class_name"]))
         return rows
+
+    # ------------------------------------------------------------ 组展开
+    def _expand_groups(self, rows: List[Dict], groups_of: Dict[Tuple, List[str]],
+                       room_busy: Set[Tuple], teacher_busy: Set[Tuple],
+                       class_busy: Set[Tuple]) -> Tuple[List[Dict], List[Dict], int]:
+        """把"教学段"展开成"组课时"：一个段的 k 个组各占一格。
+
+        口径照真实表（实测 171/171 段）：一个段的所有组 = **同一周、同一间教室、
+        按时间顺序连续占格**。5 组的例子：周六 567/678 + 周日 567/678/91011。
+
+        为什么必须展开
+        --------------
+        求解器按"段"建模（171 个变量，速度可控），但安排表与落地的单位是
+        「班级 × 实验项目 × 学生组」。不展开就是两个后果：产出没有 `group` 落不了地；
+        171 段把 410 个组课时压成 171，`171/171` 覆盖的是被压小的口径。
+
+        参数里的三个 busy 集合**调用方要预先塞入本批 rows 自己的占用**：展开时先把自己
+        那一格释放出来再找位置，这样既不会吃掉别的段的格子，也能用回自己排定的起点。
+
+        找位置的顺序（五步，前一步不成立才退后一步）：
+          1. 原周、原教室，从求解器给的那一格起**向后**找连续 k 格；
+          2. 原周、原教室，**任意位置**找连续 k 格（允许落在起点之前）——
+             求解器定的是"哪一周"，具体星期/时段可以在这周内挪，这不算改口径；
+          3. 原周、**换一间教室**找连续 k 格（教室本就是按空闲清单随手分的）；
+          4. **换一周**：本周凑不出 k 格就到其它周找（同教室优先、再任意教室）——
+             周次只是摊平负载用的，整段挪周不违反任何互斥；
+          5. 退化：原周原教室任意 k 个空格（不连续），并在缺口里标明。
+        五步都不成立才记缺口。**绝不硬塞到别人占着的格子里。**
+
+        返回 (展开行, 缺口, 组课时总数)。
+        """
+        timeline = [(d, t) for d in WEEKDAYS for t in TIME_SLOTS]
+        pos_of = {cell: i for i, cell in enumerate(timeline)}
+        n_slot = len(timeline)
+        ordered = sorted(rows, key=lambda r: (r["week"], pos_of[(r["weekday"], r["time_slot"])]))
+
+        out: List[Dict] = []
+        gaps: List[Dict] = []
+        total = 0
+        for row in ordered:
+            w, room = row["week"], row["room"]
+            teacher, cls = row.get("teacher") or "", row.get("class_name") or ""
+            key = (row.get("teacher"), row.get("course"), row.get("class_name"))
+            groups = groups_of.get(key) or [""]
+            total += len(groups)
+            k = len(groups)
+
+            # 释放自己那一格：本批 rows 的占用是预置的，不释放就永远"被自己占着"
+            room_busy.discard((w, row["weekday"], row["time_slot"], room))
+            if teacher:
+                teacher_busy.discard((w, row["weekday"], row["time_slot"], teacher))
+            if cls:
+                class_busy.discard((w, row["weekday"], row["time_slot"], cls))
+
+            # 默认参数把循环变量绑死：闭包晚绑定会让"同一格是否空闲"在下一轮变味（B023）
+            def _cell_free(pos: int, ww: int, rm: str, tch: str = teacher,
+                           cl: str = cls) -> bool:
+                d, t = timeline[pos]
+                if (ww, d, t, rm) in room_busy:
+                    return False
+                if tch and (ww, d, t, tch) in teacher_busy:
+                    return False
+                return not (cl and (ww, d, t, cl) in class_busy)
+
+            def _run_in(ww: int, rm: str, lo: int, kk: int = k) -> List[int]:
+                """在第 ww 周的教室 rm 里从 lo 起找连续 k 格（不碰教师/班级占用）。"""
+                for s in range(lo, n_slot - kk + 1):
+                    if all(_cell_free(p, ww, rm) for p in range(s, s + kk)):
+                        return list(range(s, s + kk))
+                return []
+
+            start = pos_of[(row["weekday"], row["time_slot"])]
+            chosen: List[int] = []
+            use_room, use_week = room, w
+            # 1) 原周原教室：从起点向后连续 k 格
+            chosen = _run_in(w, room, start)
+            # 2) 原周原教室：全周连续 k 格
+            if not chosen:
+                chosen = _run_in(w, room, 0)
+            # 3) 原周**换一间教室**：教室本来就是求解器按空闲清单顺序随手分的，
+            #    整段换房不影响任何硬约束，却能救回一大批"本教室这一周不够 k 格"的段。
+            if not chosen:
+                for alt in self._get_rooms():
+                    if alt == room:
+                        continue
+                    run = _run_in(w, alt, start) or _run_in(w, alt, 0)
+                    if run:
+                        chosen, use_room = run, alt
+                        break
+            # 4) **换周**：本周实在凑不出 k 个连续格 → 到其它周找（同教室优先，再任意
+            #    教室）。求解器定的"周"只是为摊平负载，不是硬约束；整段挪到另一周
+            #    不违反任何互斥，还能把"5 组挤不进本周"这类缺口补上（实测真实表
+            #    第 2 周 5 组段曾只剩 1 组排不进，换周后 410/410）。
+            if not chosen:
+                alt_rooms = [room] + [r for r in self._get_rooms() if r != room]
+                for alt_w in self._get_weeks():
+                    if alt_w == w:
+                        continue
+                    for alt in alt_rooms:
+                        run = _run_in(alt_w, alt, start) or _run_in(alt_w, alt, 0)
+                        if run:
+                            chosen, use_room, use_week = run, alt, alt_w
+                            break
+                    if chosen:
+                        break
+            # 5) 退化：原周原教室任意 k 个空格（不连续）
+            if not chosen:
+                chosen = [p for p in range(n_slot) if _cell_free(p, w, room)][:k]
+
+            if len(chosen) < k:
+                for g in groups[len(chosen):]:
+                    gaps.append({
+                        "week": use_week, "class_name": cls, "course": row.get("course"),
+                        "group": g,
+                        "reason": (f"第{use_week}周（及其它周）都没有 {k} 个可用格子"
+                                   f"（该段 {k} 组，仅排入 {len(chosen)} 组）"),
+                    })
+            for g, pos in zip(groups, chosen):
+                d, t = timeline[pos]
+                out.append({**row, "week": use_week, "weekday": d, "time_slot": t,
+                            "room": use_room, "group": g})
+                room_busy.add((use_week, d, t, use_room))
+                if teacher:
+                    teacher_busy.add((use_week, d, t, teacher))
+                if cls:
+                    class_busy.add((use_week, d, t, cls))
+        return out, gaps, total
 
     # ------------------------------------------------------------ 全校一键（分片）
     def solve_all(self, chunk_size: int = 60, max_chunks: int = 40,
@@ -467,32 +680,25 @@ class AutoScheduler:
         t_start = time.time()
 
         def _place(sub, seconds):
-            """求一个子片并把结果并入全局占用；返回 (rows, conflicts, status)。"""
+            """求一个子片 → 贪心兜底 → **组展开** → 并入全局占用。
+
+            返回 (组课时行, 冲突+缺口, 状态, 是否用了贪心兜底)。
+            顺序很重要：贪心补的是"段"，必须在**展开之前**补完，否则展开出来的组
+            会和后面补的段抢同一批格子。
+            """
             r = self.solve(
                 sections_override=sub,
                 extra_room_busy=room_busy,
                 extra_teacher_busy=teacher_busy,
                 extra_class_busy=class_busy,
                 flatten_seconds=seconds,
+                expand=False,          # 展开留到贪心之后统一做
             )
             rows = r.get("schedule") or []
-            for row in rows:
-                key = (row["week"], row["weekday"], row["time_slot"])
-                room_busy.add(key + (row["room"],))
-                if row.get("teacher"):
-                    teacher_busy.add(key + (row["teacher"],))
-                if row.get("class_name"):
-                    class_busy.add(key + (row["class_name"],))
-            return rows, (r.get("conflicts") or []), \
-                str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE"))
+            status = str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE"))
 
-        for idx, chunk in enumerate(chunks, 1):
-            t0 = time.time()
-            rows, cfs, status = _place(chunk, flatten_seconds)
-            # CP-SAT 只负责"质量"（周次摊平、早周优先）；覆盖由确定性贪心兜底。
-            # 求解失败/漏排时按当周负载最轻补齐 —— 演示不能出现"171 个只排 51 个"。
-            placed_keys = {(r["teacher"], r["course"], r["class_name"]) for r in rows}
-            missing = [x for x in chunk
+            placed_keys = {(x["teacher"], x["course"], x["class_name"]) for x in rows}
+            missing = [x for x in sub
                        if (x["teacher"], x["course"], x["class_name"]) not in placed_keys]
             filled = 0
             if missing:
@@ -501,7 +707,43 @@ class AutoScheduler:
                 rows = list(rows) + extra_rows
                 if filled:
                     status = "FEASIBLE" if status in ("OPTIMAL", "FEASIBLE") else status
-            retried = filled > 0
+
+            # ---- 段 → 组课时 ----
+            groups_of = {(s["teacher"], s["course"], s["class_name"]):
+                         (s.get("groups") or [""]) for s in sub}
+            for row in rows:                  # 预置本批占用（展开时逐段释放自己的格子）
+                cell = (row["week"], row["weekday"], row["time_slot"])
+                room_busy.add(cell + (row["room"],))
+                if row.get("teacher"):
+                    teacher_busy.add(cell + (row["teacher"],))
+                if row.get("class_name"):
+                    class_busy.add(cell + (row["class_name"],))
+            # 展开时**必须**并入"不参与重排的既有课"（绪论/考试）占用 —— 全局累积集
+            # 从空集起步（要允许复用非绪论旧格），本身不含它们。这里只用 **_kept_busy**
+            # （绪论/考试）而不是 _occupancy()（全量）：非绪论旧格的教室/教师/班级会被
+            # 替换腾出，可以复用；全量挡会把覆盖从 410/410 压到 365/410（实测）。
+            kept_room, kept_teacher, kept_class = self._kept_busy()
+            expanded, gaps, _total = self._expand_groups(
+                rows, groups_of,
+                room_busy | kept_room,
+                teacher_busy | kept_teacher,
+                class_busy | kept_class)
+            # 展开产出的组课时要回填进全局占用，否则下一片求解器复用不到、
+            # 会与之互撞（片间互相不可见）。
+            for er in expanded:
+                cell = (er["week"], er["weekday"], er["time_slot"])
+                room_busy.add(cell + (er["room"],))
+                if er.get("teacher"):
+                    teacher_busy.add(cell + (er["teacher"],))
+                if er.get("class_name"):
+                    class_busy.add(cell + (er["class_name"],))
+            return expanded, (r.get("conflicts") or []) + gaps, status, filled > 0
+
+        for idx, chunk in enumerate(chunks, 1):
+            t0 = time.time()
+            # CP-SAT 只负责"质量"（周次摊平、早周优先）；覆盖由确定性贪心兜底，
+            # 组展开在 `_place` 内部完成 —— 这里拿到的已经是**组课时**行。
+            rows, cfs, status, retried = _place(chunk, flatten_seconds)
 
             schedule.extend(rows)
             conflicts.extend(cfs)
@@ -521,6 +763,7 @@ class AutoScheduler:
         if not schedule:
             return {"success": False, "status": overall, "error": "分片求解未产出任何排课结果",
                     "chunks": chunk_reports, "conflicts": conflicts}
+        total_groups = sum(len(s.get("groups") or [""]) for s in sections_all)
         return {
             "success": bool(schedule),
             "status": overall,
@@ -528,7 +771,10 @@ class AutoScheduler:
             "total_sections": len(sections_all),
             "total_sections_all": len(sections_all),
             "intro_excluded": intro_excluded,
-            "solved": len(schedule),
+            # solved = 排定的**段**数（口径与旧版一致）；组课时另算
+            "solved": len({(s["teacher"], s["course"], s["class_name"]) for s in schedule}),
+            "solved_groups": len(schedule),
+            "total_groups": total_groups,
             "conflicts": conflicts,
             "schedule": schedule,
             "chunks": chunk_reports,
@@ -536,8 +782,9 @@ class AutoScheduler:
             "elapsed_s": round(time.time() - t_start, 1),
             "capacity_checked": False,
             "note": (
-                f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学任务分 {len(chunks)} 片求解，"
-                f"片间回填教室/教师/班级占用；教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
+                f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学段分 {len(chunks)} 片求解，"
+                f"片间回填教室/教师/班级占用；段级求解、组级产出（同周同教室连续格）；"
+                f"教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
                 + "；容量未校验（安排表无容量字段）"
             ),
         }

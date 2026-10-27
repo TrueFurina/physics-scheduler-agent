@@ -86,6 +86,76 @@ def test_empty_db_reports_no_tasks():
     assert r["success"] is False and "没有可排课" in r["error"]
 
 
+# ---------------------------------------------------------------- R-72 组展开
+
+def _entry_g(week, weekday, slot, cls, room, teacher, experiment, group):
+    return ScheduleEntry(week, weekday, slot, cls, group, experiment, room, teacher)
+
+
+def test_expand_groups_same_week_contiguous_and_avoids_kept():
+    """段级求解 → 组级产出：k 个组必须同周、同教室、时间连续，且不得排到
+    "不参与重排"的绪论/考试格子上（教室与班级两个维度都验）。"""
+    from app.engine.auto_scheduler import TIME_SLOTS, WEEKDAYS
+
+    sched = AutoScheduler(_db([]))
+    row = {"week": 1, "weekday": "周一", "time_slot": "567", "room": "A410",
+           "teacher": "师0", "course": "项目0", "class_name": "班0"}
+    groups_of = {("师0", "项目0", "班0"): ["组1", "组2", "组3"]}
+
+    # 保留课占用：周一 678/91011 的 A410（教室维度）、周二 567 的班0（班级维度）
+    room_busy = {(1, "周一", "678", "A410"), (1, "周一", "91011", "A410")}
+    class_busy = {(1, "周二", "567", "班0")}
+
+    out, gaps, total = sched._expand_groups(
+        [row], groups_of, set(room_busy), set(), set(class_busy))
+
+    assert total == 3
+    assert not gaps and len(out) == 3
+    assert [r["group"] for r in out] == ["组1", "组2", "组3"]
+    assert all(r["week"] == 1 and r["room"] == "A410" for r in out)
+    # 时间顺序连续
+    timeline = [(d, t) for d in WEEKDAYS for t in TIME_SLOTS]
+    pos = {c: i for i, c in enumerate(timeline)}
+    seq = sorted(pos[(r["weekday"], r["time_slot"])] for r in out)
+    assert seq == list(range(seq[0], seq[0] + 3)), seq
+    # 不撞保留课
+    for r in out:
+        cell = (r["week"], r["weekday"], r["time_slot"])
+        assert cell + (r["room"],) not in room_busy
+        assert cell + (r["class_name"],) not in class_busy
+
+
+def test_expand_groups_falls_back_to_other_week_when_current_full():
+    """本周凑不出 k 个连续格时整段换周，而不是硬记缺口（R-72 第 4 步）。
+
+    构造：第 1 周 A410 除段自己那一格外全部占满（k=3 排不进），第 2 周全空。
+    期望：3 组整体落到第 2 周，且连续、无缺口。
+    """
+    from app.engine.auto_scheduler import TIME_SLOTS, WEEKDAYS
+
+    db = _db([_entry(1, "周一", "567", "班X", "A410", "师X", "项目X"),
+              _entry(2, "周一", "567", "班X", "A410", "师X", "项目X")])
+    sched = AutoScheduler(db)
+    assert sched._get_weeks() == [1, 2]
+
+    row = {"week": 1, "weekday": "周一", "time_slot": "567", "room": "A410",
+           "teacher": "师0", "course": "项目0", "class_name": "班0"}
+    groups_of = {("师0", "项目0", "班0"): ["组1", "组2", "组3"]}
+    # 第 1 周除 (周一,567) 外全占，只留 1 格 → k=3 在第 1 周必失败
+    room_busy = {(1, d, t, "A410") for d in WEEKDAYS for t in TIME_SLOTS
+                 if (d, t) != ("周一", "567")}
+
+    out, gaps, _total = sched._expand_groups(
+        [row], groups_of, set(room_busy), set(), set())
+
+    assert not gaps and len(out) == 3
+    assert all(r["week"] == 2 for r in out), [r["week"] for r in out]
+    timeline = [(d, t) for d in WEEKDAYS for t in TIME_SLOTS]
+    pos = {c: i for i, c in enumerate(timeline)}
+    seq = sorted(pos[(r["weekday"], r["time_slot"])] for r in out)
+    assert seq == list(range(seq[0], seq[0] + 3)), seq
+
+
 # ---------------------------------------------------------------- API 覆盖口径
 
 @pytest.fixture
@@ -103,7 +173,10 @@ def test_api_default_is_full_coverage(api_db):
     assert out["success"] is True
     d = out["data"]
     assert d["truncated"] is False
-    assert d["coverage"] == f"{d['solved']}/{d['total_sections_all']}"
+    # R-72：coverage 是「组课时（段）」双口径交付串，不再是旧的单一 `solved/total_all`。
+    # 测试镜像服务端产 coverage 的同一份格式（字段名取自响应，不写死数字）。
+    assert d["coverage"] == (
+        f"{d['solved_groups']}/{d['total_groups']} 组课时（{d['solved']}/{d['total_sections_all']} 段）")
     assert d["solved"] == d["total_sections_all"] == 20
     assert len(d["schedule"]) == 20
 
@@ -186,7 +259,56 @@ def test_real_table_full_coverage():
 
     assert r["success"] is True
     assert r["solved"] == r["total_sections"] >= 150
+    # R-72：段级求解、组级产出 —— 组课时必须全覆盖（171 段 = 410 组课时），
+    # 且每一行都带 group（否则落不进安排表）。
+    assert r["solved_groups"] == r["total_groups"], (r["solved_groups"], r["total_groups"])
+    assert all(s.get("group") for s in r["schedule"])
+
     rooms = Counter((s["week"], s["weekday"], s["time_slot"], s["room"]) for s in r["schedule"])
     teachers = Counter((s["week"], s["weekday"], s["time_slot"], s["teacher"]) for s in r["schedule"])
     classes = Counter((s["week"], s["weekday"], s["time_slot"], s["class_name"]) for s in r["schedule"])
     assert max(rooms.values()) == 1 and max(teachers.values()) == 1 and max(classes.values()) == 1
+
+    # R-72：不得与"不参与重排"的绪论/考试撞格（教室/教师/班级三维）——
+    # 这是 R-72 修过的真实缺陷（实测曾撞 5 处），此处锁死防回归。
+    kr, kt, kc = AutoScheduler(db)._kept_busy()
+    for s in r["schedule"]:
+        cell = (s["week"], s["weekday"], s["time_slot"])
+        assert cell + (s["room"],) not in kr, f"撞绪论教室 {s}"
+        assert cell + (s["teacher"],) not in kt, f"撞绪论教师 {s}"
+        assert cell + (s["class_name"],) not in kc, f"撞绪论班级 {s}"
+
+    # R-72 闭环 #6：一键自动排课初稿 → 落地。链 #6 曾因产出缺 group 而断开，
+    # 现在产出带 group，应当能过 /parallel/land 的校验并写回安排表。
+    import copy
+    from app import plan_landing
+
+    plan = plan_landing.normalize_plan(r["schedule"])  # 即 POST /parallel/land 的入口
+    assert len(plan) == r["total_groups"], (len(plan), r["total_groups"])
+    assert all(p["group"] for p in plan), "落地方案里还有缺 group 的行"
+
+    db2 = copy.deepcopy(db)
+    land = plan_landing.apply_plan(db2, plan)         # 写回（在副本上，不污染原表）
+    assert land["replaced_with"] == r["total_groups"]
+    # 1) 初稿自身三维度内部零重复
+    for attr in ("room", "teacher", "class_name"):
+        seen = Counter((p["week"], p["weekday"], p["time_slot"], p[attr])
+                      for p in plan if p.get(attr))
+        assert max(seen.values()) == 1, f"初稿内部 {attr} 维度重复占用"
+    # 2) 初稿不撞"不参与重排"的绪论/考试（只查新写回的 410 行，保留行本就定义它们）
+    for p in plan:
+        cell = (p["week"], p["weekday"], p["time_slot"])
+        assert cell + (p["room"],) not in kr, f"落地后撞绪论教室 {p}"
+        assert cell + (p["teacher"],) not in kt, f"落地后撞绪论教师 {p}"
+        assert cell + (p["class_name"],) not in kc, f"落地后撞绪论班级 {p}"
+    # 3) 落地不引入"新"碰撞：全表碰撞数不得多于原表。原表绪论/考试自身的历史重叠
+    #    （如林珠云在同一格带两个班）是源数据既有问题，初稿只替换可排单元、原样保留它们，
+    #    不应为此背锅；这里锁的是"初稿不制造新冲突"。
+    def _collisions(entries, attr):
+        c = Counter((e.week, e.weekday, e.time_slot, getattr(e, attr))
+                    for e in entries if getattr(e, attr))
+        return sum(v - 1 for v in c.values() if v > 1)
+    for attr in ("room", "teacher", "class_name"):
+        assert _collisions(db2.entries, attr) <= _collisions(db.entries, attr), \
+            f"落地后 {attr} 维度新增了碰撞（原表 {_collisions(db.entries, attr)} → " \
+            f"落地 {_collisions(db2.entries, attr)}）"

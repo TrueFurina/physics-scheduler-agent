@@ -102,7 +102,10 @@ def normalize_plan(rows, default_class: Optional[str] = None) -> List[dict]:
             bad.append({"index": i, "row": r, "missing": ["整行不是对象"]})
             continue
         cls = (r.get("class_name") or default_class or "").strip()
-        project = (r.get("project") or "").strip()
+        # `project` 是落地方案的口径；首屏「一键自动排课」的初稿历史上叫 `course`
+        # （同一件事的两个名字）。这里兼容两种写法，否则初稿永远过不了校验 ——
+        # R-72 之前初稿根本没有 `group`，两个字段名一起挡住，掩盖了真正的原因。
+        project = (r.get("project") or r.get("course") or "").strip()
         group = (r.get("group") or "").strip()
         weekday = (r.get("weekday") or "").strip()
         slot = (r.get("time_slot") or "").strip()
