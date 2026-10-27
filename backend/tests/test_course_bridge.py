@@ -436,3 +436,41 @@ def test_parser_without_course_column_leaves_entry_course_empty(tmp_path, monkey
     assert db.entries[0].course == ""
     # 回落主数据反推
     assert resolve_course(db.entries[0], {"扭摆法": "大学物理实验A"}) == "大学物理实验A"
+
+
+# ---------------------------------------------------------------- R-70 并发快照
+#
+# 导出已经跑在工作线程上（R-70）。而教秘的 CRUD / 台账导入会**同时**改写
+# `_master_data.experiments`，`project_courses()` 要遍历这个字典 —— 边改边遍历
+# 会抛 `RuntimeError: dictionary changed size during iteration`，表现为导出 500。
+# 处置：调用方在 `_master_lock` 内取一次「项目→课程」快照，再传给下面三个函数。
+# 这三条用例把"必须用传入的快照、不得再去遍历主数据"变成可执行判据：
+# master 一律传 None，实现若回退到现场遍历就会立刻拿到空表 / 判错课程。
+
+def test_precomputed_course_map_drives_grouping():
+    entries = [_e(1, "周二", "567", "C1", "g1", "扭摆法"),
+               _e(1, "周三", "678", "C1", "g2", "声速测量")]
+    courses = {"扭摆法": "大学物理实验A", "声速测量": "大学物理实验B"}
+
+    blocks = group_by_course(entries, None, courses)
+    assert [c for c, _ in blocks] == ["大学物理实验A", "大学物理实验B"]
+    assert sum(len(items) for _, items in blocks) == 2
+
+
+def test_precomputed_course_map_drives_cross_course_scan():
+    # 同班同组同格、分属两门课 → 必须报跨课程撞车
+    entries = [_e(1, "周二", "567", "C1", "g1", "扭摆法"),
+               _e(1, "周二", "567", "C1", "g1", "声速测量")]
+    courses = {"扭摆法": "大学物理实验A", "声速测量": "大学物理实验B"}
+
+    out = scan_cross_course(entries, None, courses)
+    assert len(out["conflicts"]) == 1, "快照里两门课不同，必须报撞车"
+    assert out["coverage"]["master_ready"] is True, "快照非空 ⇒ 覆盖度必须承认「查过了」"
+
+
+def test_precomputed_course_map_drives_coverage():
+    entries = [_e(1, "周二", "567", "C1", "g1", "扭摆法")]
+    cov = course_coverage(entries, None, {"扭摆法": "大学物理实验A"})
+    assert cov["master_ready"] is True
+    assert cov["project_in_master"] == 1
+    assert cov["fallback_default"] == 0

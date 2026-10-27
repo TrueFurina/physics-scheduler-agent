@@ -87,9 +87,14 @@ def resolve_course(entry, courses: Optional[Dict[str, str]] = None) -> str:
     return courses.get(_norm(getattr(entry, "experiment", "")), DEFAULT_COURSE)
 
 
-def course_coverage(entries, master) -> Dict[str, int]:
-    """课程归属的可信度：**没查出来的要报出来**，不能让"0 处"被读成"查过了"。"""
-    courses = project_courses(master)
+def course_coverage(entries, master, courses: Optional[Dict[str, str]] = None) -> Dict[str, int]:
+    """课程归属的可信度：**没查出来的要报出来**，不能让"0 处"被读成"查过了"。
+
+    `courses` 同上：调用方传锁内快照时，覆盖度必须与跨课程判定用**同一份**映射，
+    否则会出现"撞车按快照判、覆盖度按实时主数据算"的口径分裂。
+    """
+    if courses is None:
+        courses = project_courses(master)
     total = len(entries)
     named = sum(1 for e in entries if _norm(getattr(e, "experiment", "")))
     known = sum(1 for e in entries
@@ -122,14 +127,17 @@ def slots_of(entry) -> set:
     return {ts} if ts else set()
 
 
-def scan_cross_course(entries, master) -> Dict[str, list]:
+def scan_cross_course(entries, master, courses: Optional[Dict[str, str]] = None) -> Dict[str, list]:
     """跨课程撞车：同一班同一组同一格，却分属**两门不同的课程**。
 
     返回 `conflicts`（每条带 severity/label/fix_hint）与 `coverage`（口径）。
     `master_ready=False` 时课程全部回落默认 ⇒ 恒 0 处，此时 `coverage` 会把
     这件事说出来，绝不让 0 处被读成"查过了，没问题"。
+
+    `courses` 同 `group_by_course`：调用方可传入锁内快照，避免与 CRUD 并发冲突。
     """
-    courses = project_courses(master)
+    if courses is None:
+        courses = project_courses(master)
     buckets = defaultdict(list)
     for e in entries:
         cls, grp = _norm(getattr(e, "class_name", "")), _norm(getattr(e, "group", ""))
@@ -164,16 +172,22 @@ def scan_cross_course(entries, master) -> Dict[str, list]:
                 for x in lst) for c, lst in sorted(by_course.items())],
         })
     found.sort(key=lambda c: (c["week"], c["weekday"], str(c["time_slot"]), c["place"]))
-    return {"conflicts": found, "coverage": course_coverage(entries, master)}
+    return {"conflicts": found, "coverage": course_coverage(entries, master, courses)}
 
 
-def group_by_course(entries, master):
+def group_by_course(entries, master, courses: Optional[Dict[str, str]] = None):
     """按课程给一个班的记录分块：`[(课程名, [记录...]), ...]`，课程名升序。
 
     导出行列表时用：同一班的记录先按课程分块，块内按周次/星期/节次排序。
     只有一门课时也走这条路径 —— 只是恰好只有一个块，不多不少一个标题行。
+
+    `courses` 允许调用方传入已算好的「项目→课程」表（见 `project_courses`）：
+    导出已经跑在工作线程上（R-70），若在这里现场遍历 `master.experiments`，
+    而教秘的 CRUD 同时改写它，就会抛 `dictionary changed size during iteration`。
+    调用方在锁内取一次快照再传进来，可彻底避开这个窗口。
     """
-    courses = project_courses(master)
+    if courses is None:
+        courses = project_courses(master)
     buckets = defaultdict(list)
     for e in entries:
         buckets[resolve_course(e, courses)].append(e)
