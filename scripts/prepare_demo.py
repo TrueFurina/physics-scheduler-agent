@@ -10,7 +10,6 @@
 """
 
 import os
-import re
 import sys
 import time
 
@@ -71,12 +70,9 @@ def _admin_token():
                    json={"username": "admin", "password": "admin123"}, timeout=10)
     if r.status_code >= 400:
         raise SystemExit(
-            "❌ 管理员登录失败：本地演示口令是 admin123。
-"
-            "   请这样启动后端（环境变量优先于 .env）：
-"
-            "   DEMO_MODE=1 ADMIN_PASS=admin123 python -m uvicorn app.main:app --port 8023
-"
+            "❌ 管理员登录失败：本地演示口令是 admin123。\n"
+            "   请这样启动后端（环境变量优先于 .env）：\n"
+            "   DEMO_MODE=1 ADMIN_PASS=admin123 python -m uvicorn app.main:app --port 8023\n"
             f"   服务返回：{r.text[:120]}")
     return r.json()["token"]
 

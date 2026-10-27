@@ -32,6 +32,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.paths import DATA_DIR as _DATA_DIR
+
 # 解析逻辑变更时 +1：旧缓存自动失效，避免"代码改了但读到旧结构"
 # v2：时段别名统一（"78"/15:50-18:05 → 678）+ 新增 skipped（时段无法识别的行）
 # v3：新增 time_raw / blocked —— 跨节次写法（14:00-17:00）要同时占住 567 与 678。
@@ -64,9 +66,8 @@ CACHE_VERSION = 7
 ENTRY_ROW_WIDTH = 11
 
 _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
-from app.paths import DATA_DIR as _DATA_DIR
 
-_DEFAULT_DIR = __import__("pathlib").Path(_DATA_DIR) / "cache"
+_DEFAULT_DIR = Path(_DATA_DIR) / "cache"
 
 # 进程内记忆：(绝对路径) → {"sig": {...}, "data": {...}}
 _MEMO: Dict[str, Dict[str, Any]] = {}

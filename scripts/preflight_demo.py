@@ -20,6 +20,7 @@ import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE = os.environ.get("DEMO_SITE", "http://127.0.0.1:8023")
@@ -57,7 +58,7 @@ def check_build():
     if not os.path.exists(idx):
         return rec("前端构建可用", False, "frontend/webui/index.html 不存在",
                    "cd frontend && npm run build")
-    html = open(idx, encoding="utf-8").read()
+    html = Path(idx).read_text(encoding="utf-8")
     hashes = re.findall(r"assets/(index-[A-Za-z0-9_-]+\.(?:js|css))", html)
     missing = [h for h in hashes
                if not os.path.exists(os.path.join(REPO, "frontend", "webui", "assets", h))]
@@ -102,7 +103,7 @@ def main():
         return 1
 
     # 2) 三个必看页面的数据接口
-    for name, path, judge, expect in [
+    for name, path, judge, _expect in [
         ("首屏教师列表", "/api/reschedule/teachers", lambda d: len(d.get("teachers") or []), "13 位"),
         # data-audit 的载荷在 data 层（曾经在这里取错层级，把"通"报成"不通"）
         ("数据看板", "/api/reschedule/data-audit",
@@ -191,7 +192,7 @@ def main():
 
     print("\n" + "=" * 62)
     bad = [r for r in results if not r[1]]
-    for name, ok, detail, fix in results:
+    for name, ok, detail, _fix in results:
         print(f"{'PASS' if ok else 'FAIL'}  {name:<28}{detail}")
     print("=" * 62)
     if bad:

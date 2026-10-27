@@ -29,6 +29,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("RATELIMIT_DISABLED", "1")
 os.environ.setdefault("LLM_DISABLED", "1")
+# 预热（CP-SAT / 导出缓存）默认关闭：它们是**后台 daemon 线程**，会在测试中途
+# 读写 `_db` / `_master_data` —— 而测试大量 monkeypatch 这两个全局。开着预热就等于
+# 在用例背后跑一个看不见的线程，失败会表现为"随机红、单独跑又绿"（最难查的一类）。
+os.environ.setdefault("SCHEDULE_WARMUP", "0")
 # 默认管理员口令只在演示模式有效（生产未配 ADMIN_PASS 时拒绝，见 security.py）。
 # 测试用演示口令登审批台，所以测试进程统一按演示模式跑。
 os.environ.setdefault("DEMO_MODE", "1")

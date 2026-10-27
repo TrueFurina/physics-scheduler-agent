@@ -6,8 +6,10 @@ import json
 import re
 import sqlite3
 import threading
+import functools
+import hashlib
 from datetime import datetime
-from collections import Counter
+from collections import Counter, OrderedDict
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
@@ -17,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from app.utils.excel_parser import ScheduleDatabase
 from app.agent.reschedule_agent import RescheduleAgent
 from app.master_data import MasterData, is_schedulable_project
+from app.paths import DATA_DIR as _RESOLVED_DATA_DIR
 from app.security import check_admin_credentials, issue_admin_token, require_admin
 from app.ratelimit import rate_limit
 from app import plan_landing
@@ -91,6 +94,35 @@ _master_tasks: List = []
 # 基线反推自安排表；教秘的会话内修改（CRUD/灰箱补全）落盘到 master_store.json，
 # 重启自愈恢复 —— 落盘失效的唯一条件是安排表本身被替换（指纹变化，见 master_store）。
 _master_data = MasterData()
+# 主数据初始化/反推的互斥锁（R-70）。
+# 为什么现在必须有：R-70 把 5 个导出接口的建表工作下沉到线程池（`run_in_threadpool`），
+# 于是 `_ensure_master_data()` 会**并发地**从多个工作线程被调用。在此之前它只跑在
+# 事件循环线程上，"检查 initialized → 反推"是天然的原子段；下沉之后若无锁，
+# 两个导出同时进来会各反推一次，`_master_data` 的五个实体字典被两个线程同时改写
+# —— 这正是 R-68-A「脏落盘把主数据清空」同一族的状态竞争（那次是重启，这次是并发）。
+_master_lock = threading.RLock()
+
+
+def _master_write(fn):
+    """主数据**写入口**统一持 `_master_lock`。
+
+    为什么：导出已经跑在工作线程上（R-70），它读主数据时在锁内取快照；
+    写入口若不持同一把锁，教秘的 CRUD 就可能正好插进"遍历 experiments"的那几微秒，
+    抛 `RuntimeError: dictionary changed size during iteration` —— 表现为导出 500，
+    且只在"有人正好在改主数据时点了导出"才复现。
+
+    为什么是 RLock 而不是 Lock：这些 handler 内部还会调 `_ensure_master_data()`，
+    它同样要取这把锁；不可重入的锁会当场死锁。
+
+    不加锁的读路径（`/master/overview`、沙盘等）保持无锁 —— 它们只做字典 `.get`，
+    CPython 下单次查找是原子的，加锁只会让所有只读接口互相排队。
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        with _master_lock:
+            return await fn(*args, **kwargs)
+
+    return wrapper
 _schedule_fp: Optional[str] = None  # 当前安排表指纹（路径+mtime），落盘失效判定用
 _agent = RescheduleAgent(_db)
 
@@ -204,7 +236,6 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-from app.paths import DATA_DIR as _RESOLVED_DATA_DIR
 
 _DATA_DIR = _RESOLVED_DATA_DIR
 
@@ -286,6 +317,7 @@ async def upload_schedule(file: UploadFile = File(...)):
 
 @router.post("/upload-master", summary="上传教学大纲/主数据清单（从零排课的输入）",
              dependencies=_ADMIN_ONLY)
+@_master_write
 async def upload_master(file: UploadFile = File(...)):
     """上传「课程 → 实验项目 → 学生组（→ 候选教师/场地）」清单。
 
@@ -318,6 +350,7 @@ async def upload_master(file: UploadFile = File(...)):
 
 @router.delete("/master/tasks", summary="清空已导入的教学任务清单（需管理员）",
                dependencies=_ADMIN_ONLY)
+@_master_write
 async def clear_master_tasks():
     """清空 `_master_tasks`（上传的大纲清单）。
 
@@ -434,6 +467,7 @@ async def master_overview():
 
 
 @router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
     _ensure_loaded()
@@ -443,6 +477,7 @@ async def master_init():
 
 
 @router.post("/master/courses", summary="新建课程", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_upsert_course(req: _CourseIn):
     _ensure_loaded()
     _ensure_master_data()
@@ -455,6 +490,7 @@ async def master_upsert_course(req: _CourseIn):
 
 
 @router.delete("/master/courses/{name}", summary="删除课程", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_delete_course(name: str):
     _ensure_master_data()
     _master_data.delete_course(name)
@@ -463,6 +499,7 @@ async def master_delete_course(name: str):
 
 
 @router.post("/master/experiments", summary="新建/更新实验项目", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_upsert_experiment(req: _ExperimentIn):
     _ensure_loaded()
     _ensure_master_data()
@@ -477,6 +514,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
 
 
 @router.delete("/master/experiments/{name}", summary="删除实验项目", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_delete_experiment(name: str):
     _ensure_master_data()
     _master_data.delete_experiment(name)
@@ -485,6 +523,7 @@ async def master_delete_experiment(name: str):
 
 
 @router.post("/master/teachers", summary="新建/更新教师", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_upsert_teacher(req: _TeacherIn):
     _ensure_loaded()
     _ensure_master_data()
@@ -497,6 +536,7 @@ async def master_upsert_teacher(req: _TeacherIn):
 
 
 @router.delete("/master/teachers/{name}", summary="删除教师", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_delete_teacher(name: str):
     _ensure_master_data()
     _master_data.delete_teacher(name)
@@ -505,6 +545,7 @@ async def master_delete_teacher(name: str):
 
 
 @router.post("/master/rooms", summary="新建/更新场地", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_upsert_room(req: _RoomIn):
     _ensure_loaded()
     _ensure_master_data()
@@ -517,6 +558,7 @@ async def master_upsert_room(req: _RoomIn):
 
 
 @router.delete("/master/rooms/{name}", summary="删除场地", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_delete_room(name: str):
     _ensure_master_data()
     _master_data.delete_room(name)
@@ -525,6 +567,7 @@ async def master_delete_room(name: str):
 
 
 @router.post("/master/classes", summary="新建/更新班级", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_upsert_class(req: _ClassIn):
     _ensure_loaded()
     _ensure_master_data()
@@ -539,6 +582,7 @@ async def master_upsert_class(req: _ClassIn):
 
 
 @router.delete("/master/classes/{name}", summary="删除班级", dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_delete_class(name: str):
     _ensure_master_data()
     _master_data.delete_class(name)
@@ -593,6 +637,7 @@ async def master_tasks_preview(file: UploadFile = File(...)):
 
 @router.post("/master/import", summary="导入主数据台账（Excel 批量维护五张表）",
              dependencies=_ADMIN_ONLY)
+@_master_write
 async def master_import(file: UploadFile = File(...)):
     """把 `/export/master-workbook` 导出的台账改完传回来，批量写入主数据。
 
@@ -647,12 +692,24 @@ async def export_master_workbook():
     两份各司其职 —— 统计表的「班级数」这类数值列如果拿去导入，会被判为统计列
     并显式忽略（见 `master_workbook._is_stat_column`），不会变成名叫「5」的班级。
     """
+    data = await run_in_threadpool(_master_workbook_bytes)
+    return _xlsx_bytes_response(data, "主数据台账（可编辑，可导回）.xlsx")
+
+
+def _master_workbook_bytes() -> bytes:
+    """（同步、纯 CPU）五张实体表台账 → 字节（带字节缓存，R-71）。"""
     _ensure_loaded()
     _ensure_master_data()
+    key = ("master-workbook", _EXPORT_FORMAT_VERSION, _master_digest(_master_data))
+    return _cached_export(key, _master_workbook_build)
+
+
+def _master_workbook_build() -> bytes:
+    """真正的建表（同步、纯 CPU）。实测 85ms，必须走线程池（R-70）。"""
     from app.master_workbook import build_workbook
 
-    wb = build_workbook(_master_data)
-    return _xlsx_response(wb, "主数据台账（可编辑，可导回）.xlsx")
+    # 遍历五张表前先取快照：本函数在工作线程上，CRUD 可能同时改写主数据
+    return _workbook_bytes(build_workbook(_master_snapshot()))
 
 
 @router.post("/chat", response_model=ChatResponse, summary="教师调课咨询",
@@ -789,6 +846,8 @@ def _load_default_schedule() -> tuple[str, int]:
         msg += f"（另有 {rep['pending']} 条待排任务：写了班级与实验项目但没排时间，可直接进并行排课）"
     if rep.get("skipped"):
         msg += f"（⚠️ {rep['skipped']} 条时段无法识别，未纳入冲突扫描）"
+    # 数据就位后在后台把四份导出各建一次：让教秘第一次点导出也是热的（R-71）
+    start_export_warmup()
     return msg, len(_db.entries)
 
 
@@ -801,9 +860,17 @@ def _ensure_master_data() -> None:
     指纹不一致时主动清掉旧落盘 —— 安排表永远是主数据的权威来源，旧表上的会话修改
     对新表没有意义（新表的班级/项目可能根本不存在）。
     """
-    global _schedule_fp
     if _master_data.initialized:
         return
+    with _master_lock:
+        if _master_data.initialized:  # 双检：等锁期间别的线程可能已经反推完
+            return
+        _ensure_master_data_locked()
+
+
+def _ensure_master_data_locked() -> None:
+    """真正的恢复/反推；调用方必须持有 `_master_lock`（见上：并发导出会同时进来）。"""
+    global _schedule_fp
     from app import master_store
 
     store = master_store.load()
@@ -828,6 +895,27 @@ def _ensure_master_data() -> None:
         master_store.clear()
     if _db.loaded:
         _master_data.build_from_entries(_db.entries)
+
+
+def _master_courses_snapshot() -> dict:
+    """锁内取「项目名 → 课程名」快照（导出用）。
+
+    为什么要快照：导出已跑在工作线程上（R-70），而教秘的 CRUD / 台账导入会同时
+    改写 `_master_data.experiments`；`project_courses()` 要**遍历**这个字典，
+    边改边遍历会抛 `RuntimeError: dictionary changed size during iteration`
+    —— 表现为导出 500，且只在"有人正好在改主数据时点了导出"才复现。
+    快照只有 25 条，成本可忽略；绝不能让导出自己成为新的故障源。
+    """
+    from app.course_bridge import project_courses
+
+    with _master_lock:
+        return project_courses(_master_data)
+
+
+def _master_snapshot():
+    """锁内复制一份主数据（给要遍历五张实体表的导出用，理由同上）。"""
+    with _master_lock:
+        return MasterData().from_dict(_master_data.to_dict())
 
 
 def _persist_master_state() -> None:
@@ -1191,12 +1279,14 @@ async def parallel_solve_all():
 @router.post("/parallel/export", summary="并行排课方案导出 Excel",
              dependencies=[Depends(rate_limit("parallel-export"))])
 async def parallel_export(req: ParallelExportRequest):
-    """把并行排课方案导出为 Excel（贴合排课员真实工作流）"""
-    from io import BytesIO
+    """把并行排课方案导出为 Excel（贴合排课员真实工作流）
+
+    ⚠️ 这份导出**刻意留在请求线程上**：实测 24 行 12ms / 433 行 52ms，
+    走线程池的切换与排队成本与之同量级，不值得（R-70 口径：只改实测 ≥50ms
+    且每次点击都会走的路径，不做"看着不优雅"的改造）。
+    """
     import openpyxl
-    from openpyxl.styles import Font, Alignment
-    from fastapi.responses import StreamingResponse
-    from urllib.parse import quote
+    from openpyxl.styles import Alignment, Font
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1212,15 +1302,7 @@ async def parallel_export(req: ParallelExportRequest):
     for col, w in zip("ABCDEFG", [8, 8, 14, 10, 18, 30, 12]):
         ws.column_dimensions[col].width = w
 
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    filename = quote(f"并行排课方案_{req.class_name}.xlsx")
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
-    )
+    return _xlsx_response(wb, f"并行排课方案_{req.class_name}.xlsx")
 
 
 # ---------------------------------------------------------------------------
@@ -1370,21 +1452,125 @@ def _entry_sort_key(e):
     return (e.week, wd, _SLOT_ORDER.get(e.time_slot, 99), str(e.group))
 
 
-def _xlsx_response(wb, filename: str):
-    """工作簿 → 带中文文件名的下载响应（与并行排课导出同一套口径）。"""
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _workbook_bytes(wb) -> bytes:
+    """工作簿 → xlsx 字节。**纯 CPU，重活必须在工作线程里调用**（R-70）。"""
+    from io import BytesIO
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _xlsx_bytes_response(data: bytes, filename: str):
+    """字节 → 带中文文件名的下载响应（与并行排课导出同一套口径）。"""
     from io import BytesIO
     from urllib.parse import quote
 
     from fastapi.responses import StreamingResponse
 
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
     return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        BytesIO(data),
+        media_type=_XLSX_MEDIA,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
+
+
+def _xlsx_response(wb, filename: str):
+    """轻量路径：小工作簿在当前线程直接序列化（实测 ≤50ms 的导出才可走这里）。
+
+    重导出（班级/场地/两份台账/自动排课初稿，实测 77–830ms）一律拆成
+    `_build_*_bytes()` + `run_in_threadpool` —— 否则建表期间事件循环停摆，
+    期间全站请求（含 /health）一起排队，见 R-70。
+    """
+    return _xlsx_bytes_response(_workbook_bytes(wb), filename)
+
+
+# ---------------------------------------------------------------------------
+# 导出字节缓存（R-71）
+#
+# 为什么要缓存：导出实测 77–350ms（进程首次 830ms），而教秘在一次演示里会把
+# 班级课表 / 场地课表 / 两份台账各点一遍，还会为了"再确认一下"重复点同一个。
+# 重算一遍没有任何新信息 —— 这正是"一次算、多次用"。
+#
+# 为什么不怕缓存脏（本项目最怕这一类，R-66 就是缓存静默失效）：
+# 键**不是**手工维护的版本号，而是从数据自身算出来的指纹 —— 安排表每一条的
+# **全部字段**（`vars(e)`，不是手写字段列表，漏一个就是脏缓存）+ 主数据五张表 +
+# 请求参数 + 导出格式版本。数据一变键就变，旧字节自然不再被命中。
+# 代价：每次请求 2ms 指纹（实测 entries 1.6ms + master 0.3ms），
+# 相比 77–350ms 的建表可以忽略。
+# ---------------------------------------------------------------------------
+_EXPORT_CACHE_MAX = 12          # 每份 10–50KB，封顶约 600KB
+_EXPORT_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_EXPORT_FORMAT_VERSION = 1      # 导出**格式**变了才 +1（数据变化靠指纹，不用动它）
+
+
+def _entries_digest(entries) -> bytes:
+    """安排表全字段指纹。用 `vars(e)` 而不是手写字段名：漏一个字段就是脏缓存。"""
+    h = hashlib.blake2b(digest_size=16)
+    for e in entries:
+        h.update(repr(vars(e)).encode("utf-8", "ignore"))
+    return h.digest()
+
+
+def _master_digest(master) -> bytes:
+    """主数据五张表指纹（课程映射、教师/场地候选都在里面）。"""
+    return hashlib.blake2b(repr(master.to_dict()).encode("utf-8", "ignore"),
+                           digest_size=16).digest()
+
+
+def _cached_export(key: tuple, build) -> bytes:
+    """命中就返回缓存字节，未命中才建表并存入。线程安全：最坏情况是重复建一次。"""
+    hit = _EXPORT_CACHE.get(key)
+    if hit is not None:
+        _EXPORT_CACHE.move_to_end(key)
+        return hit
+    data = build()
+    _EXPORT_CACHE[key] = data
+    while len(_EXPORT_CACHE) > _EXPORT_CACHE_MAX:
+        _EXPORT_CACHE.popitem(last=False)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# 导出预热（R-71）
+#
+# 缓存解决的是"重复点击"，但演示里教秘点的恰恰是**第一次**（首调 417–830ms，
+# 大头是 openpyxl 的冷启动）。所以在数据加载完之后，后台把四份导出各建一次，
+# 让第一次点击也是热的。
+#
+# 取向与 solver 预热一致（engine/warmup.py）：daemon 线程、不阻塞启动、
+# 不占请求路径、失败只退回"首调慢一点"，绝不因为预热失败而影响任何功能。
+# ---------------------------------------------------------------------------
+_EXPORT_WARM_THREAD: Optional[threading.Thread] = None
+
+
+def _warm_export_cache() -> None:
+    try:
+        if not _db.loaded:
+            return
+        _ensure_master_data()
+        _class_schedule_bytes()
+        _room_schedule_bytes()
+        _master_data_bytes()
+        _master_workbook_bytes()
+    except Exception as exc:  # 预热失败绝不能影响服务可用性
+        print(f"⚠️ 导出预热失败（不影响功能，只是首调会慢一点）：{type(exc).__name__}: {exc}")
+
+
+def start_export_warmup() -> bool:
+    """后台预热导出缓存；已有预热在跑 / 被禁用则返回 False（幂等）。"""
+    global _EXPORT_WARM_THREAD
+    if os.getenv("SCHEDULE_WARMUP", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    if _EXPORT_WARM_THREAD is not None and _EXPORT_WARM_THREAD.is_alive():
+        return False
+    _EXPORT_WARM_THREAD = threading.Thread(
+        target=_warm_export_cache, name="export-warmup", daemon=True)
+    _EXPORT_WARM_THREAD.start()
+    return True
 
 
 def _write_sheet(ws, headers, widths):
@@ -1434,10 +1620,30 @@ async def export_class_schedule(class_name: Optional[str] = None):
     - 该班若出现**跨课程撞车**（同一组在两门课被排进同一格），在表尾单独列出：
       两门课的任课教师互不知情，谁都不会觉得自己排错了，这是最难自发发现的一类。
     """
+    data = await run_in_threadpool(_class_schedule_bytes, class_name)
+    return _xlsx_bytes_response(data, f"班级课表_{class_name or '全部班级'}.xlsx")
+
+
+def _class_schedule_bytes(class_name: Optional[str] = None) -> bytes:
+    """（同步、纯 CPU）班级课表工作簿 → 字节（带字节缓存，R-71）。
+
+    拆出来只为了一件事：把这段 244–830ms 的建表工作交给线程池，
+    别占着事件循环（R-70；R-19 同一族，只是当时只修了 5 处、没覆盖后来新增的导出）。
+    """
     _ensure_loaded()
     _ensure_master_data()
+    key = ("class", class_name, _EXPORT_FORMAT_VERSION,
+           _entries_digest(_db.entries), _master_digest(_master_data))
+    return _cached_export(key, lambda: _class_schedule_build(class_name))
+
+
+def _class_schedule_build(class_name: Optional[str] = None) -> bytes:
+    """真正的建表（同步、纯 CPU）。"""
     import openpyxl
     from app.course_bridge import group_by_course, scan_cross_course
+
+    # 课程映射在锁内取快照：本函数跑在工作线程上，教秘的 CRUD 可能同时改写主数据
+    courses = _master_courses_snapshot()
 
     entries = [e for e in _db.entries if (not class_name or e.class_name == class_name)]
     if class_name and not entries:
@@ -1449,7 +1655,7 @@ async def export_class_schedule(class_name: Optional[str] = None):
 
     # 跨课程撞车按班归堆（只扫导出范围：单班导出时不必惊动全表）
     cross_by_class: dict = {}
-    for c in scan_cross_course(entries, _master_data)["conflicts"]:
+    for c in scan_cross_course(entries, _master_data, courses)["conflicts"]:
         cross_by_class.setdefault((c["place"].split("/")[0]), []).append(c)
 
     wb = openpyxl.Workbook()
@@ -1460,7 +1666,7 @@ async def export_class_schedule(class_name: Optional[str] = None):
         _write_sheet(ws, ["周次", "星期", "节次", "上课时间", "课程", "实验项目",
                           "学生组", "教师", "场地"],
                      [8, 7, 8, 14, 16, 30, 12, 10, 12])
-        blocks = group_by_course(grouped[cls], _master_data)
+        blocks = group_by_course(grouped[cls], _master_data, courses)
         multi_course = len(blocks) > 1
         for course, items in blocks:
             if multi_course:
@@ -1480,7 +1686,7 @@ async def export_class_schedule(class_name: Optional[str] = None):
     if not grouped:
         ws = wb.create_sheet("无数据")
         ws.append(["当前安排表里没有可导出的记录"])
-    return _xlsx_response(wb, f"班级课表_{class_name or '全部班级'}.xlsx")
+    return _workbook_bytes(wb)
 
 
 @router.get("/export/room-schedule", summary="导出场地课表（教务标准课表之二）",
@@ -1491,7 +1697,19 @@ async def export_room_schedule(room: Optional[str] = None):
     `room` 留空 = 导出全部场地。⚠️ 没填场地的记录（绪论课等）**不能静默丢弃** ——
     它们单独进「（未填场地）」页，否则教秘会以为全表都被扫到了（R-35 口径）。
     """
+    data = await run_in_threadpool(_room_schedule_bytes, room)
+    return _xlsx_bytes_response(data, f"场地课表_{room or '全部场地'}.xlsx")
+
+
+def _room_schedule_bytes(room: Optional[str] = None) -> bytes:
+    """（同步、纯 CPU）场地课表工作簿 → 字节（带字节缓存，R-71）。"""
     _ensure_loaded()
+    key = ("room", room, _EXPORT_FORMAT_VERSION, _entries_digest(_db.entries))
+    return _cached_export(key, lambda: _room_schedule_build(room))
+
+
+def _room_schedule_build(room: Optional[str] = None) -> bytes:
+    """真正的建表（同步、纯 CPU）。实测 265–342ms，必须走线程池（R-70）。"""
     import openpyxl
 
     entries = [e for e in _db.entries if (not room or (e.room or "").strip() == room)]
@@ -1515,7 +1733,7 @@ async def export_room_schedule(room: Optional[str] = None):
     if not grouped:
         ws = wb.create_sheet("无数据")
         ws.append(["当前安排表里没有可导出的记录"])
-    return _xlsx_response(wb, f"场地课表_{room or '全部场地'}.xlsx")
+    return _workbook_bytes(wb)
 
 
 @router.get("/export/master-data", summary="导出基础数据台账（数据库重构的起始材料）",
@@ -1531,7 +1749,19 @@ async def export_master_data():
     ⚠️ 口径：课次一律按**真实占用格数**计（`14:00-17:00` 算 2 格），
     与利用率面板保持一致；缺字段的记录归入"未标注/未指派"而不是丢弃。
     """
+    data = await run_in_threadpool(_master_data_bytes)
+    return _xlsx_bytes_response(data, "实验排课基础数据台账.xlsx")
+
+
+def _master_data_bytes() -> bytes:
+    """（同步、纯 CPU）四张统计台账 → 字节（带字节缓存，R-71）。"""
     _ensure_loaded()
+    key = ("master-data", _EXPORT_FORMAT_VERSION, _entries_digest(_db.entries))
+    return _cached_export(key, _master_data_build)
+
+
+def _master_data_build() -> bytes:
+    """真正的建表（同步、纯 CPU）。实测 77ms，必须走线程池（R-70）。"""
     import openpyxl
     from collections import defaultdict
 
@@ -1635,7 +1865,7 @@ async def export_master_data():
         ws.append([name, v["cells"], len(v["projects"]), len([g for g in v["groups"] if g]),
                    _week_span(v["weeks"]), _weekday_mix(v["wd"]), "、".join(sorted(v["teachers"]))])
 
-    return _xlsx_response(wb, "实验排课基础数据台账.xlsx")
+    return _workbook_bytes(wb)
 
 
 @router.get("/data-audit", summary="数据体检报告（扫描现有安排表冲突）")
@@ -2047,16 +2277,32 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
     文本无法落地 —— 要么手抄，要么重新在 Excel 里排一遍。这份导出就是"排完了"
     到"能交付"之间缺的那一步：总表给排课人员核对，每班一页直接发给班级。
     """
-    from io import BytesIO
-    from urllib.parse import quote
-
-    import openpyxl
-    from openpyxl.styles import Alignment, Font
-    from fastapi.responses import StreamingResponse
-
     rows = list(req.schedule or [])
     if not rows:
         raise HTTPException(status_code=400, detail="没有可导出的排课方案（schedule 为空）")
+    # 文件名里的两个数字在请求线程上算：只是去重计数，不值得进线程池再传回来
+    n_class = len({(r.get("class_name") or "（未填班级）") for r in rows})
+    data = await run_in_threadpool(_auto_schedule_bytes, rows)
+    return _xlsx_bytes_response(data, f"自动排课初稿_{len(rows)}条_{n_class}班.xlsx")
+
+
+def _auto_schedule_bytes(rows: list) -> bytes:
+    """（同步、纯 CPU）自动排课初稿（总表 + 每班一页）→ 字节（带字节缓存，R-71）。
+
+    键就是**请求载荷本身**的指纹：方案由前端带上来，服务端不存会话态。
+    """
+    payload = hashlib.blake2b(repr(rows).encode("utf-8", "ignore"), digest_size=16).digest()
+    key = ("auto-schedule", _EXPORT_FORMAT_VERSION, payload)
+    return _cached_export(key, lambda: _auto_schedule_build(rows))
+
+
+def _auto_schedule_build(rows: list) -> bytes:
+    """真正的建表（同步、纯 CPU）。
+
+    实测 433 行 / 18 页 ≈ 184ms —— 171 个任务的真实规模只会更大，必须走线程池（R-70）。
+    """
+    import openpyxl
+    from openpyxl.styles import Alignment, Font
 
     order = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
     rows = [dict(r, course=(r.get("course") or r.get("project") or "")) for r in rows]
@@ -2098,15 +2344,7 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
             sh.column_dimensions[col].width = w
         sh.freeze_panes = "A2"
 
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    filename = quote(f"自动排课初稿_{len(rows)}条_{len(by_class)}班.xlsx")
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
-    )
+    return _workbook_bytes(wb)
 
 
 @router.get("/teachers", summary="教师列表（F1 身份选择）")
