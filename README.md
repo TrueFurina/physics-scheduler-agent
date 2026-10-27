@@ -84,7 +84,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **408 backend tests + 89 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **423 backend tests + 89 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_restart_replay`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -102,7 +102,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 408 pytest tests
+│   └── tests/                      # 423 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -171,6 +171,7 @@ python scripts/verify_graybox.py        # lexical/coverage/internal-collision au
 python scripts/verify_school_plan.py    # independent re-solve of the whole-school plan
 python scripts/audit_conflicts.py       # openpyxl + real-clock conflict scan
 python scripts/probe_approval_chain.py  # reschedule write path (API level, --restore)
+python scripts/probe_restart_replay.py  # write → kill process → cold restart: is the change still there?
 python scripts/probe_land_plan.py       # plan-landing write path (API level, undoes by default)
 python scripts/probe_import_wizard.py   # import wizard: read-only preview + commit + self-cleanup
 python scripts/probe_schedule_grid.py   # weekly grid vs independent openpyxl re-count (all 16 weeks)
