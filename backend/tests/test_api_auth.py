@@ -321,3 +321,77 @@ def test_openapi_present_when_docs_enabled():
     r = client.get("/openapi.json")
     assert r.status_code == 200
     assert r.json()["openapi"].startswith("3.")
+
+
+# ---------------------------------------------------------------------------
+# 9. 口令配置必须 fail-closed
+# ---------------------------------------------------------------------------
+# 为什么不靠"测试能跑通"来证明：本文件顶部用 os.environ.setdefault 注入演示值，
+# 这会让"未配置"这一场景在测试中永远不出现。
+# 所以这里用子进程显式构造"没有 ADMIN_PASS"的环境，验证模块拒绝加载。
+#
+# 这是本次加固的核心安全属性，必须被锁定，否则哪天有人把默认值加回来，
+# 所有测试依然全绿。
+
+
+def test_security_module_refuses_to_load_without_admin_pass():
+    import subprocess
+    import textwrap
+
+    backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    code = textwrap.dedent(
+        """
+        import os, sys
+        os.environ.pop("ADMIN_PASS", None)
+        sys.path.insert(0, ".")
+        try:
+            import app.security  # noqa: F401
+        except RuntimeError as exc:
+            assert "ADMIN_PASS" in str(exc)
+            print("REFUSED")
+        else:
+            print("LOADED")
+        """
+    )
+    env = {k: v for k, v in os.environ.items() if k != "ADMIN_PASS"}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert "REFUSED" in proc.stdout, (
+        "未设置 ADMIN_PASS 时 security 模块竟然加载成功——fail-closed 已失效。\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr[-500:]!r}"
+    )
+
+
+def test_demo_password_emits_warning():
+    """使用公开演示口令时必须告警（不拦截，但要让线上日志看得见）。"""
+    import subprocess
+    import textwrap
+
+    backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    code = textwrap.dedent(
+        """
+        import os, sys, warnings
+        os.environ["ADMIN_PASS"] = "admin123"
+        sys.path.insert(0, ".")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            import app.security  # noqa: F401
+        hit = [w for w in caught if "演示口令" in str(w.message)]
+        print("WARNED" if hit else "SILENT")
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root,
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+    )
+    assert "WARNED" in proc.stdout, (
+        f"演示口令未触发告警。stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r}"
+    )
