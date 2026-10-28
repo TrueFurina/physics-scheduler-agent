@@ -237,13 +237,56 @@ def _upload_target(filename: str, allowed: tuple, prefix: str = "") -> str:
     return os.path.join(_DATA_DIR, _safe_upload_name(filename, allowed, prefix))
 
 
+# ---------------------------------------------------------------------------
+# 上传体积上限
+# ---------------------------------------------------------------------------
+# 为什么必须有：`await file.read()` 会把整个上传体一次性读进内存。
+# 没有上限时，一个 500MB 的请求就能把进程内存顶爆（且解析失败发生在
+# **读完之后**，所以"文件不合法"这道关根本起不到保护作用）。
+#
+# 这里在读取**过程中**累加并断言，而不是读完再判大小 —— 后者对
+# 内存的伤害已经造成了。
+#
+# 默认 32MB：一份几百行的排课表 Excel 通常 < 2MB，
+# 留足余量又不至于让滥用者用少量请求占满内存。
+# 可用环境变量覆盖（大表单位需放宽时）。
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "32")) * 1024 * 1024
+_UPLOAD_CHUNK = 1024 * 1024  # 1MB
+
+
+async def _read_upload_limited(file: UploadFile, limit: int = None) -> bytes:
+    """分块读取上传内容，超过上限立即 413，不做完整读入。
+
+    与 `await file.read()` 的区别：
+      - 读的过程中累加，超限立刻停，内存占用被限制在 limit + 1 块
+      - 返回 413（Payload Too Large）而不是 400，语义上区分"太大"与"格式错"
+    """
+    cap = MAX_UPLOAD_BYTES if limit is None else limit
+    buf = bytearray()
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"文件超过上限（{cap // (1024 * 1024)} MB）。"
+                    "如确需上传更大的表格，请设置环境变量 MAX_UPLOAD_MB 后重启服务。"
+                ),
+                headers={"X-Max-Upload-Bytes": str(cap)},
+            )
+    return bytes(buf)
+
+
 @router.post("/upload", summary="上传实验安排表 Excel", dependencies=_ADMIN_ONLY)
 async def upload_schedule(file: UploadFile = File(...)):
     """上传实验安排表 Excel 文件（需管理员会话）"""
     # 保存上传的文件（文件名经净化，杜绝路径穿越）
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES)
 
-    content = await file.read()
+    content = await _read_upload_limited(file)
     with open(save_path, "wb") as f:
         f.write(content)
 
@@ -291,7 +334,7 @@ async def upload_master(file: UploadFile = File(...)):
     流程静默丢弃。上传后这些任务直接进入并行排课的总览与求解。
     """
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES)
-    content = await file.read()
+    content = await _read_upload_limited(file)
     with open(save_path, "wb") as f:
         f.write(content)
 
@@ -506,7 +549,7 @@ async def master_import_preview(file: UploadFile = File(...)):
     刻意不落盘：预览是纯读路径，文件走内存 BytesIO 解析，
     `_DATA_DIR` 里不该留下一个谁都不会再看的临时文件。
     """
-    content = await file.read()
+    content = await _read_upload_limited(file)
     try:
         from app.master_workbook import preview_workbook
 
@@ -526,7 +569,7 @@ async def master_tasks_preview(file: UploadFile = File(...)):
     认不出「班级/实验项目」两列时这里就 400 说清缺什么，不用等导入那一刻
     才发现整份文件白传。
     """
-    content = await file.read()
+    content = await _read_upload_limited(file)
     try:
         from app.utils.excel_parser import preview_master_tasks
 
@@ -553,7 +596,7 @@ async def master_import(file: UploadFile = File(...)):
     哪些列被判为统计列而忽略 —— 静默导入一半比报错危险得多（R-34）。
     """
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES, prefix="master_")
-    content = await file.read()
+    content = await _read_upload_limited(file)
     with open(save_path, "wb") as f:
         f.write(content)
 
