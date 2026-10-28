@@ -623,3 +623,68 @@ def test_parser_wires_the_guard():
     src = inspect.getsource(ep)
     assert "assert_sheet_size(sheet" in src, "解析入口未调用 assert_sheet_size"
     assert "bounded_iter_rows(sheet" in src, "行循环未用 bounded_iter_rows"
+
+
+# ---------------------------------------------------------------------------
+# 13. 行数超限的用户可见文案（不是运维话术）
+# ---------------------------------------------------------------------------
+# 背景：`SheetTooLargeError` 原本被 `except Exception` 吞掉，变成一个
+# 「文件解析失败：…请设置环境变量 MAX_SHEET_ROWS 后重启服务。」的 400。
+# 教秘看到的是：既让他去动环境变量，又说"解析失败"（其实根本没开始解析）。
+#
+# 这里锁定三件事：
+#   1. 状态码 400（不是 500）
+#   2. detail 有可操作建议（精简/拆分），无运维话术（环境变量/重启）
+#   3. 不误用"文件解析失败"前缀（那是给真正的解析异常用的）
+#   4. 限额头 X-Max-Sheet-Rows 暴露，供前端展示
+
+
+def test_sheet_too_large_message_is_user_facing(monkeypatch):
+    import io as _io
+
+    import openpyxl
+
+    from app.api import reschedule as rs
+    from app.utils import excel_parser as ep
+
+    # 压低上限，避免真的构造两万行
+    monkeypatch.setattr(ep, "MAX_SHEET_ROWS", 5)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["h1"])
+    ws.append(["h2"])
+    for i in range(20):
+        ws.append([i + 1, "周一", "567", "甲班", "1组", "项目A", "A410", "吴老师"])
+    buf = _io.BytesIO()
+    wb.save(buf)
+
+    r = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("big.xlsx", buf.getvalue(), "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+
+    assert r.status_code == 400, f"行数超限应回 400，实际 {r.status_code}"
+    detail = r.json()["detail"]
+
+    # 必须可操作
+    assert ("精简" in detail) or ("拆分" in detail), f"缺少可操作建议：{detail}"
+    # 不得出现运维话术
+    assert "环境变量" not in detail, f"泄漏了运维话术：{detail}"
+    assert "重启" not in detail, f"泄漏了运维话术：{detail}"
+    # 不得误用"解析失败"前缀
+    assert "文件解析失败" not in detail, f"误用了解析失败前缀：{detail}"
+    # 限额走头
+    assert r.headers.get("X-Max-Sheet-Rows") == "5"
+
+
+def test_sheet_too_large_error_carries_structured_fields():
+    """异常对象要带 limit/actual，API 层不必从字符串里抠数字。"""
+    from app.utils.excel_parser import SheetTooLargeError
+
+    e = SheetTooLargeError("行数超限", limit=20000, actual=50000)
+    assert e.limit == 20000
+    assert e.actual == 50000
+    assert isinstance(e, ValueError)
