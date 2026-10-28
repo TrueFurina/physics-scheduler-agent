@@ -113,3 +113,55 @@ describe('describeApiError', () => {
     }
   });
 });
+
+/**
+ * 413 上传超限（2026-10-29 补）。
+ *
+ * 背景：后端给上传接口加了 32MB 上限，超限返回 413 + `X-Max-Upload-Bytes` 头，
+ * 但 `detail` 里写的是给运维看的话（"设置环境变量 MAX_UPLOAD_MB 后重启服务"）。
+ * 前端若不专门处理，教秘会看到：
+ *   "文件超过上限（32 MB）。如确需上传更大的表格，请设置环境变量 MAX_UPLOAD_MB
+ *    后重启服务。（请稍后重试或刷新页面）"
+ * ——既让他去动环境变量，又让他重试同一个注定失败的文件。
+ */
+describe('describeApiError · 413 上传超限', () => {
+  it('提示换小文件，而不是让用户重试或改环境变量', () => {
+    const msg = describeApiError(
+      axiosErr({
+        status: 413,
+        data: {
+          detail:
+            '文件超过上限（32 MB）。如确需上传更大的表格，请设置环境变量 MAX_UPLOAD_MB 后重启服务。',
+        },
+        headers: { 'x-max-upload-bytes': '33554432' },
+      }),
+    );
+
+    // 必须说清"怎么办"
+    expect(msg).toMatch(/压缩|拆分|更小/);
+    // 不能把运维话术漏给用户
+    expect(msg).not.toMatch(/环境变量|MAX_UPLOAD_MB|重启服务/);
+    // 不能是"重试"这种无效建议作为主指引
+    expect(msg).not.toMatch(/刷新页面/);
+  });
+
+  it('从 X-Max-Upload-Bytes 头读上限，前端不硬编码', () => {
+    const msg = describeApiError(
+      axiosErr({
+        status: 413,
+        data: { detail: '太大' },
+        headers: { 'x-max-upload-bytes': String(8 * 1024 * 1024) },
+      }),
+    );
+    expect(msg).toContain('8 MB');
+  });
+
+  it('头缺失时也能给出可用文案（不出现"上限 服务端上限"这类病句）', () => {
+    const msg = describeApiError(
+      axiosErr({ status: 413, data: { detail: '太大' }, headers: {} }),
+    );
+    expect(msg).toContain('文件太大');
+    expect(msg).toMatch(/压缩|拆分/);
+    expect(msg).not.toMatch(/上限\s*服务端上限/);
+  });
+});
