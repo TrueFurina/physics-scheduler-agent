@@ -1,11 +1,15 @@
 """诊断：一键自动排课初稿落地后为何出现教师重复占用。
 不写结论，只打印证据。"""
-import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-from collections import Counter, defaultdict
+import copy
+import os
+import sys
 
-from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
-from app.engine.auto_scheduler import AutoScheduler, _is_intro
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+
+from collections import Counter
+
+from app.utils.excel_parser import ScheduleDatabase
+from app.engine.auto_scheduler import AutoScheduler
 from app import plan_landing
 
 DB = os.path.join(os.path.dirname(__file__), "..", "schedule.xlsx")
@@ -42,7 +46,6 @@ for u in list(extra)[:10]:
     print("  EXTRA  :", u)
 
 # 落地到副本，找教师重复
-import copy
 db2 = copy.deepcopy(db)
 land = plan_landing.apply_plan(db2, plan)
 print(f"\napply_plan 结果: kept={land['kept']} replaced_with={land['replaced_with']} total={land['total']}")

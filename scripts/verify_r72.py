@@ -7,10 +7,13 @@
   3. 内部不冲突：新方案自己内部，同一格的教室/教师/班级也不得重复占用。
   4. 组展开正确：每个段的 k 个组 = 同周同教室（或合理换房）、时间顺序连续。
 """
-import sys
+import json as _json
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+
+from collections import Counter, defaultdict
 
 from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
 from app.engine.auto_scheduler import AutoScheduler, _is_intro, _spans_overlap, _teacher_names, TIME_SLOTS, WEEKDAYS
@@ -86,9 +89,12 @@ for e in db.entries:
 ac_r = ac_t = ac_c = 0
 for r in sched_rows:
     cell = (r["week"], r["weekday"], r["time_slot"])
-    if r["room"] and cell + (r["room"],) in all_room: ac_r += 1
-    if r.get("teacher") and cell + (r["teacher"],) in all_teacher: ac_t += 1
-    if r.get("class_name") and cell + (r["class_name"],) in all_class: ac_c += 1
+    if r["room"] and cell + (r["room"],) in all_room:
+        ac_r += 1
+    if r.get("teacher") and cell + (r["teacher"],) in all_teacher:
+        ac_t += 1
+    if r.get("class_name") and cell + (r["class_name"],) in all_class:
+        ac_c += 1
 # [2b] 是"新方案 vs 旧表全量"的对比：非绪论旧格会被替换腾空，新方案占用它
 # 属正常替换（旧课已移走），**不算冲突**。真正要 0 的是 [2] 保留的绪论/考试。
 print(f"[2b] 与全部既有记录重叠（含被替换的非绪论，属正常替换，仅参考）："
@@ -103,20 +109,22 @@ for r in sched_rows:
     cell = (r["week"], r["weekday"], r["time_slot"])
     if r["room"]:
         k = cell + (r["room"],)
-        if k in seen_room: in_room += 1
+        if k in seen_room:
+            in_room += 1
         seen_room.add(k)
     if r.get("teacher"):
         k = cell + (r["teacher"],)
-        if k in seen_teacher: in_teacher += 1
+        if k in seen_teacher:
+            in_teacher += 1
         seen_teacher.add(k)
     if r.get("class_name"):
         k = cell + (r["class_name"],)
-        if k in seen_class: in_class += 1
+        if k in seen_class:
+            in_class += 1
         seen_class.add(k)
 print(f"[3] 内部冲突：教室{in_room} 教师{in_teacher} 班级{in_class}")
 
 # ---- 4. 组展开正确性：同周、连续格、逐段 group 完整 ----
-from collections import defaultdict
 by_key = defaultdict(list)
 for r in sched_rows:
     by_key[(r["teacher"], r["course"], r["class_name"], r["week"], r["room"])].append(r)
@@ -124,7 +132,7 @@ for r in sched_rows:
 timeline = [(d, t) for d in WEEKDAYS for t in TIME_SLOTS]
 pos = {c: i for i, c in enumerate(timeline)}
 bad_expand = 0
-for key, rows in by_key.items():
+for rows in by_key.values():
     if len(rows) < 2:
         # 单组段本就一行，无需连续检查
         continue
@@ -138,12 +146,10 @@ print(f"[4] 多组段非连续展开（允许换房时已退化为不连续）�
 
 # ---- 5. 缺口 ----
 conflicts = res.get("conflicts") or []
-import json as _json
 with open(os.path.join(os.path.dirname(__file__), "r72_conflicts.json"), "w", encoding="utf-8") as _f:
     _json.dump(conflicts, _f, ensure_ascii=False, indent=2)
 print(f"\n[5] 未排上的段/缺口：conflicts={len(conflicts)}（已存 r72_conflicts.json）")
 # 按 reason 归类
-from collections import Counter
 rc = Counter(c.get("reason", "?")[:40] for c in conflicts)
 for reason, n in rc.most_common():
     print(f"    [{n}] {reason}")
