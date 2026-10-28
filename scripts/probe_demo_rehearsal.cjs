@@ -121,7 +121,18 @@ async function shoot(page, name) {
     await btn.click();
     // 只认"已自动应用调课"这句：页面到处都是"调课"二字，用宽松正则会立刻命中（假通过）
     // 真实文案是「已同意并自动应用调课：N 条记录」——正则要容下"同意并"
-    await page.waitForFunction(() => /已(同意并)?自动应用调课/.test(document.body.innerText), null, { timeout: 90000 });
+    // 同时盯住"未找到可自动移动的记录"：那是**另一种失败**（审批过了但课表没动，
+    // 典型原因是没跑 prepare_demo.py、待办是别的探针留下的 source_week=0 工单）。
+    // 不盯它就要等满 90s 才超时，看上去像产品坏了（R-79 实测踩过）。
+    await page.waitForFunction(
+      () => /已(同意并)?自动应用调课/.test(document.body.innerText)
+        || /未找到可自动移动的记录/.test(document.body.innerText),
+      null, { timeout: 90000 });
+    const quick = await page.evaluate(() => document.body.innerText);
+    if (/未找到可自动移动的记录/.test(quick)) {
+      throw new Error('审批通过了但课表没动（后端：未找到可自动移动的记录）'
+        + '—— 多半是没跑 scripts/prepare_demo.py，待办是别的探针留下的工单');
+    }
     const txt = await page.evaluate(() => document.body.innerText);
     const m = txt.match(/已(?:同意并)?自动应用调课：(\d+) 条记录/);
     if (!m) throw new Error('未看到"已自动应用调课：N 条"');
@@ -133,7 +144,7 @@ async function shoot(page, name) {
     await nav(/并行排课/).click();
     await page.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
     await page.getByRole('button', { name: /一键排全校/ }).first().click();
-    await page.waitForFunction(() => /全校一键排课 · 17\/17 个班排定/.test(document.body.innerText),
+    await page.waitForFunction(() => /全校一键排课 · 17\/17 个班排满/.test(document.body.innerText),
       null, { timeout: 180000 });
     return '17/17 班，逐班结果表';
   }, '07-school-plan.png');

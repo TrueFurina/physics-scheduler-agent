@@ -132,12 +132,12 @@ function rec(ok, name, detail, opts = {}) {
       const tS = Date.now();
       await page.getByRole('button', { name: /一键排全校/ }).first().click();
       await page.waitForFunction(
-        () => /全校一键排课 · \d+\/\d+ 个班排定/.test(document.body.innerText),
+        () => /全校一键排课 · \d+\/\d+ 个班排满/.test(document.body.innerText),
         null, { timeout: 180000 },
       );
       await page.waitForTimeout(400);
       const stxt = await page.evaluate(() => document.body.innerText);
-      const m = stxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排定/);
+      const m = stxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排满/);
       const rows = stxt.match(/共 (\d+) 条安排/);
       const n = rows ? Number(rows[1]) : 0;
       rec(
