@@ -495,3 +495,70 @@ def test_startup_logs_weak_demo_password():
     log = _startup_log({"ADMIN_PASS": "admin123"})
     assert "weak-demo" in log, f"演示口令未被标记。log={log!r}"
     assert "admin123" not in log, f"启动日志泄露了口令明文！log={log!r}"
+
+
+# ---------------------------------------------------------------------------
+# 11. 上传体积上限（防内存耗尽 DoS）
+# ---------------------------------------------------------------------------
+# 背景：5 个上传端点原本都是 `await file.read()` 一次性读全量。
+# 超大文件会先把内存顶爆，然后才在解析阶段报"不是 zip"——
+# 那道格式校验根本起不到保护作用。
+#
+# 更关键的是：必须在**读取过程中**累加判断，不能读完再判大小。
+
+
+def test_upload_rejects_oversized_file():
+    """超过上限的上传必须 413，而不是先读完再报格式错。"""
+    import io as _io
+
+    from app.api import reschedule as rs
+
+    headers = _admin_headers()
+    oversize = b"PK\x03\x04" + b"A" * (1024 * 1024)  # 1MB 实体
+    # 把上限临时压到 64KB，避免测试里真的构造 32MB
+    old = rs.MAX_UPLOAD_BYTES
+    try:
+        import os as _os
+        rs.MAX_UPLOAD_BYTES = 64 * 1024
+        r = client.post(
+            "/api/reschedule/upload",
+            files={"file": ("big.xlsx", _io.BytesIO(oversize), "application/octet-stream")},
+            headers=headers,
+        )
+    finally:
+        rs.MAX_UPLOAD_BYTES = old
+
+    assert r.status_code == 413, f"超大文件未被拦截：{r.status_code} {r.text[:120]}"
+    assert "上限" in r.json()["detail"]
+    assert r.headers.get("X-Max-Upload-Bytes") == str(64 * 1024)
+
+
+def test_upload_under_limit_reaches_parser():
+    """上限内的文件应继续走到解析阶段（拿 400 而不是 413），证明没误伤正常上传。"""
+    import io as _io
+
+    headers = _admin_headers()
+    payload = b"PK\x03\x04" + b"A" * 1024  # 1KB，远小于上限
+    r = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("ok.xlsx", _io.BytesIO(payload), "application/octet-stream")},
+        headers=headers,
+    )
+    # 内容不是合法 zip → 解析失败 400；关键是**不是** 413
+    assert r.status_code == 400, f"正常尺寸文件被误拦：{r.status_code}"
+    assert "上限" not in r.text
+
+
+def test_all_upload_endpoints_use_limited_reader():
+    """守卫：5 个上传端点都不得再用裸 await file.read()。"""
+    import inspect
+
+    from app.api import reschedule as rs
+
+    src = inspect.getsource(rs)
+    assert "content = await file.read()" not in src, (
+        "仍有上传端点用裸 file.read() 全量读入，超大文件会顶爆内存"
+    )
+    assert src.count("await _read_upload_limited(file)") >= 5, (
+        "上传端点数与受限读取调用数不匹配"
+    )
