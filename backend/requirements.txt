@@ -19,7 +19,10 @@ python-dotenv==1.2.1
 httpx==0.28.1
 
 # --- 排课求解（并行排课 CP-SAT 模型） ---
-ortools==9.15.6755
+# 版本注意：9.15.6755 在 Python 3.12 上调用 CpSolver.Solve() 会段错误（SIGSEGV），
+# 且 Python 层无法捕获、pytest 直接中断。9.11.4210 实测正常（全量 368 passed）。
+# 详见 docs/ortools-compat.md；升级前请先在目标 Python 版本上跑最小复现。
+ortools==9.11.4210
 
 # --- Excel 解析 ---
 openpyxl==3.1.5
