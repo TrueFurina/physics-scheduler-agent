@@ -44,7 +44,7 @@ CP-SAT 面对 10! 量级的对称解，实测 30 个任务 5.2 万个布尔变�
 
 import time
 from collections import Counter, defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import AbstractSet, Dict, List, Optional, Set, Tuple
 
 from ortools.sat.python import cp_model
 
@@ -417,11 +417,14 @@ class AutoScheduler:
         if expand and schedule:
             groups_of = {(s["teacher"], s["course"], s["class_name"]):
                          (s.get("groups") or [""]) for s in sections}
-            ex_rooms, ex_teachers, ex_kept_class = self._occupancy()
-            ex_rooms |= set(extra_room_busy or ())
-            ex_teachers |= set(extra_teacher_busy or ())
+            occ_rooms, occ_teachers, occ_kept_class = self._occupancy()
+            # kept_* = 既有占用（含 extra 回填），**只读**：展开时"释放自己那一格"
+            # 只允许释放本批自己的占用，绝不能把既有占用一起抹掉（R-74）。
+            kept_r = occ_rooms | set(extra_room_busy or ())
+            kept_t = occ_teachers | set(extra_teacher_busy or ())
             # 班级维度同样要并入"不参与重排的既有课"（绪论/考试），与 solve() 口径一致
-            ex_class = ex_kept_class | set(extra_class_busy or ())
+            kept_c = occ_kept_class | set(extra_class_busy or ())
+            ex_rooms, ex_teachers, ex_class = set(kept_r), set(kept_t), set(kept_c)
             for r in schedule:                      # 预置本批自己的占用（展开时逐段释放）
                 cell = (r["week"], r["weekday"], r["time_slot"])
                 ex_rooms.add(cell + (r["room"],))
@@ -430,7 +433,8 @@ class AutoScheduler:
                 if r.get("class_name"):
                     ex_class.add(cell + (r["class_name"],))
             schedule, gaps, total_groups = self._expand_groups(
-                schedule, groups_of, ex_rooms, ex_teachers, ex_class)
+                schedule, groups_of, ex_rooms, ex_teachers, ex_class,
+                kept_r, kept_t, kept_c)
 
         placed = {(s["teacher"], s["course"], s["class_name"]) for s in schedule}
         conflicts = []
@@ -466,7 +470,10 @@ class AutoScheduler:
         }
 
     # ------------------------------------------------------------ 确定性兜底
-    def _greedy_fill(self, sections, room_busy, teacher_busy, class_busy) -> List[Dict]:
+    def _greedy_fill(self, sections, room_busy, teacher_busy, class_busy,
+                     kept_room: AbstractSet[Tuple] = frozenset(),
+                     kept_teacher: AbstractSet[Tuple] = frozenset(),
+                     kept_class: AbstractSet[Tuple] = frozenset()) -> List[Dict]:
         """把 CP-SAT 没排上的单元按确定性贪心补齐（只排"确实有位置"的）。
 
         为什么需要：CP-SAT 在固定时限下**不稳定** —— 同一片数据这次 60/60、
@@ -474,6 +481,12 @@ class AutoScheduler:
         都"成功"）。演示/交付不能接受这种抖动：覆盖优先，质量其次。
         贪心只做一件事：按"当周负载最轻"选格子，遵守场地容量/教师/班级/同组每周
         一个实验四条硬约束；排不下就如实留空（不编造）。
+
+        `kept_*` = **不参与重排**的既有课（绪论/考试）占用，只读、不写入。
+        必须单独传、不能并进 `room_busy` 再传进来：那三个集合是**会被本函数 add**
+        的全局累积器，混进 kept 之后调用方就再也分不清"谁占的"了。
+        为什么贪心也必须看 kept（R-74）：`solve_all` 的累积器从空集起步（要允许复用
+        非绪论旧格），本身不含绪论/考试 —— 贪心看不见它们，就会把段塞进绪论课的格子。
         """
         rooms_all = self._get_rooms()
         weeks = self._get_weeks()
@@ -489,11 +502,17 @@ class AutoScheduler:
                     for t in TIME_SLOTS:
                         if sec.get("teacher") and (w, d, t, sec["teacher"]) in teacher_busy:
                             continue
+                        if sec.get("teacher") and (w, d, t, sec["teacher"]) in kept_teacher:
+                            continue
                         if sec["class_name"] and (w, d, t, sec["class_name"]) in class_busy:
+                            continue
+                        if sec["class_name"] and (w, d, t, sec["class_name"]) in kept_class:
                             continue
                         if sec["class_name"] and (sec["class_name"], w) in class_week:
                             continue
-                        free = [r for r in rooms_all if (w, d, t, r) not in room_busy]
+                        free = [r for r in rooms_all
+                                if (w, d, t, r) not in room_busy
+                                and (w, d, t, r) not in kept_room]
                         if not free:
                             continue
                         score = (week_load[w], w, WEEKDAYS.index(d), TIME_SLOTS.index(t))
@@ -520,7 +539,11 @@ class AutoScheduler:
     # ------------------------------------------------------------ 组展开
     def _expand_groups(self, rows: List[Dict], groups_of: Dict[Tuple, List[str]],
                        room_busy: Set[Tuple], teacher_busy: Set[Tuple],
-                       class_busy: Set[Tuple]) -> Tuple[List[Dict], List[Dict], int]:
+                       class_busy: Set[Tuple],
+                       kept_room: AbstractSet[Tuple] = frozenset(),
+                       kept_teacher: AbstractSet[Tuple] = frozenset(),
+                       kept_class: AbstractSet[Tuple] = frozenset()
+                       ) -> Tuple[List[Dict], List[Dict], int]:
         """把"教学段"展开成"组课时"：一个段的 k 个组各占一格。
 
         口径照真实表（实测 171/171 段）：一个段的所有组 = **同一周、同一间教室、
@@ -534,6 +557,12 @@ class AutoScheduler:
 
         参数里的三个 busy 集合**调用方要预先塞入本批 rows 自己的占用**：展开时先把自己
         那一格释放出来再找位置，这样既不会吃掉别的段的格子，也能用回自己排定的起点。
+
+        `kept_*` = **不参与重排**的既有课（绪论/考试）占用，**只读**。
+        为什么必须单独传、不能并进 busy 再传（R-74 修的真 bug）：下面的"释放自己那一格"
+        是 `discard`，并进同一集合后它会**把绪论/考试在那一格的记录一起抹掉** ——
+        若上游（贪心兜底）恰好把段放在绪论格上，抹掉之后就再也拦不住，最终产出直接
+        撞绪论课。分成只读集合后，释放只可能释放本批自己的占用。
 
         找位置的顺序（五步，前一步不成立才退后一步）：
           1. 原周、原教室，从求解器给的那一格起**向后**找连续 k 格；
@@ -574,11 +603,13 @@ class AutoScheduler:
             def _cell_free(pos: int, ww: int, rm: str, tch: str = teacher,
                            cl: str = cls) -> bool:
                 d, t = timeline[pos]
-                if (ww, d, t, rm) in room_busy:
+                if (ww, d, t, rm) in room_busy or (ww, d, t, rm) in kept_room:
                     return False
-                if tch and (ww, d, t, tch) in teacher_busy:
+                if tch and ((ww, d, t, tch) in teacher_busy
+                            or (ww, d, t, tch) in kept_teacher):
                     return False
-                return not (cl and (ww, d, t, cl) in class_busy)
+                return not (cl and ((ww, d, t, cl) in class_busy
+                                    or (ww, d, t, cl) in kept_class))
 
             def _run_in(ww: int, rm: str, lo: int, kk: int = k) -> List[int]:
                 """在第 ww 周的教室 rm 里从 lo 起找连续 k 格（不碰教师/班级占用）。"""
@@ -700,9 +731,13 @@ class AutoScheduler:
             placed_keys = {(x["teacher"], x["course"], x["class_name"]) for x in rows}
             missing = [x for x in sub
                        if (x["teacher"], x["course"], x["class_name"]) not in placed_keys]
+            # 绪论/考试占用：贪心与展开**都必须**看见它（R-74）。
+            # 注意不能并进下面三个累积集再传 —— 它们是会被 add 的全局状态。
+            kept_room, kept_teacher, kept_class = self._kept_busy()
             filled = 0
             if missing:
-                extra_rows = self._greedy_fill(missing, room_busy, teacher_busy, class_busy)
+                extra_rows = self._greedy_fill(missing, room_busy, teacher_busy, class_busy,
+                                               kept_room, kept_teacher, kept_class)
                 filled = len(extra_rows)
                 rows = list(rows) + extra_rows
                 if filled:
@@ -722,12 +757,12 @@ class AutoScheduler:
             # 从空集起步（要允许复用非绪论旧格），本身不含它们。这里只用 **_kept_busy**
             # （绪论/考试）而不是 _occupancy()（全量）：非绪论旧格的教室/教师/班级会被
             # 替换腾出，可以复用；全量挡会把覆盖从 410/410 压到 365/410（实测）。
-            kept_room, kept_teacher, kept_class = self._kept_busy()
+            # ⚠️ 必须作为**独立只读参数**传，不能 `busy | kept` 合并：合并后展开里的
+            # "释放自己那一格"会把 kept 一起 discard 掉（R-74 的撞绪论教师就是这么来的）。
             expanded, gaps, _total = self._expand_groups(
                 rows, groups_of,
-                room_busy | kept_room,
-                teacher_busy | kept_teacher,
-                class_busy | kept_class)
+                room_busy, teacher_busy, class_busy,
+                kept_room, kept_teacher, kept_class)
             # 展开产出的组课时要回填进全局占用，否则下一片求解器复用不到、
             # 会与之互撞（片间互相不可见）。
             for er in expanded:

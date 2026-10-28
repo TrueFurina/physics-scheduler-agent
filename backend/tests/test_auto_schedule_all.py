@@ -312,3 +312,83 @@ def test_real_table_full_coverage():
         assert _collisions(db2.entries, attr) <= _collisions(db.entries, attr), \
             f"落地后 {attr} 维度新增了碰撞（原表 {_collisions(db.entries, attr)} → " \
             f"落地 {_collisions(db2.entries, attr)}）"
+
+
+# ---------------------------------------------------------------- R-74 贪心/展开撞绪论
+#
+# 病（2026-10-28 实测复现，非推断）：CPU 饱和时 `test_real_table_full_coverage`
+# 会红，红的不是覆盖率，而是「撞绪论教师」：
+#     {'week': 2, 'weekday': '周一', 'time_slot': '567', 'teacher': '翁铭华', ...}
+#     而 (2, '周一', '567', '翁铭华') 正是绪论课的占用格。
+# 根因是**两个**缺陷叠加（缺一个都不会撞）：
+#   1. `_greedy_fill` 只拿到全局累积集，而累积集从空集起步（要允许复用非绪论旧格），
+#      本身**不含**绪论/考试占用 ⇒ 贪心看不见它们，把段排进了绪论格；
+#   2. `_expand_groups` 收到的是 `busy | kept` 的**合并集**，而它开头会
+#      `discard` 自己那一格来"释放自己"—— 合并后这一步把 kept 在那一格的记录
+#      **一起抹掉**，于是展开又心安理得地把段放回绪论格。
+# 为什么表现为 flaky：只有 CP-SAT 在时限内没排完（负载高 / 时间盒紧）才走贪心，
+# 平时走 CP-SAT 就看不见。下面三条把两个缺陷分别锁死。
+
+def test_greedy_path_never_collides_with_kept_courses():
+    """确定性复现：把时间盒压到必然 UNKNOWN ⇒ 强制走贪心+展开路径。
+
+    不需要靠 CPU 负载去凑 flaky —— `flatten_seconds=0.05` 下 CP-SAT 每片都拿不到解，
+    路径与"机器很忙"时完全一致。
+    """
+    db = ScheduleDatabase()
+    db.load_from_excel(os.path.abspath(REAL_XLSX))
+    sched = AutoScheduler(db)
+    r = sched.solve_all(chunk_size=60, flatten_seconds=0.05)
+
+    assert r["schedule"], "贪心路径也必须产出方案（否则这条测不到东西）"
+    kr, kt, kc = sched._kept_busy()
+    for s in r["schedule"]:
+        cell = (s["week"], s["weekday"], s["time_slot"])
+        assert cell + (s["room"],) not in kr, f"贪心/展开撞绪论教室 {s}"
+        assert cell + (s["teacher"],) not in kt, f"贪心/展开撞绪论教师 {s}"
+        assert cell + (s["class_name"],) not in kc, f"贪心/展开撞绪论班级 {s}"
+    # 产出仍是组课时（带 group），否则落不了地
+    assert all(s.get("group") for s in r["schedule"])
+
+
+def test_greedy_fill_never_takes_kept_cells():
+    """缺陷 1 的直接单测：kept 全占满时贪心必须"排不下就留空"，不是硬塞。"""
+    # 唯一教师「师0」+ 唯一教室 A410 被绪论课占满第 1 周全部 15 格
+    entries = [_entry(1, d, t, "一班", "A410", "师0", "绪论")
+               for d in ("周一", "周二", "周三", "周四", "周五")
+               for t in ("567", "678", "91011")]
+    db = _db(entries)
+    sched = AutoScheduler(db)
+    kr, kt, kc = sched._kept_busy()
+    assert kr and kt and kc, "前提：绪论占用三维都要有"
+
+    sec = {"teacher": "师0", "course": "声速测量", "class_name": "一班", "groups": ["1组"]}
+    # 不传 kept（修复前的调用形态）：贪心把段塞进绪论格 —— 这就是线上撞法的成因
+    blind = sched._greedy_fill([dict(sec)], set(), set(), set())
+    assert len(blind) == 1, "前提：看不见 kept 时贪心确实会占绪论格"
+    assert (1, blind[0]["weekday"], blind[0]["time_slot"], "师0") in kt
+
+    # 传 kept：一格都不能占
+    seen = sched._greedy_fill([dict(sec)], set(), set(), set(), kr, kt, kc)
+    assert seen == [], f"贪心不得占用绪论格，实得 {seen}"
+
+
+def test_expand_release_does_not_erase_kept():
+    """缺陷 2 的直接单测：展开"释放自己那一格"不得把绪论占用一起 discard。"""
+    db = _db([_entry(1, "周一", "567", "一班", "A410", "师0", "绪论")])
+    sched = AutoScheduler(db)
+    kr, kt, kc = sched._kept_busy()
+    row = {"week": 1, "weekday": "周一", "time_slot": "567", "room": "A410",
+           "teacher": "师0", "course": "声速测量", "class_name": "一班"}
+    # 调用方预置本批占用（这里恰好=绪论格，模拟缺陷 1 的产物）
+    busy_r, busy_t, busy_c = set(kr), set(kt), set(kc)
+    out, _gaps, _total = sched._expand_groups(
+        [dict(row)], {("师0", "声速测量", "一班"): ["1组"]},
+        busy_r, busy_t, busy_c, kr, kt, kc)
+
+    assert out, "换到别的格子应当能排上"
+    for r in out:
+        cell = (r["week"], r["weekday"], r["time_slot"])
+        assert cell + (r["room"],) not in kr, f"展开撞绪论教室 {r}"
+        assert cell + (r["teacher"],) not in kt, f"展开撞绪论教师 {r}"
+        assert cell + (r["class_name"],) not in kc, f"展开撞绪论班级 {r}"
