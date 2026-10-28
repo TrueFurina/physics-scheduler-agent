@@ -112,6 +112,36 @@ except ValueError:
     TOKEN_TTL_SECONDS = 8 * 3600
 
 
+def describe_admin_password_state() -> str:
+    """返回口令状态的一行摘要，供启动日志使用（绝不包含口令本身）。
+
+    为什么需要它：ADMIN_PASS_IS_EPHEMERAL 只是一个内存布尔值，
+    而"本次进程用的是固定口令还是随机口令"恰恰是运维最需要知道的——
+    随机口令意味着重启后旧会话全部失效、管理员要重新登录。
+    不写进日志，运维只能靠猜。
+    """
+    if ADMIN_PASS_IS_EPHEMERAL:
+        return (
+            f"ADMIN_PASS=ephemeral(随机生成, {len(ADMIN_PASS)} 字符, 重启即失效) "
+            f"| APP_ENV={APP_ENV}"
+        )
+    weak = "weak-demo" if ADMIN_PASS in _DEMO_PASSWORDS else "fixed"
+    return f"ADMIN_PASS={weak}({len(ADMIN_PASS)} 字符) | APP_ENV={APP_ENV}"
+
+
+def log_admin_password_state(logger=None) -> str:
+    """把口令状态写进日志并返回摘要。启动时调用一次即可。"""
+    summary = describe_admin_password_state()
+    if logger is not None:
+        if ADMIN_PASS_IS_EPHEMERAL:
+            logger.warning("[security] %s", summary)
+        elif ADMIN_PASS in _DEMO_PASSWORDS:
+            logger.warning("[security] %s —— 演示口令，不可用于公网", summary)
+        else:
+            logger.info("[security] %s", summary)
+    return summary
+
+
 def _load_secret() -> bytes:
     """取得签名密钥。
 
