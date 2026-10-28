@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import SheetTooLargeError
 from app.agent.reschedule_agent import RescheduleAgent
 from app.master_data import MasterData, is_schedulable_project
 from app.security import check_admin_credentials, issue_admin_token, require_admin
@@ -321,6 +322,15 @@ async def upload_schedule(file: UploadFile = File(...)):
             # 界面必须能说出数量与原因，而不是只回一个 total_entries。
             "load_report": rep,
         }
+    except SheetTooLargeError as e:
+        # 规模超限不是"解析失败"，是主动拒绝：别用"文件解析失败"当前缀，
+        # 也别把 "设置环境变量 MAX_SHEET_ROWS" 这类运维话术塞给教秘。
+        # detail 只说"发生了什么 + 怎么办"，限额值走头暴露（供前端展示）。
+        raise HTTPException(
+            status_code=400,
+            detail=f"{e!s}。请精简表格（只保留需要的周次/班级）或拆分成多个文件后重新上传。",
+            headers={"X-Max-Sheet-Rows": str(e.limit)},
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败：{e!s}")
 
