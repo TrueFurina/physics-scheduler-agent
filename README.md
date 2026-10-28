@@ -249,6 +249,12 @@ Publish parameters:
   real teacher names (e.g. 吴琳) — expected behavior, not a leak. Teacher contact info
   (phone / e-mail columns of 教师联系表) is never parsed into any API response; locked by
   `backend/tests/test_privacy_export.py`.
+- Live check: `GET /api/reschedule/status` returns real teacher names (product decision R-09);
+  seeing aliases like `教师A…` means it fell back to the sanitized table (real table missing).
+- Read-interface data boundary (what an anonymous caller can see): teacher **names**, class
+  **names**, rooms, week / weekday / slot, experiment project names. Never: teacher phone or
+  e-mail, and no student-level data (student timetables are not served by any public endpoint).
+  `/master-status` may include class names in its unscheduled-sample list — no student PII.
 - Cloud capabilities (auth / database / LLM) are gated by **exact server-side Origin match**:
   only the published domain is allowed, other origins get 403. So `localhost` can only verify the
   public data plane — WeChat login must be verified on the live domain.
