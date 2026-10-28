@@ -143,6 +143,9 @@ def load_rows() -> Tuple[List[Dict], List[Dict]]:
             "experiment": str(exp).strip() if exp else "",
             "room": str(room).strip() if room else "",
             "teacher": str(teacher).strip() if teacher else "",
+            # 组别：判"这行会不会被初稿替换掉"必须用它（R-78）。同一项目多个组时，
+            # 只按 (班级, 项目) 判会误把没被覆盖的组也当成"会被替换"。
+            "group": str(_group).strip() if _group else "",
         }
         slot = RAW_TO_SLOT.get(raw)
         if slot:
@@ -261,25 +264,23 @@ def audit_sandbox(site: str, rows: List[Dict], weeks: List[int]) -> Tuple[List[s
     return problems, stat
 
 
-def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
-    """验"一键自动排课"（首屏第一个按钮）。
+def auto_schedule_problems(sched: List[Dict], rows: List[Dict]) -> List[str]:
+    """判一份「自动排课」初稿（纯函数，不碰 HTTP —— 好让回归测试直接喂构造数据）。
 
-    这一路原本不在校验范围内，因为它**不返回周次** —— 没有周次就没法跟原始表对。
-    R-37 修好后方案带 `week`，于是"推荐的每一格都不撞"这条承诺也能被独立核对了。
-    在旧实现上跑本函数会直接报"方案条目不周日次"，这本身就是回归信号。
+    ⚠️ 口径（R-78 修的真问题）：初稿是**替换**那 410 个非绪论单元，不是"往旧表里加课"。
+    所以它落在一门旧课原来的格子上是**正常**的（那门旧课被换走了）。
+    2026-10-28 的审计还在"与旧表逐条对"，于是 R-72 之后每次跑都是红的 3 条 ——
+    而验收一直是 `--skip-audit` 跑的，红了两天没人看见。
+
+    正确判据 = **落地后的表**不冲突：
+      - 旧行里 (班级, 项目, 组) 被初稿覆盖的 → 会被替换掉，跳过；
+      - 其余旧行（绪论/考试 + 初稿没覆盖到的单元）→ 一条都不许撞。
+    再加两条：周次必须落在表内、方案内部不得自撞。
     """
     problems: List[str] = []
-    try:
-        resp = http_json(f"{site}/api/reschedule/auto-schedule", {})
-    except Exception as e:
-        return [f"[自动排课] 请求失败：{e}"]
-
-    sched = (resp.get("data") or {}).get("schedule") or []
-    if not sched:
-        return ["[自动排课] 没有返回任何排课条目"]
-
     weeks_in_table = sorted({r["week"] for r in rows})
     lo, hi = weeks_in_table[0], weeks_in_table[-1]
+
     missing_week = [s for s in sched if not isinstance(s.get("week"), int)]
     if missing_week:
         problems.append(
@@ -287,7 +288,10 @@ def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
             f"也无法与已有安排表比对"
         )
 
-    # ① 与原始表逐条对：同周、同天、真实时钟区间重叠 ⇒ 教室/教师不得撞
+    # 初稿覆盖的单元 = 会被替换掉的旧行
+    replaced = {(u.get("class_name"), u.get("course"), u.get("group")) for u in sched}
+
+    # ① 与**留下来的**旧行逐条对：同周、同天、真实时钟区间重叠 ⇒ 教室/教师不得撞
     for u in sched:
         if not isinstance(u.get("week"), int):
             continue
@@ -296,6 +300,9 @@ def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
             continue
         for e in rows:
             if e["week"] != u["week"] or e["weekday"] != u["weekday"]:
+                continue
+            # 这门旧课会被初稿替换掉，复用它的格子不算冲突（R-78 的核心）
+            if (e["class"], e["experiment"], e.get("group")) in replaced:
                 continue
             if not hits_row(u["time_slot"], e):
                 continue
@@ -322,6 +329,24 @@ def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
                 problems.append(f"[自动排课] 方案自撞：第{k[0]}周 {k[1]} {k[2]} {label} {k[3]} 同时排了 {courses}")
 
     return problems
+
+
+def audit_auto_schedule(site: str, rows: List[Dict]) -> List[str]:
+    """验"一键自动排课"（首屏第一个按钮）。
+
+    这一路原本不在校验范围内，因为它**不返回周次** —— 没有周次就没法跟原始表对。
+    R-37 修好后方案带 `week`，于是"推荐的每一格都不撞"这条承诺也能被独立核对了。
+    在旧实现上跑本函数会直接报"方案条目不周日次"，这本身就是回归信号。
+    """
+    try:
+        resp = http_json(f"{site}/api/reschedule/auto-schedule", {})
+    except Exception as e:
+        return [f"[自动排课] 请求失败：{e}"]
+
+    sched = (resp.get("data") or {}).get("schedule") or []
+    if not sched:
+        return ["[自动排课] 没有返回任何排课条目"]
+    return auto_schedule_problems(sched, rows)
 
 
 def audit_solver(site: str, rows: List[Dict]) -> List[str]:
