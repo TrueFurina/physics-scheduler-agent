@@ -128,6 +128,22 @@ def verify(plan, baseline):
     if missing:
         problems.append("[K1] 真实表班级未进全校方案：%s" % "、".join(sorted(missing)[:5]))
 
+    # K2 组课时完整性：`classes_ok` 的历史口径是"有产出"（2/31 也算排定），
+    # 满载下实测过 358/410 而接口仍报 17/17（R-76）。这里按"应排单元数"卡死。
+    expected = plan.get("units_expected", plan.get("units"))
+    if isinstance(expected, int):
+        missing_units = plan.get("units_missing")
+        if missing_units is None:
+            missing_units = expected - sum(c.get("scheduled", 0)
+                                           for c in plan.get("per_class") or [])
+        if missing_units > 0:
+            short = [c for c in plan.get("per_class") or []
+                     if c.get("scheduled", 0) < c.get("total_units", 0)]
+            detail = "；".join("%s %d/%d" % (c["class_name"], c["scheduled"], c["total_units"])
+                               for c in short[:5])
+            problems.append("[K2] 组课时未排满：缺 %d 个%s" % (
+                missing_units, ("（%s）" % detail) if detail else ""))
+
     return problems, checked
 
 
@@ -165,7 +181,7 @@ def main():
             print("  …… 另有 %d 条" % (len(problems) - 30))
         print("\n❌ No-Go：%d 处核查不过" % len(problems))
         return 1
-    print("  ✅ W1-W5 词汇/存在性全过；C1/C2 与别的班零重叠；C3 本班绪论/考试零占用；I1 内部零自撞；K1 班级全覆盖")
+    print("  ✅ W1-W5 词汇/存在性全过；C1/C2 与别的班零重叠；C3 本班绪论/考试零占用；I1 内部零自撞；K1 班级全覆盖；K2 组课时排满")
     print("\n✅ Go：全校一键方案与真实数据交叉核查通过")
     return 0
 

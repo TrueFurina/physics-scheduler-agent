@@ -238,6 +238,11 @@ function App() {
         setMsg(`全校排课未完成：${d?.classes_failed?.[0]?.error || '没有可排的班级'}`);
       } else if (d.classes_failed?.length) {
         setMsg(`⚠️ ${d.classes_ok}/${d.classes_total} 个班排定，${d.classes_failed.length} 个班未排定（原因见结果表）`);
+      } else if ((d.units_missing ?? 0) > 0) {
+        // `classes_ok` 的口径是"有产出"（2/31 也算），所以"没有失败班级"不等于"排满了"。
+        // 满载实测曾出现 358/410 却报"全部排定"——缺课时必须说清楚（R-76）。
+        setMsg(`⚠️ 全校 ${d.classes_complete ?? d.classes_total}/${d.classes_total} 个班排满，`
+               + `共 ${d.scheduled} 条安排，仍缺 ${d.units_missing} 个组课时（${d.elapsed_s}s）`);
       } else {
         setMsg(`✅ 全校 ${d.classes_total} 个班全部排定，共 ${d.scheduled} 条安排（${d.elapsed_s}s）`);
       }

@@ -139,10 +139,14 @@ export default function ParallelView({
       {schoolPlan && (
         <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
           <h3 className="font-medium text-gray-900 mb-1">
-            🌐 全校一键排课 · {schoolPlan.classes_ok}/{schoolPlan.classes_total} 个班排定
+            🌐 全校一键排课 · {schoolPlan.classes_complete ?? schoolPlan.classes_ok}/
+            {schoolPlan.classes_total} 个班排满
           </h3>
           <p className="text-xs text-gray-500 mb-3">
             共 {schoolPlan.scheduled} 条安排（组级）｜ 单元 {schoolPlan.units} 个 ｜ 用时 {schoolPlan.elapsed_s} 秒
+            {(schoolPlan.units_missing ?? 0) > 0 && (
+              <span className="text-amber-600"> ｜ 缺 {schoolPlan.units_missing} 个组课时</span>
+            )}
             {schoolPlan.classes_failed.length > 0 && (
               <span className="text-amber-600"> ｜ {schoolPlan.classes_failed.length} 个班未排定（原因见下表）</span>
             )}

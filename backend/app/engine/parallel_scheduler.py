@@ -106,10 +106,18 @@ class ParallelScheduler:
         ]
 
     def _unit_day_map(self, class_name: str, days: List[str]) -> Dict[tuple, str]:
-        """每个 (项目, 组) 单元该排在哪一天：按历史多数派；无历史（大纲新增）按天负载最轻。"""
+        """每个 (项目, 组) 单元该排在哪一天：按历史多数派；无历史（大纲新增）按天负载最轻。
+
+        ⚠️ 绪论/考试**不是可排单元**（`solve()` 里同样跳过）：它们若进了这张表，
+        `total_units` 就会把"永远不会被排的单元"算进分母 —— 真实表 17 个班里有 16 个班
+        各带 1 个绪论单元，于是"410/426"看起来像永远差 16 个（R-76 实测）。
+        分母必须只含"应该排得上的"，否则覆盖率这个数没有意义。
+        """
         votes: Dict[tuple, Counter] = defaultdict(Counter)
         for e in self.db.entries:
             if e.class_name != class_name or not e.experiment or not e.group:
+                continue
+            if _is_intro(e.experiment) or looks_like_exam(e.experiment):
                 continue
             if e.weekday in days:
                 votes[(e.experiment, e.group)][e.weekday] += 1
@@ -157,20 +165,38 @@ class ParallelScheduler:
             day_reports = []
             errors = []
             statuses = []
-            for day, keys in sorted(by_day.items()):
-                r = self.solve(
-                    cls,
-                    weekday=day,
-                    start_week=spec.get("start_week") or 2,
-                    weeks=spec.get("weeks") or 10,
-                    time_slots=spec.get("time_slots"),
-                    week_max_override=spec.get("week_max"),
-                    max_time_seconds=max_time_seconds,
-                    extra_room_busy=acc_room[day],
-                    extra_teacher_busy=acc_teacher[day],
-                    unit_keys=keys or None,
+
+            # 默认参数把循环变量绑死（B023）：闭包晚绑定会让"重试时用的是哪个班/哪份规格"
+            # 在下一轮变味 —— 与 auto_scheduler._expand_groups 里同一处理。
+            def _solve_day(one_day: str, one_keys: set, seconds: float,
+                           _cls: str = cls, _spec: Dict = spec) -> Dict:
+                return self.solve(
+                    _cls,
+                    weekday=one_day,
+                    start_week=_spec.get("start_week") or 2,
+                    weeks=_spec.get("weeks") or 10,
+                    time_slots=_spec.get("time_slots"),
+                    week_max_override=_spec.get("week_max"),
+                    max_time_seconds=seconds,
+                    extra_room_busy=acc_room[one_day],
+                    extra_teacher_busy=acc_teacher[one_day],
+                    unit_keys=one_keys or None,
                 )
+
+            for day, keys in sorted(by_day.items()):
+                r = _solve_day(day, keys, max_time_seconds)
                 rows = r.get("schedule") or []
+                # 整片空 = 本班这一天一个单元都没排上（CP-SAT 在时限内 UNKNOWN）。
+                # 机器忙时这不是小概率：实测 28 个忙等进程压满 24 核跑全校一键，
+                # 23物本 周四 0/29、24级电子信息 周日 0/24 —— 53 个组课时凭空消失，
+                # 而接口照样报"17/17 班排定、success=true"（R-76）。
+                # 处置：加倍时间盒重试一次（覆盖优先，与 auto_scheduler 的兜底同一取向）；
+                # 仍空就如实记错，不编造。
+                retried = False
+                if keys and not rows:
+                    r2 = _solve_day(day, keys, max(30.0, max_time_seconds * 3))
+                    if r2.get("schedule"):
+                        r, rows, retried = r2, r2["schedule"], True
                 status = str(r.get("status") or ("FAILED" if not r.get("success") else "FEASIBLE"))
                 statuses.append(status)
                 for row in rows:
@@ -182,19 +208,24 @@ class ParallelScheduler:
                     errors.append("%s: %s" % (day, r.get("error")))
                 day_reports.append({
                     "day": day, "units": len(keys), "scheduled": len(rows),
-                    "status": status,
+                    "status": status, "retried": retried,
                 })
 
             schedule.extend(cls_rows)
+            cls_total = sum(d["units"] for d in day_reports)
             per_class.append({
                 "class_name": cls,
                 "success": bool(cls_rows),
+                # `success` 的历史口径是"有产出"（2/31 也算）。对外报"排定"不能只靠它，
+                # 否则满载下 358/410 与 410/410 看起来一样（R-76）。complete 才是"排满"。
+                "complete": len(cls_rows) >= cls_total,
                 "status": ("OPTIMAL" if statuses and all(x == "OPTIMAL" for x in statuses)
                            else "FEASIBLE" if all(x in ("OPTIMAL", "FEASIBLE") for x in statuses)
                            else "PARTIAL"),
                 "weekdays": sorted(by_day),
                 "scheduled": len(cls_rows),
-                "total_units": sum(d["units"] for d in day_reports),
+                "total_units": cls_total,
+                "missing_units": max(0, cls_total - len(cls_rows)),
                 "pending_units": 0,
                 "days": day_reports,
                 "error": "；".join(errors) or None,
@@ -203,21 +234,30 @@ class ParallelScheduler:
 
         ok_classes = [c for c in per_class if c["success"]]
         failed = [c for c in per_class if not c["success"]]
+        complete_classes = [c for c in per_class if c["complete"]]
+        units_expected = sum(c["total_units"] for c in per_class)
+        units_scheduled = sum(c["scheduled"] for c in per_class)
         schedule.sort(key=lambda s: (s["week"], s["weekday"], s["time_slot"],
                                      s.get("class_name") or "", s["group"]))
         return {
             "success": bool(ok_classes),
             "classes_total": len(per_class),
             "classes_ok": len(ok_classes),
+            "classes_complete": len(complete_classes),
             "classes_failed": [{"class_name": c["class_name"], "error": c["error"]} for c in failed],
             "scheduled": len(schedule),
-            "units": sum(c["total_units"] for c in per_class),
+            "units": units_expected,
+            "units_expected": units_expected,
+            "units_scheduled": units_scheduled,
+            "units_missing": max(0, units_expected - units_scheduled),
             "elapsed_s": round(time.time() - t0, 1),
             "per_class": per_class,
             "schedule": schedule,
-            "note": ("全校一键排课（逐班·按天 CP-SAT，组级）：%d/%d 个班排定，共 %d 条；"
+            "note": ("全校一键排课（逐班·按天 CP-SAT，组级）：%d/%d 个班有产出，"
+                     "其中 %d 个班排满；共 %d/%d 个组课时；"
                      "班与班之间回填同星期的教室/教师占用（三方互斥）"
-                     % (len(ok_classes), len(per_class), len(schedule))),
+                     % (len(ok_classes), len(per_class), len(complete_classes),
+                        units_scheduled, units_expected)),
         }
 
     def solve(self, class_name: str, weekday: Optional[str] = None,

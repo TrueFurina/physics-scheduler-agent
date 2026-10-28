@@ -173,3 +173,68 @@ def test_real_table_school_plan_covers_all_classes():
     rooms = Counter((s["week"], s["weekday"], s["time_slot"], s["room"]) for s in r["schedule"])
     teachers = Counter((s["week"], s["weekday"], s["time_slot"], s["teacher"]) for s in r["schedule"])
     assert max(rooms.values()) == 1 and max(teachers.values()) == 1
+
+
+# ---------------------------------------------------------------- R-76 满载下的两个洞
+#
+# 实测：28 个忙等进程压满 24 核跑 `/parallel/solve-all`，得到 358/410 组课时 ——
+# 23物本 周四 0/29、24级电子信息 周日 0/24 两片**整片失败**，而接口照样返回
+# `success=true, classes_ok=17/17`（"排定"的口径是"有产出"，2/31 也算）。
+# 下面两条分别锁住：① 分母不能含"永远排不上的绪论"；② 整片空必须重试一次。
+
+def test_intro_units_are_not_counted_as_expected_units():
+    """分母只含"应该排得上的单元"：绪论/考试不进 `units_expected`。
+
+    真实表 17 个班里有 16 个班各带 1 个绪论单元，若算进分母，"410/426"看起来
+    永远差 16 个 —— 覆盖率这个数就没意义了。
+    """
+    entries = []
+    for w in (1, 2):
+        entries += [
+            _entry(w, "周四", "567", "绪论班", "1组", "A410", "林老师", "大学物理实验绪论"),
+            _entry(w, "周四", "678", "绪论班", "1组", "A410", "吴老师", "项目A"),
+        ]
+    ps = ParallelScheduler(_db(entries))
+    r = ps.solve_school([{
+        "class_name": "绪论班", "weekdays": ["周四"],
+        "start_week": 1, "weeks": 2, "time_slots": ["567", "678"], "week_max": 2,
+    }])
+
+    # 先断旧字段 `units`（修复前就有，值会是 2）—— 让这条在缺陷版上"行为红"而不是
+    # "字段不存在红"；再断新字段。
+    assert r["units"] == 1, f"绪论不该进分母，实得 units={r['units']}"
+    assert r["units_expected"] == 1, f"绪论不该进分母，实得 {r['units_expected']}"
+    assert r["scheduled"] == 1
+    assert r["units_missing"] == 0
+    assert r["classes_complete"] == 1, "排满了就必须算 complete（不能只报'有产出'）"
+    assert r["per_class"][0]["complete"] is True
+
+
+def test_failed_day_is_retried_once_with_bigger_time_box():
+    """整片 0 条 = 本班这一天一个单元都没排上，必须加倍时间盒重试一次。"""
+    entries = []
+    for w in (1, 2):
+        entries.append(_entry(w, "周四", "567", "重试班", "1组", "A410", "吴老师", "项目A"))
+    ps = ParallelScheduler(_db(entries))
+
+    real = ps.solve
+    calls: list = []
+
+    def flaky(*args, **kwargs):
+        calls.append(kwargs.get("max_time_seconds"))
+        if len(calls) == 1:      # 第一次：模拟满载下 CP-SAT 整片 UNKNOWN
+            return {"success": False, "status": "UNKNOWN", "schedule": [],
+                    "error": "CP-SAT 在时限内未解出"}
+        return real(*args, **kwargs)
+
+    ps.solve = flaky
+    r = ps.solve_school([{
+        "class_name": "重试班", "weekdays": ["周四"],
+        "start_week": 1, "weeks": 2, "time_slots": ["567", "678"], "week_max": 2,
+    }])
+
+    assert len(calls) == 2, f"应当只重试一次，实得 {len(calls)} 次"
+    assert calls[1] > calls[0], "重试必须给更大的时间盒"
+    assert r["scheduled"] == 1, "重试成功后单元要排上"
+    assert r["per_class"][0]["days"][0]["retried"] is True, "重试要如实记录"
+    assert r["units_missing"] == 0 and r["classes_complete"] == 1
