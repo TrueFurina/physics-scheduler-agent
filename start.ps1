@@ -15,6 +15,15 @@ if (-not $RepoRoot) { $RepoRoot = "E:\Program\physics-scheduler-agent" }
 # numpy/OpenBLAS 在机器紧时会导入失败 —— 跑 Python 一律单线程（实测教训，见项目记忆）
 $env:OPENBLAS_NUM_THREADS = "1"
 
+# ADMIN_PASS has NO default in app/security.py (fail-closed: backend refuses to start).
+# This launcher supplies the local DEMO value so one-click start keeps working.
+# For any public deployment, set ADMIN_PASS in the host environment FIRST and
+# this block will leave it untouched.
+if (-not $env:ADMIN_PASS) {
+    $env:ADMIN_PASS = "admin123"
+    Write-Host "[WARN] ADMIN_PASS not set; using local demo value. Do NOT use this on a public host." -ForegroundColor Yellow
+}
+
 $PythonExe = $env:PYTHON_EXE
 if (-not $PythonExe -or -not (Test-Path $PythonExe)) {
     $pyCandidates = @(
