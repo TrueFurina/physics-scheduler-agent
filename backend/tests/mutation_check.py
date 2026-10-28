@@ -39,6 +39,7 @@ FILES = {
     "M6": ["tests/test_ratelimit.py"],
     "M7": ["tests/test_web_serving.py"],
     "M8": ["tests/test_api_auth.py"],
+        "M9": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -100,6 +101,15 @@ MUTANTS = [
         "        if len(buf) > cap:\n            raise HTTPException(",
         "        if False:  # MUTANT: 取消大小限制\n            raise HTTPException(",
         "oversized",
+    ),
+    (
+        "M9", "关闭工作表行数守卫",
+        "app/utils/excel_parser.py",
+        """    n = int(getattr(sheet, "max_row", 0) or 0)
+    if n > MAX_SHEET_ROWS:""",
+        """    n = int(getattr(sheet, "max_row", 0) or 0)
+    if False:  # MUTANT: 不检查行数""",
+        "sheet_size",
     ),
 ]
 
