@@ -435,3 +435,63 @@ def test_demo_password_emits_warning():
     assert "WARNED" in proc.stdout, (
         f"演示口令未触发告警。stdout={proc.stdout!r} stderr={proc.stderr[-400:]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 10. 启动日志必须暴露口令状态（但不泄露口令本身）
+# ---------------------------------------------------------------------------
+# 为什么：ADMIN_PASS_IS_EPHEMERAL 只是内存里的布尔值，不写日志的话，
+# 运维无法从启动输出判断"本次用的是固定口令还是随机口令"。
+# 随机口令意味着重启后旧会话全部失效——这是排障的第一信息。
+#
+# 同时必须锁定：日志里绝不能出现口令明文。
+
+
+def _startup_log(extra_env: dict) -> str:
+    """在子进程里跑一次 lifespan 启动，返回 [security] 相关的日志行。"""
+    import subprocess
+    import textwrap
+
+    backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    code = textwrap.dedent(
+        """
+        import os, sys, logging, asyncio, warnings
+        sys.path.insert(0, ".")
+        warnings.simplefilter("ignore")
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s|%(message)s")
+        from app.main import app, lifespan
+        async def boot():
+            async with lifespan(app):
+                pass
+        asyncio.run(boot())
+        """
+    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ADMIN_PASS", "APP_ENV")}
+    env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_root, env=env, capture_output=True, text=True,
+    )
+    lines = [l for l in (proc.stdout + proc.stderr).splitlines() if "[security]" in l]
+    return "\n".join(lines)
+
+
+def test_startup_logs_ephemeral_state_in_dev():
+    log = _startup_log({})
+    assert "ephemeral" in log, f"开发环境未标记为随机口令。log={log!r}"
+    assert "ADMIN_PASS=ephemeral" in log
+
+
+def test_startup_logs_fixed_state_in_production():
+    secret = "Xk9#mQ2!vL7pR4sT"
+    log = _startup_log({"APP_ENV": "production", "ADMIN_PASS": secret})
+    assert "ADMIN_PASS=fixed" in log, f"生产环境未标记为固定口令。log={log!r}"
+    # 关键：日志里绝不能出现口令明文
+    assert secret not in log, f"启动日志泄露了口令明文！log={log!r}"
+
+
+def test_startup_logs_weak_demo_password():
+    log = _startup_log({"ADMIN_PASS": "admin123"})
+    assert "weak-demo" in log, f"演示口令未被标记。log={log!r}"
+    assert "admin123" not in log, f"启动日志泄露了口令明文！log={log!r}"
