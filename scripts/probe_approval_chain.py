@@ -182,7 +182,10 @@ def main():
             f"HTTP {code} {str((applied or {}).get('message'))[:76]}")
     rep.add(data.get("applied", 0) > 0, "应用真的移动了排课记录",
             f"applied={data.get('applied')} skipped={data.get('skipped')}"
-            f"（0 条 = 审批只是标记，课表没变）")
+            f"（0 条 = 审批只是标记，课表没变）"
+            + ("｜⚠️ applied=0 且 skipped>0：这条记录多半已被上一次运行/别的探针挪过 —— "
+               "先跑 scripts/prepare_demo.py（含 demo/reset）再复跑，不要当成产品缺陷"
+               if data.get("applied", 0) == 0 and data.get("skipped") else ""))
 
     after = (current_course(site, teacher, name) or {}).get("week_range")
     rep.add(after is not None and after != base_range,
