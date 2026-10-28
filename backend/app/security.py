@@ -27,7 +27,8 @@
 --------
 - `APP_SECRET_KEY`   会话签名密钥（不设则进程内随机生成）
 - `ADMIN_USER`       管理员账号，默认 `admin`
-- `ADMIN_PASS`       管理员口令，默认 `admin123`（演示默认值，发布可覆盖）
+- `ADMIN_PASS`       管理员口令，**无默认值**；未设置则启动失败（fail-closed）。
+                     设为公开演示口令（如 admin123）只告警不拦截，仅限本地演示。
 - `ADMIN_TOKEN_TTL`  令牌有效期秒数，默认 8 小时
 """
 
@@ -49,7 +50,37 @@ from fastapi import HTTPException, Request, status
 # ---------------------------------------------------------------------------
 
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
+
+# 口令**不给默认值**：缺失就是配置错误，启动即失败。
+#
+# 为什么不沿用 `os.getenv("ADMIN_PASS", "admin123")`：
+# 那个写法是 fail-open —— 忘配环境变量不报错，服务照常起来，
+# 公网端口上就挂着一个全仓库都读得到的默认口令。
+# "忘记配置"恰恰是最常见的线上事故来源，应该让它在**启动时**炸，
+# 而不是在**被人登录时**才暴露。
+#
+# 演示/本地开发：启动前显式设置 ADMIN_PASS（start.bat / start.ps1 已内置演示值）。
+# 生产：注入强口令，不要复用演示值。
+_ADMIN_PASS_RAW = os.getenv("ADMIN_PASS")
+if not _ADMIN_PASS_RAW:
+    raise RuntimeError(
+        "ADMIN_PASS 未设置，拒绝启动。\n"
+        "  本地演示：set ADMIN_PASS=<demo-value>（Windows）或 export ADMIN_PASS=...（bash）\n"
+        "  生产环境：注入强口令，且不要与仓库中的演示值相同。"
+    )
+ADMIN_PASS = _ADMIN_PASS_RAW
+
+# 演示默认口令的已知值：出现即视为配置缺陷，启动时大声警告。
+# 只做告警不做拦截——本地演示仍要能跑；但线上日志里一眼能看到这条。
+_DEMO_PASSWORDS = {"admin123", "admin", "password", "123456"}
+if ADMIN_PASS in _DEMO_PASSWORDS:
+    import warnings
+
+    warnings.warn(
+        "ADMIN_PASS 使用了公开的演示口令。仅限本地演示；公网部署必须更换。",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 try:
     TOKEN_TTL_SECONDS = int(os.getenv("ADMIN_TOKEN_TTL", str(8 * 3600)))
