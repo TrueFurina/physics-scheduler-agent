@@ -154,3 +154,65 @@ def test_counters_track_requests_and_client_errors():
 
     assert after["requests"] >= before["requests"] + 2
     assert after["errors"] >= before["errors"] + 1
+
+
+# ---------------------------------------------------------------------------
+# 路径穿越：变异测试驱动的补强
+# ---------------------------------------------------------------------------
+# 背景（2026-10-28 实测）：原有 4 个 payload 里，只有
+#   /..%2f..%2fbackend%2frequirements.txt
+# 真正到达了 spa_fallback 的 relative_to 防护。其余 3 个在更早的
+# 路由规整阶段就被改写成 dist 内路径，即使**删掉防护**也仍返回 text/html。
+#
+# 也就是说：删掉防护后，原 4 个用例里只有 1 个失败 → 防护看起来"被测住了"，
+# 实际覆盖率只有 25%。下面补的是能真正穿透到该行代码的用例。
+
+
+import os
+from urllib.parse import quote
+
+_BACKEND_REQ = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
+)
+
+
+def test_backend_requirements_exists_for_traversal_test():
+    """前置断言：没有这个文件，下面的穿越用例就没有意义。"""
+    assert os.path.isfile(_BACKEND_REQ), f"找不到 {_BACKEND_REQ}"
+
+
+@pytest.mark.parametrize(
+    "raw_path",
+    [
+        # 单层 ../
+        "..%2f" + "backend%2frequirements.txt",
+        # 双层 ../../
+        "..%2f..%2f" + "backend%2frequirements.txt",
+        # 未编码的斜杠混编码的点
+        "..%2F..%2Fbackend%2Frequirements.txt",
+        # 大小写变体（%2F 与 %2f）
+        "..%2F..%2fbackend%2Frequirements.txt",
+    ],
+)
+def test_traversal_reaching_fallback_guard(raw_path):
+    """这些 payload 会真正走到 spa_fallback，必须被 relative_to 拦下。
+
+    判据不只是"返回 html"，而是：响应体里不得出现后端依赖清单内容。
+    """
+    r = client.get("/" + raw_path)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"], (
+        f"疑似穿越成功（content-type={r.headers.get('content-type')}）path=/{raw_path}"
+    )
+    assert "fastapi==" not in r.text, f"泄露了 requirements.txt！path=/{raw_path}"
+
+
+def test_spa_fallback_guard_blocks_absolute_escape():
+    """直接验证防护函数的语义：dist 之外的已存在文件必须回落。"""
+    escape = os.path.relpath(_BACKEND_REQ, str(FRONTEND_DIST)).replace(os.sep, "/")
+    assert escape.startswith(".."), "测试前提：目标文件确实在 dist 之外"
+
+    r = client.get("/" + quote(escape, safe=""))
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "fastapi==" not in r.text
