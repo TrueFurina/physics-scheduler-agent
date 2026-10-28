@@ -5,7 +5,8 @@ openpyxl 直读原始表 + 真实时钟区间判重叠，不复用后端解析�
 
 核查项（对 /parallel/solve-all 的每一条结果）：
     W1-W5  周次/星期/时段/场地/教师都在真实表词汇表内
-    C1/C2  该格场地/教师不与任何真实课程区间重叠
+    C1/C2  该格场地/教师不与**别的班**的真实课程区间重叠
+    C3     不与**本班自己的绪论/考试**重叠（本班旧实验课可复用，绪论/考试不行）
     I1     方案内部不自撞（同场地/同教师/同学生组 同时段不重复）
     K1     班级覆盖：真实表的每个班级都出现在 per_class 里
 
@@ -25,6 +26,30 @@ import audit_conflicts as ac
 import verify_graybox as vg
 
 SITE = "http://127.0.0.1:8023"
+
+# 不参与重排、必须原样保留的课（与后端 `_is_intro` / `looks_like_exam` 同口径，
+# 但这里按原始表文本自判，保持"独立复核"不依赖 app.*）。
+KEPT_KEYWORDS = ("绪论", "考试")
+
+
+def kept_hit_own_class(baseline, week, weekday, label, own_class):
+    """本班在该格是否正上**绪论/考试**。
+
+    为什么单列一条（C3）：C1/C2 刻意跳过本班所有真实行（本班旧实验课会被重排复用），
+    但绪论/考试**不参与重排**、是留下来的 —— 跳过它们就等于这一格无人校验。
+    求解器那边同样只按"别的班"建占用，于是"本班绪论格"成了一个双方都不看的盲区。
+    2026-10-28 实测真实数据该盲区当前 0 命中（410 条方案逐条核过），本条把它锁死。
+    """
+    if not own_class:
+        return False
+    for r in baseline["rows"]:
+        if r["class"] != own_class:
+            continue
+        if not any(k in (r.get("experiment") or "") for k in KEPT_KEYWORDS):
+            continue
+        if r["week"] == week and r["weekday"] == weekday and ac.hits_row(label, r):
+            return True
+    return False
 
 
 def room_hit_other(baseline, week, weekday, label, room, own_class):
@@ -78,6 +103,8 @@ def verify(plan, baseline):
             bad(row, "C1", "场地该格与别的班的真实课程重叠")
         if teacher_hit_other(baseline, w, wd, label, row["teacher"], row.get("class_name")):
             bad(row, "C2", "教师该格与别的班的真实课程重叠")
+        if kept_hit_own_class(baseline, w, wd, label, row.get("class_name")):
+            bad(row, "C3", "本班该格正在上绪论/考试（不参与重排，不能占用）")
 
     seen = {"room": {}, "teacher": {}, "group": {}}
     for row in plan.get("schedule") or []:
@@ -138,7 +165,7 @@ def main():
             print("  …… 另有 %d 条" % (len(problems) - 30))
         print("\n❌ No-Go：%d 处核查不过" % len(problems))
         return 1
-    print("  ✅ W1-W5 词汇/存在性全过；C1/C2 与真实课程零重叠；I1 内部零自撞；K1 班级全覆盖")
+    print("  ✅ W1-W5 词汇/存在性全过；C1/C2 与别的班零重叠；C3 本班绪论/考试零占用；I1 内部零自撞；K1 班级全覆盖")
     print("\n✅ Go：全校一键方案与真实数据交叉核查通过")
     return 0
 

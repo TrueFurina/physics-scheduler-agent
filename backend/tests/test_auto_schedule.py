@@ -264,3 +264,44 @@ def test_real_table_plan_has_zero_collisions_with_existing_entries():
         key = (item["week"], item["weekday"], item["time_slot"])
         assert key + (item["room"],) not in room_busy, f"排进了已占用的教室：{item}"
         assert key + (item["teacher"],) not in teacher_busy, f"排到了已有课的教师：{item}"
+
+
+# ---------------------------------------------------------------------------
+# R-75 求解超时 ≠ 排课失败（兜底路径）
+# ---------------------------------------------------------------------------
+
+def test_solver_timeout_falls_back_to_greedy_instead_of_failing(monkeypatch):
+    """CP-SAT 在时限内没解出来时，单批路径也必须给出方案，而不是报失败。
+
+    实测触发方式：CPU 饱和（28 个忙等进程压满 24 核）跑全量测试时，
+    `test_real_table_plan_has_zero_collisions_with_existing_entries` 红在
+    `assert res["success"] is True` —— 机器一忙，教秘点一次「自动排课」就得到
+    一句"排课失败"，而同样的数据闲时是能排的。
+    `solve_all` 早有确定性兜底（覆盖优先、质量其次），单批这条一直没有。
+    这里把 `CpSolver.Solve` 钉成 UNKNOWN，确定性地复现"没解出来"这一刻。
+    """
+    from ortools.sat.python import cp_model
+
+    monkeypatch.setattr(cp_model.CpSolver, "Solve",
+                        lambda self, model, *a, **k: cp_model.UNKNOWN)
+
+    # 唯一教室 A410：第 1 周全 15 格被占位班占满；第 2 周只有绪论课占一格（kept）
+    entries = [_entry(1, wd, slot, f"占位班{wd}{slot}", "A410", "陈老师")
+               for wd in WEEKDAYS for slot in TIME_SLOTS]
+    entries.append(_entry(2, "周四", "678", "绪论班", "A410", "林老师", experiment="大学物理实验绪论"))
+    db = _db(entries)
+
+    s = AutoScheduler(db)
+    s._get_course_sections = lambda: (
+        [{"teacher": "吴琳", "course": "声速测量", "class_name": "23物本"}], 0)
+    res = s.solve(max_sections=5)
+
+    assert res["status"] == "UNKNOWN", "前提：这次确实没解出来（否则测不到兜底）"
+    assert res["success"] is True, "求解超时不能对外报失败"
+    assert res["fallback"] == "greedy", "必须说明这份方案是兜底产出的"
+    assert len(res["schedule"]) == 1, f"兜底应排出 1 段，实得 {res['schedule']}"
+
+    got = res["schedule"][0]
+    assert got["week"] == 2, f"第 1 周已被占满，兜底不该排进去：{got}"
+    assert (got["week"], got["weekday"], got["time_slot"]) != (2, "周四", "678"), \
+        f"兜底撞上了不参与重排的绪论课：{got}"

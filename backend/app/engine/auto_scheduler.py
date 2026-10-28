@@ -409,6 +409,26 @@ class AutoScheduler:
                                      TIME_SLOTS.index(s["time_slot"]),
                                      s["class_name"], s["teacher"]))
 
+        # ---- 确定性兜底（R-75）：顶层单批调用拿不到解时，不许直接判失败 ----
+        # `solve_all` 早就定了取向"覆盖优先、质量其次"（见 `_greedy_fill` 的理由），
+        # 但**单批**这条路一直没有兜底：机器一忙，CP-SAT 在时限内 UNKNOWN ⇒
+        # `success=False`，「取前 N 段」就整个失败（实测：CPU 饱和时
+        # `test_real_table_plan_has_zero_collisions_with_existing_entries` 必红）。
+        # 约束集与上面的候选域**完全一致**（教室/教师 = 全量既有占用，班级 = 仅 kept），
+        # 所以兜底不会比 CP-SAT 多占任何一格 —— 不是放松约束，只是把"求解"换成
+        # "按同样约束确定性找格子"。
+        fallback_used = False
+        if expand and not schedule and sections:
+            kr, kt, kc = self._kept_busy()
+            greedy = self._greedy_fill(sections, set(room_busy), set(teacher_busy),
+                                       set(class_busy), kr, kt, kc)
+            if greedy:
+                schedule = greedy
+                schedule.sort(key=lambda s: (s["week"], WEEKDAYS.index(s["weekday"]),
+                                             TIME_SLOTS.index(s["time_slot"]),
+                                             s["class_name"], s["teacher"]))
+                fallback_used = True
+
         # ---- 段 → 组课时（R-72）----
         # 求解按段建模（171 个变量、速度可控），但产出必须是「班级 × 项目 × 组」，
         # 否则既落不了地、又把 410 个组课时压成 171 个。
@@ -449,8 +469,11 @@ class AutoScheduler:
             })
 
         return {
-            "success": ok and bool(schedule),
+            # 兜底出来的方案同样是可行解（约束集与候选域一致），不能因为"CP-SAT 超时"
+            # 就对外报失败 —— 那会让机器一忙，教秘点一次就得到一句"排课失败"（R-75）。
+            "success": bool(schedule) and (ok or fallback_used),
             "status": solver.StatusName(status),
+            "fallback": "greedy" if fallback_used else None,
             "weeks": [weeks[0], weeks[-1]],
             "total_sections": len(sections),          # 本次参与求解的**段**数
             "total_sections_all": total_all,          # 全表段数（未截断）
