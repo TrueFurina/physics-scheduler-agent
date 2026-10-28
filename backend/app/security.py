@@ -27,8 +27,9 @@
 --------
 - `APP_SECRET_KEY`   会话签名密钥（不设则进程内随机生成）
 - `ADMIN_USER`       管理员账号，默认 `admin`
-- `ADMIN_PASS`       管理员口令，**无默认值**；未设置则启动失败（fail-closed）。
-                     设为公开演示口令（如 admin123）只告警不拦截，仅限本地演示。
+- `APP_ENV`          运行环境；设为 `production` / `prod` 时启用生产策略（默认 development）
+- `ADMIN_PASS`       管理员口令。生产环境必须设置且长度 >= 16，否则启动失败；
+                     开发环境未设置则随机生成临时口令（重启失效，不打印明文）。
 - `ADMIN_TOKEN_TTL`  令牌有效期秒数，默认 8 小时
 """
 
@@ -59,25 +60,48 @@ ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 # "忘记配置"恰恰是最常见的线上事故来源，应该让它在**启动时**炸，
 # 而不是在**被人登录时**才暴露。
 #
-# 演示/本地开发：启动前显式设置 ADMIN_PASS（start.bat / start.ps1 已内置演示值）。
-# 生产：注入强口令，不要复用演示值。
-_ADMIN_PASS_RAW = os.getenv("ADMIN_PASS")
-if not _ADMIN_PASS_RAW:
-    raise RuntimeError(
-        "ADMIN_PASS 未设置，拒绝启动。\n"
-        "  本地演示：set ADMIN_PASS=<demo-value>（Windows）或 export ADMIN_PASS=...（bash）\n"
-        "  生产环境：注入强口令，且不要与仓库中的演示值相同。"
-    )
-ADMIN_PASS = _ADMIN_PASS_RAW
+# 策略分环境（借鉴 MARS-408 的 _init_admin 设计）：
+#   生产（APP_ENV=production/prod）：未设置即 fail-fast；且强制长度 >= 16。
+#   开发/本地：未设置则**随机生成**本次进程的临时口令（重启失效）。
+#             这样本地开发不用配环境变量，同时任何环境都不会出现弱口令。
+APP_ENV = (os.getenv("APP_ENV", "development") or "development").strip().lower()
+_IS_PROD = APP_ENV in ("production", "prod")
 
-# 演示默认口令的已知值：出现即视为配置缺陷，启动时大声警告。
-# 只做告警不做拦截——本地演示仍要能跑；但线上日志里一眼能看到这条。
+# 公开的演示口令：出现即告警。仅用于本地演示，不可用于任何公网部署。
 _DEMO_PASSWORDS = {"admin123", "admin", "password", "123456"}
-if ADMIN_PASS in _DEMO_PASSWORDS:
+
+_ADMIN_PASS_RAW = (os.getenv("ADMIN_PASS") or "").strip()
+
+if _ADMIN_PASS_RAW:
+    ADMIN_PASS = _ADMIN_PASS_RAW
+    if _IS_PROD and len(ADMIN_PASS) < 16:
+        raise RuntimeError(
+            f"生产环境 ADMIN_PASS 长度必须 >= 16（当前 {len(ADMIN_PASS)}）。"
+            "请注入足够强的管理员口令。"
+        )
+    if ADMIN_PASS in _DEMO_PASSWORDS:
+        import warnings
+
+        warnings.warn(
+            "ADMIN_PASS 使用了公开的演示口令。仅限本地演示；公网部署必须更换。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    ADMIN_PASS_IS_EPHEMERAL = False
+elif _IS_PROD:
+    raise RuntimeError(
+        "生产环境必须设置环境变量 ADMIN_PASS（建议由密钥管理器注入强随机口令，长度 >= 16），"
+        "拒绝以默认/随机口令启动。"
+    )
+else:
+    # 开发环境：生成临时口令，绝不落盘、不打印明文。
+    ADMIN_PASS = secrets.token_urlsafe(16)
+    ADMIN_PASS_IS_EPHEMERAL = True
     import warnings
 
     warnings.warn(
-        "ADMIN_PASS 使用了公开的演示口令。仅限本地演示；公网部署必须更换。",
+        "ADMIN_PASS 未设置，本次启动使用随机生成的管理员口令（进程重启即失效，且不会打印）。"
+        "需要固定口令时请设置 ADMIN_PASS。",
         RuntimeWarning,
         stacklevel=2,
     )
