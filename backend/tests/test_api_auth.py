@@ -14,6 +14,10 @@ import os
 import sys
 
 import pytest
+
+# 口令不设默认值（fail-closed），测试必须在导入 app.* 之前注入。
+# 这里用显式演示值，与 start.bat 保持一致。
+os.environ.setdefault("ADMIN_PASS", "admin123")
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -29,7 +33,7 @@ from app.security import issue_admin_token, verify_admin_token
 
 client = TestClient(app)
 
-ADMIN = {"username": "admin", "password": "admin123"}
+ADMIN = {"username": "admin", "password": os.environ["ADMIN_PASS"]}
 
 
 def _admin_headers() -> dict:
@@ -182,7 +186,7 @@ def test_admin_login_rejects_wrong_password():
 
 
 def test_admin_login_rejects_wrong_username():
-    r = client.post("/api/reschedule/admin-login", json={"username": "root", "password": "admin123"})
+    r = client.post("/api/reschedule/admin-login", json={"username": "root", "password": os.environ["ADMIN_PASS"]})
     assert r.status_code == 401
 
 
