@@ -29,6 +29,18 @@ import sys
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PY = sys.executable
 
+# 各变异体对应的测试文件
+FILES = {
+    "M1": ["tests/test_api_auth.py"],
+    "M2": ["tests/test_api_auth.py"],
+    "M3": ["tests/test_api_auth.py"],
+    "M4": ["tests/test_api_auth.py"],
+    "M5": ["tests/test_api_auth.py"],
+    "M6": ["tests/test_ratelimit.py"],
+    "M7": ["tests/test_web_serving.py"],
+    "M8": ["tests/test_api_auth.py"],
+}
+
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
 MUTANTS = [
     (
@@ -62,8 +74,8 @@ MUTANTS = [
     (
         "M5", "上传文件名不做净化",
         "app/api/reschedule.py",
-        "def _safe_upload_name(filename: str, allowed: tuple, prefix: str = \"\") -> str:",
-        "def _safe_upload_name(filename: str, allowed: tuple, prefix: str = \"\") -> str:\n    return prefix + filename  # MUTANT: 直接拼接",
+        'def _safe_upload_name(filename: str, allowed: tuple, prefix: str = "") -> str:',
+        'def _safe_upload_name(filename: str, allowed: tuple, prefix: str = "") -> str:\n    return prefix + filename  # MUTANT: 直接拼接',
         "upload_name or upload_suffix or rejects_pdf",
     ),
     (
@@ -82,33 +94,28 @@ MUTANTS = [
         "            pass  # MUTANT: 删除 relative_to 防护",
         "traversal or escape",
     ),
+    (
+        "M8", "取消上传大小限制",
+        "app/api/reschedule.py",
+        "        if len(buf) > cap:\n            raise HTTPException(",
+        "        if False:  # MUTANT: 取消大小限制\n            raise HTTPException(",
+        "oversized",
+    ),
 ]
 
 
-def _run_tests(kexpr: str, extra: list[str] | None = None) -> tuple[bool, str]:
-    cmd = [PY, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider",
-           "-k", kexpr]
-    if extra:
-        cmd = [PY, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider",
-               *extra, "-k", kexpr]
-    proc = subprocess.run(cmd, cwd=BACKEND, capture_output=True, text=True, timeout=900)
+def _run_tests(files: list, kexpr: str) -> tuple:
+    cmd = [PY, "-m", "pytest", "-q", "--no-header",
+           "-p", "no:cacheprovider", *files, "-k", kexpr]
+    proc = subprocess.run(cmd, cwd=BACKEND, capture_output=True,
+                          text=True, timeout=900)
     out = proc.stdout + proc.stderr
-    lines = [l.strip() for l in out.splitlines() if "passed" in l or "failed" in l]
+    lines = [l.strip() for l in out.splitlines()
+             if "passed" in l or "failed" in l]
     return proc.returncode != 0, (lines[-1] if lines else "?")
 
 
 def main() -> int:
-    # 各变异体对应的测试文件（M3 需要完整认证套件以覆盖登录路径）
-    FILES = {
-        "M1": ["tests/test_api_auth.py"],
-        "M2": ["tests/test_api_auth.py"],
-        "M3": ["tests/test_api_auth.py"],
-        "M4": ["tests/test_api_auth.py"],
-        "M5": ["tests/test_api_auth.py"],
-        "M6": ["tests/test_ratelimit.py"],
-        "M7": ["tests/test_web_serving.py"],
-    }
-
     results = []
     for mid, desc, rel, old, new, kexpr in MUTANTS:
         path = os.path.join(BACKEND, rel)
@@ -124,7 +131,7 @@ def main() -> int:
         shutil.copy2(path, backup)
         try:
             io.open(path, "w", encoding="utf-8").write(orig.replace(old, new, 1))
-            detected, summary = _run_tests(kexpr, FILES.get(mid))
+            detected, summary = _run_tests(FILES.get(mid, []), kexpr)
             results.append((mid, desc, "检出" if detected else "存活", summary[:64]))
         except subprocess.TimeoutExpired:
             results.append((mid, desc, "超时", ">900s"))
