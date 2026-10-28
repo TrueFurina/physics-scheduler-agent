@@ -154,8 +154,10 @@ def main():
     rep.add(code in (401, 403), "匿名采纳被门禁挡住", f"HTTP {code}（200/400 都算漏了门禁）")
 
     # ⑦ 采纳：diff 现算，且与预览一致（预览与采纳之间没有别的写入）
+    # 超时 300s（原 180s）：满载实测这一步要 168s（空闲 31s，24 核被 28 个忙等进程压满时
+    # 约 5×），180s 只剩 12s 余量 —— 换台慢一点的机器就会"假红"，而它其实是能过的（R-77）。
     code, cm = http("POST", f"{site}/api/reschedule/parallel/land",
-                    {"schedule": rows, "note": "probe-land"}, token, timeout=180)
+                    {"schedule": rows, "note": "probe-land"}, token, timeout=300)
     same = (cm.get("after_entries") == pv.get("after_entries")
             and len(cm.get("added") or []) == len(pv.get("added") or [])
             and len(cm.get("changed") or []) == len(pv.get("changed") or []))
