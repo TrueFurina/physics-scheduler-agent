@@ -1,5 +1,7 @@
 """解析实验安排表 Excel，构建排课占用数据"""
 
+import os
+
 import openpyxl
 from typing import List, Dict, Optional, Tuple
 
@@ -60,6 +62,59 @@ IGNORED_TIME_SLOTS = {"MORNING", ""}
 # ---------------------------------------------------------------------------
 # 工作簿级解析助手（接收已打开的 workbook，避免"同一个文件开三遍"）
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 解析体积守卫
+# ---------------------------------------------------------------------------
+# 为什么需要（2026-10-29 实测）：
+#   一个 271KB 的 xlsx（远低于上传接口 32MB 的上限）解压后是 5.7MB XML，
+#   50,000 行；openpyxl 全量加载峰值内存 25.4MB（放大 96 倍），耗时 2.0 秒。
+#   也就是说：**上传体积限制拦不住"小而密"的文件**，必须有行数上限。
+#
+# 两层防护：
+#   1. MAX_SHEET_ROWS   —— 单表行数上限，超限直接拒绝解析（fail-fast）
+#   2. read_only=True   —— 需要全表扫描时用只读流式模式，内存不随行数线性增长
+#
+# 默认 20,000 行：真实排课表通常在 100~500 行量级，留两个数量级余量。
+# 可用环境变量 MAX_SHEET_ROWS 覆盖。
+
+MAX_SHEET_ROWS = int(os.getenv("MAX_SHEET_ROWS", "20000"))
+
+
+class SheetTooLargeError(ValueError):
+    """工作表行数超过 MAX_SHEET_ROWS。"""
+
+
+def assert_sheet_size(sheet, what: str = "工作表") -> None:
+    """解析前断言表规模在允许范围内。
+
+    `sheet.max_row` 读的是 dimension 记录，不遍历全部单元格，代价可忽略。
+    注意：篡改过的文件可能给出错误的 dimension，所以这只是第一道闸；
+    真正的兜底是下面的 bounded_iter_rows()。
+    """
+    n = int(getattr(sheet, "max_row", 0) or 0)
+    if n > MAX_SHEET_ROWS:
+        raise SheetTooLargeError(
+            f"{what}行数 {n} 超过上限 {MAX_SHEET_ROWS}。"
+            "如确需处理更大的表，请设置环境变量 MAX_SHEET_ROWS 后重启服务。"
+        )
+
+
+def bounded_iter_rows(sheet, *args, **kwargs):
+    """iter_rows 的带边界版本：最多产出 MAX_SHEET_ROWS 行，超出即抛错。
+
+    双重保险：即使 dimension 被伪造（assert_sheet_size 失效），
+    这里也会在真正遍历到上限时中断，不会无限制跑下去。
+    """
+    count = 0
+    for row in sheet.iter_rows(*args, **kwargs):
+        count += 1
+        if count > MAX_SHEET_ROWS:
+            raise SheetTooLargeError(
+                f"工作表行数超过上限 {MAX_SHEET_ROWS}（遍历时检测）。"
+                "请设置环境变量 MAX_SHEET_ROWS 或拆分文件后重试。"
+            )
+        yield row
 
 def _parse_teacher_roles(wb) -> Dict[str, str]:
     """从"教师联系表"提取教师角色/备注（负责人、实验室管理员等）。"""
@@ -250,6 +305,7 @@ def parse_master_tasks(filepath: str):
         sheet, sheet_name = (wb[wb.sheetnames[0]], wb.sheetnames[0]) if wb.sheetnames else (None, None)
     if sheet is None:
         raise ValueError("文件里没有任何工作表")
+    assert_sheet_size(sheet, f"主数据「{sheet_name}」")
 
     # 找表头行：前 5 行里命中别名最多的一行
     header_row, mapping, header_cells = None, {}, []
@@ -496,6 +552,9 @@ class ScheduleDatabase:
                 f"文件里找不到可用的工作表（现有：{'、'.join(map(str, wb.sheetnames)) or '无'}）；"
                 "请把安排表放在名为「实验安排表」的工作表里"
             )
+        # 解析前先卡规模：271KB 的恶意 xlsx 可解压成 5.7MB / 5 万行，
+        # 全量解析峰值内存 25MB（放大 96 倍）。上传体积限制拦不住它。
+        assert_sheet_size(sheet, f"安排表「{sheet_name}」")
         self.sheet_name = str(sheet_name)
         self.entries = []
         self.skipped = []
@@ -507,7 +566,7 @@ class ScheduleDatabase:
         # 翻译成课程名。两列探测刻意分开（码翻译 ≠ 课程列探测），课程列永远优先。
         category_col = None if course_col is not None else _detect_course_category_col(sheet)
 
-        for row in sheet.iter_rows(min_row=3, values_only=True):
+        for row in bounded_iter_rows(sheet, min_row=3, values_only=True):
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
                 row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
 
