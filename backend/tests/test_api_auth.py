@@ -562,3 +562,64 @@ def test_all_upload_endpoints_use_limited_reader():
     assert src.count("await _read_upload_limited(file)") >= 5, (
         "上传端点数与受限读取调用数不匹配"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. Excel 解析规模守卫（防"小而密"的压缩炸弹）
+# ---------------------------------------------------------------------------
+# 背景（2026-10-29 实测）：
+#   271KB 的 xlsx 解压后 5.7MB XML / 50,000 行；
+#   openpyxl 全量加载峰值 25.4MB（放大 96 倍），耗时 2.0 秒。
+#   上传接口的 32MB 上限**完全拦不住**这种文件——它太小了。
+#
+# 所以必须在解析层加行数上限，且遍历时也要有兜底（防 dimension 被伪造）。
+
+
+def test_sheet_size_guard_rejects_oversized():
+    from app.utils import excel_parser as ep
+
+    class FakeSheet:
+        max_row = ep.MAX_SHEET_ROWS + 1
+
+    with pytest.raises(ep.SheetTooLargeError) as ei:
+        ep.assert_sheet_size(FakeSheet(), "测试表")
+    assert "超过上限" in str(ei.value)
+
+
+def test_sheet_size_guard_accepts_normal():
+    from app.utils import excel_parser as ep
+
+    class FakeSheet:
+        max_row = 500
+
+    ep.assert_sheet_size(FakeSheet(), "测试表")  # 不应抛异常
+
+
+def test_bounded_iter_rows_stops_at_cap():
+    """即使 dimension 被伪造（max_row 报小值），遍历时也必须停下。"""
+    from app.utils import excel_parser as ep
+
+    class FakeSheet:
+        max_row = 10  # 谎报
+
+        def iter_rows(self, *a, **kw):
+            for i in range(ep.MAX_SHEET_ROWS + 5):
+                yield (i,)
+
+    n = 0
+    with pytest.raises(ep.SheetTooLargeError):
+        for _ in ep.bounded_iter_rows(FakeSheet()):
+            n += 1
+    # 应该在刚好越界时中断，不会跑完全部
+    assert n == ep.MAX_SHEET_ROWS, f"遍历了 {n} 行才中断，边界不对"
+
+
+def test_parser_wires_the_guard():
+    """守卫不接线就只是摆设：确认解析入口真的调用了它。"""
+    import inspect
+
+    from app.utils import excel_parser as ep
+
+    src = inspect.getsource(ep)
+    assert "assert_sheet_size(sheet" in src, "解析入口未调用 assert_sheet_size"
+    assert "bounded_iter_rows(sheet" in src, "行循环未用 bounded_iter_rows"
