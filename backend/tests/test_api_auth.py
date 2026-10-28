@@ -324,47 +324,87 @@ def test_openapi_present_when_docs_enabled():
 
 
 # ---------------------------------------------------------------------------
-# 9. 口令配置必须 fail-closed
+# 9. 口令策略（分环境）
 # ---------------------------------------------------------------------------
 # 为什么不靠"测试能跑通"来证明：本文件顶部用 os.environ.setdefault 注入演示值，
 # 这会让"未配置"这一场景在测试中永远不出现。
-# 所以这里用子进程显式构造"没有 ADMIN_PASS"的环境，验证模块拒绝加载。
+# 所以这里用子进程显式构造各种环境，直接验证 security 模块的加载行为。
 #
-# 这是本次加固的核心安全属性，必须被锁定，否则哪天有人把默认值加回来，
-# 所有测试依然全绿。
+# 策略（与 app/security.py 保持一致）：
+#   生产 + 未设置      -> RuntimeError（fail-closed）
+#   生产 + 口令 < 16   -> RuntimeError（强度不足）
+#   开发 + 未设置      -> 载入成功，但口令为随机生成的临时值（非弱口令、非空）
+#   开发 + 演示口令    -> 载入成功 + 告警
+#
+# 这些是本次加固的核心安全属性，必须被锁定：
+# 哪天有人把弱默认值加回来，"开发 + 未设置"的用例会因为拿到 admin123 而失败。
 
 
-def test_security_module_refuses_to_load_without_admin_pass():
+def _run_security_in_subprocess(extra_env: dict) -> str:
+    """在干净子进程里加载 app.security，返回 stdout。"""
     import subprocess
     import textwrap
 
     backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     code = textwrap.dedent(
         """
-        import os, sys
-        os.environ.pop("ADMIN_PASS", None)
+        import os, sys, warnings
         sys.path.insert(0, ".")
-        try:
-            import app.security  # noqa: F401
-        except RuntimeError as exc:
-            assert "ADMIN_PASS" in str(exc)
-            print("REFUSED")
-        else:
-            print("LOADED")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                import app.security as s
+            except RuntimeError as exc:
+                print("REFUSED|" + str(exc).replace(chr(10), " ")[:120])
+                raise SystemExit(0)
+        warned = any("演示口令" in str(w.message) for w in caught)
+        print("LOADED|ephemeral=%s|len=%d|demo_warned=%s|pass_eq_weak=%s" % (
+            s.ADMIN_PASS_IS_EPHEMERAL, len(s.ADMIN_PASS), warned,
+            s.ADMIN_PASS in {"admin123", "admin", "password", "123456"}))
         """
     )
-    env = {k: v for k, v in os.environ.items() if k != "ADMIN_PASS"}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ADMIN_PASS", "APP_ENV")}
+    env.update(extra_env)
     proc = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=backend_root,
-        env=env,
-        capture_output=True,
-        text=True,
+        cwd=backend_root, env=env, capture_output=True, text=True,
     )
-    assert "REFUSED" in proc.stdout, (
-        "未设置 ADMIN_PASS 时 security 模块竟然加载成功——fail-closed 已失效。\n"
-        f"stdout={proc.stdout!r}\nstderr={proc.stderr[-500:]!r}"
+    return proc.stdout.strip()
+
+
+def test_production_without_admin_pass_refuses_to_start():
+    """生产环境未设置口令必须拒绝启动。"""
+    out = _run_security_in_subprocess({"APP_ENV": "production"})
+    assert out.startswith("REFUSED"), (
+        f"生产环境未设置 ADMIN_PASS 竟然启动成功——fail-closed 失效。out={out!r}"
     )
+    assert "ADMIN_PASS" in out
+
+
+def test_production_rejects_short_admin_pass():
+    """生产环境口令长度不足 16 必须拒绝启动。"""
+    out = _run_security_in_subprocess(
+        {"APP_ENV": "production", "ADMIN_PASS": "short123"}
+    )
+    assert out.startswith("REFUSED"), (
+        f"生产环境短口令竟然通过——强度校验失效。out={out!r}"
+    )
+    assert "16" in out
+
+
+def test_development_without_admin_pass_uses_random_not_weak():
+    """开发环境未设置口令：必须载入成功，但口令是随机临时值，绝不能是弱口令。"""
+    out = _run_security_in_subprocess({})
+    assert out.startswith("LOADED"), (
+        f"开发环境未设置 ADMIN_PASS 竟然启动失败——本地开发应能零配置运行。out={out!r}"
+    )
+    assert "ephemeral=True" in out, f"未标记为临时口令。out={out!r}"
+    assert "pass_eq_weak=False" in out, (
+        f"开发环境回落到了弱口令——这正是本次要消除的行为。out={out!r}"
+    )
+    # 随机口令长度应显著大于弱口令
+    assert "len=8" not in out, f"口令长度异常。out={out!r}"
 
 
 def test_demo_password_emits_warning():
