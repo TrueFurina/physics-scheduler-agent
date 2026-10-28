@@ -82,7 +82,16 @@ MAX_SHEET_ROWS = int(os.getenv("MAX_SHEET_ROWS", "20000"))
 
 
 class SheetTooLargeError(ValueError):
-    """工作表行数超过 MAX_SHEET_ROWS。"""
+    """工作表行数超过 MAX_SHEET_ROWS。
+
+    携带 `limit` / `actual`，让 API 层能给出面向用户的文案并暴露限额头，
+    而不必从异常字符串里正则抠数字。
+    """
+
+    def __init__(self, message: str, limit: int = 0, actual: int = 0):
+        super().__init__(message)
+        self.limit = limit
+        self.actual = actual
 
 
 def assert_sheet_size(sheet, what: str = "工作表") -> None:
@@ -94,9 +103,13 @@ def assert_sheet_size(sheet, what: str = "工作表") -> None:
     """
     n = int(getattr(sheet, "max_row", 0) or 0)
     if n > MAX_SHEET_ROWS:
+        # detail 里**不再**出现"设置环境变量"这类运维话术：
+        # 教秘看到只会困惑，而且重试同一个文件永远不会成功。
+        # API 层会补上"精简/拆分"这类可操作建议。
         raise SheetTooLargeError(
-            f"{what}行数 {n} 超过上限 {MAX_SHEET_ROWS}。"
-            "如确需处理更大的表，请设置环境变量 MAX_SHEET_ROWS 后重启服务。"
+            f"{what}行数 {n} 超过上限 {MAX_SHEET_ROWS}",
+            limit=MAX_SHEET_ROWS,
+            actual=n,
         )
 
 
@@ -111,8 +124,9 @@ def bounded_iter_rows(sheet, *args, **kwargs):
         count += 1
         if count > MAX_SHEET_ROWS:
             raise SheetTooLargeError(
-                f"工作表行数超过上限 {MAX_SHEET_ROWS}（遍历时检测）。"
-                "请设置环境变量 MAX_SHEET_ROWS 或拆分文件后重试。"
+                f"工作表行数超过上限 {MAX_SHEET_ROWS}（遍历时检测）",
+                limit=MAX_SHEET_ROWS,
+                actual=count,
             )
         yield row
 
