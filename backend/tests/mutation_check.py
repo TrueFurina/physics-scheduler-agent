@@ -54,6 +54,7 @@ FILES = {
         "M21": ["tests/test_teacher_name_parse.py"],
     "M22": ["tests/test_teacher_name_parse.py"],
     "M23": ["tests/test_week_bounds.py"],
+    "M24": ["tests/test_event_loop_blocking.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -243,6 +244,13 @@ MUTANTS = [
         "            target_week = base - 1 if source_week else base",
         "            target_week = source_week if source_week else current_week",
         "this_week",
+    ),
+    (
+        "M24", "懒加载退回在事件循环里同步执行",
+        "app/api/reschedule.py",
+        "    await run_in_threadpool(_ensure_loaded_sync)",
+        "    _ensure_loaded_sync()  # MUTANT",
+        "ensure_loaded",
     ),
 ]
 
