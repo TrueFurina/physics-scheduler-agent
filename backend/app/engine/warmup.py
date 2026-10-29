@@ -25,6 +25,7 @@ import os
 import threading
 import time
 from typing import Any, Dict
+from app.engine.solver_factory import new_solver
 
 _STATE: Dict[str, Any] = {
     "status": "pending",   # pending / running / ok / failed
@@ -55,8 +56,7 @@ def _run() -> None:
         model.Add(x >= 3)
         model.Maximize(x)
 
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 3.0
+        solver = new_solver(max_time_seconds=3.0)
         status = solver.Solve(model)
         ok = solver.StatusName(status) == "OPTIMAL" and solver.Value(x) == 10
 

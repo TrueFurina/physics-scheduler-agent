@@ -1,5 +1,8 @@
 """解析实验安排表 Excel，构建排课占用数据"""
 
+import re
+import threading
+
 import openpyxl
 from typing import List, Dict, Optional, Tuple
 
@@ -55,6 +58,69 @@ WEEKDAY_MAP = {
 
 # 上午时段不算实验冲突（实验课都排在下午/晚上），筛选时忽略
 IGNORED_TIME_SLOTS = {"MORNING", ""}
+
+# 整表加载的互斥锁（2026-10-29，R-89）。
+#
+# 为什么必须有：`load_from_excel` 会整体替换 `self.entries`。
+# 两个加载并发时（教秘点"重新上传"的同时别人点了"重新加载"，
+# 或 `_ensure_loaded` 的自愈与 `/upload` 同时触发），
+# **后提交的那个赢，先提交的那个的调用方却以为自己加载成功了** ——
+# 实测 20 轮并发加载 2 次出现「加载完却读到别人的数据」。
+# 这比"读到半张表"更糟：教秘上传了 A 表，界面上生效的是 B 表，而且不报错。
+#
+# 用模块级锁而不是实例属性：`schedule.xlsx` 是**进程级单例数据源**
+# （`_resolve_default_schedule_path` 全局唯一），锁也应该跟着数据源而不是对象。
+_LOAD_LOCK = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# 姓名/班级的匹配口径（全仓唯一实现）
+# ---------------------------------------------------------------------------
+
+_NAME_SPLIT = re.compile(r"[、,，/&;；\s]+|和")
+
+
+def name_tokens(name: str) -> list[str]:
+    """把「吴琳」「吴琳、吴琼」「2024级计科3班和2024软工3班」拆成个体名。
+
+    真实表里一个格子确实会写两位教师/两个班（`2024级计科3班和2024软工3班`）。
+    拆开之后「2024级计科3班」能精确命中自己那一半，而不必靠子串猜。
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return []
+    return [t for t in _NAME_SPLIT.split(raw) if t]
+
+
+def same_teacher(claim: str, actual: str) -> bool:
+    """是否同一位教师：归一化后**按个体名精确相等**，绝不做子串。
+
+    为什么全仓只留这一份（2026-10-29 实测）：子串写法的后果**因位置而反向**，
+    两处都实测过，两种都错：
+      · 写路径（`_apply_reschedule`）：`吴琳` 命中 `吴琳琳` ⇒ 一张工单把两位老师的课
+        一起挪走（applied=2）。
+      · 读路径（沙盘 `find_slots_with_reasons`）：`吴琳` 命中 `吴琳琳` ⇒ 把别人的课
+        当成"本人该时段有课"，**隐去一个本来可用的时段** —— 教秘看到的是"这周没空"，
+        而系统从没说过为什么。
+      · 课程列表（`get_teacher_courses`）：两位老师的课程混在一张卡片里。
+
+    要支持「吴琳老师」这类别名，走显式别名表，不靠子串猜。
+    空值一律不匹配（`九江`/`九江学院` 这种前缀关系同理，别让它变成万能匹配）。
+    """
+    claimed = set(name_tokens(claim))
+    have = set(name_tokens(actual))
+    if not claimed or not have:
+        return False
+    return bool(claimed & have)
+
+
+def same_label(claim: str, actual: str) -> bool:
+    """班级/课程名：按个体名精确比（一个格子写两个班时，命中任一半即可）。"""
+    claimed = set(name_tokens(claim))
+    have = set(name_tokens(actual))
+    if not claimed or not have:
+        return False
+    return bool(claimed & have)
 
 
 # ---------------------------------------------------------------------------
@@ -384,14 +450,6 @@ class ScheduleEntry:
         # 只有"源表自带"的课程才配当条目的显式属性。
         self.course = course or ""
 
-    def blocks(self, slot: str) -> bool:
-        """这条记录是否占用 `slot` 这个节次。"""
-        return slot in self.blocked
-
-    def shares_slot_with(self, other: "ScheduleEntry") -> bool:
-        """两条记录是否落在同一节次（真实重叠）。"""
-        return not set(self.blocked).isdisjoint(set(other.blocked))
-
     def display_time(self) -> str:
         """给人看的时间：跨节次的原样显示原表写法，其余用标准时间。"""
         if len(self.blocked) > 1 and self.time_raw:
@@ -441,6 +499,68 @@ class PendingTask:
         return f"⟨待排⟩ {self.class_name}/{self.group} {self.experiment}（{self.teacher or '未指派教师'}）"
 
 
+class _LoadStage:
+    """一次解析的**临时暂存器**：entries / skipped / pending / sheet_name。
+
+    用途只有一个：让 `load_from_excel` 先把新表构建在这里，全部成功后再一次性
+    `ScheduleDatabase._commit_stage()` 提交。这样并发读者**永远不会**看到
+    "表被清空、只填了一半"的中间态。
+
+    为什么需要（2026-10-29 实测，R-87）：
+      原实现 `self.entries = []` 之后逐行 `append`，`_build_index()` 在最后才跑。
+      433 行冷解析时，读者在 1263–1270ms 读到 `entries=120`，而索引 1309ms 才建好 ——
+      约 46ms 的窗口里"课表只剩 120 条"，且 `entries` 与 `by_teacher` 索引相互不一致。
+      这个函数在 `/load-default`、`/demo/reset` 里都跑在**线程池**上（R-70），
+      所以不是理论问题：教秘点"重新加载"时，别人的页面会刷出残缺课表。
+
+    `sheet_name` 之所以也在暂存器里：它参与 `load_report.sheet` 与导出页名，
+    必须与 entries 同批生效。
+    """
+
+    def __init__(self):
+        self.entries: List[ScheduleEntry] = []
+        self.skipped: List[Dict] = []
+        self.pending: List["PendingTask"] = []
+        self.sheet_name: str = ""
+        # 索引也建在暂存器上：`_build_index(stage)` 需要这四个字典存在，
+        # 提交时与 entries 一起整体换过去（不能只换 entries）。
+        self._by_time: Dict[str, List[ScheduleEntry]] = {}
+        self._by_room: Dict[str, List[ScheduleEntry]] = {}
+        self._by_teacher: Dict[str, List[ScheduleEntry]] = {}
+        self._by_class: Dict[str, List[ScheduleEntry]] = {}
+
+
+def commit_entries(db, entries, pending=None) -> None:
+    """把一套新的 entries（及其 pending）**原子地**换进 `db`。
+
+    为什么要有这个函数（2026-10-29，R-87 的同一族缺陷）：
+    `apply_plan` / `restore` 原来都是
+        db.entries = ...           # 先换表
+        db._build_index()          # 再建索引
+        db.pending = ...           # 最后换待排
+    这三步之间读者能拿到"新表 + 旧索引"，而且窗口不小 —— 实测
+    （落地采纳 + 撤销交替 30 轮、2 个读者线程）有 **7990 次**采样读到
+    `entries=434` 而索引仍只有 319 条。落地/撤销都是教秘会点按钮的入口，
+    这期间别人的"按教师查课程/数据看板"会算出错的结果且**不报错**。
+
+    这里统一成"先在旁边建好，再成对替换"，与 `ScheduleDatabase._commit_stage` 同义。
+    不直接复用 `_commit_stage` 是因为它还会改 `loaded` 与「解析账本」——
+    那两样只属于"从 Excel 重新加载"，不属于"改几行"。
+    """
+    stage = _LoadStage()
+    stage.entries = list(entries)
+    stage.pending = list(pending if pending is not None else getattr(db, "pending", None) or [])
+    stage.sheet_name = getattr(db, "sheet_name", "")
+    # 索引建在 stage 自己的字典上（`_build_index` 用 view 参数）
+    db._build_index(stage)
+    # ⚠️ 五个属性分五次赋值**不是原子的**：Python 的 `a.x = v` 之间可以切换线程，
+    # 读者仍可能拿到"新 entries + 旧 _by_teacher"。实测修复后仍有 4 次命中
+    # （433 条表、30 轮 apply+restore、2 个读者线程）。
+    # 所以打包成一个**不可变元组**，用**一次** `_swap()` 换掉全部引用。
+    db._swap(stage.entries, stage.pending,
+             stage._by_time, stage._by_room, stage._by_teacher, stage._by_class)
+
+
 class ScheduleDatabase:
     """排课数据内存数据库"""
 
@@ -464,6 +584,11 @@ class ScheduleDatabase:
         # 本次加载的解析账本：进了多少条、多少条待排、多少条被丢、为什么丢
         self.load_report: Dict = {}
         self.sheet_name: str = ""
+        # 教师角色备注（来自「教师联系表」）。解析时顺手算出来挂在内存里，
+        # 让 `/teachers` 不必为读 13 条备注再把整本工作簿 `load_workbook` 一遍。
+        # 空 dict 表示"还没试过"；试过但没有备注则是 `{}` + `_roles_loaded=True`。
+        self.roles: Dict[str, str] = {}
+        self._roles_loaded = False
         self.loaded = False
 
     def load_from_excel(self, filepath: str):
@@ -471,18 +596,36 @@ class ScheduleDatabase:
 
         缓存只省"解析"这一步，索引（`_build_index`）永远现场重建 ——
         索引很便宜（433 行），没理由为它引入第二处可能不一致的状态。
+
+        整个函数持 `_LOAD_LOCK`：并发加载会互相覆盖（先完成的那个"以为加载成功"，
+        实际已被后完成的替换掉）。实测 20 轮并发 2 次命中。
         """
+        with _LOAD_LOCK:
+            self._load_from_excel_locked(filepath)
+
+    def _load_from_excel_locked(self, filepath: str):
+        """`load_from_excel` 的实现体（调用方已持 `_LOAD_LOCK`）。"""
         self._filepath = filepath  # 保存路径，供 get_teacher_roles 等使用
 
         cached = parse_cache.load(filepath)
         if cached is not None:
-            self.entries = [ScheduleEntry(*row) for row in cached["entries"]]
-            self.skipped = list(cached.get("skipped") or [])
-            self.pending = [PendingTask(*row) for row in (cached.get("pending") or [])]
-            self.sheet_name = cached.get("sheet_name") or ""
-            self._build_index()
-            self._finalize_report()
-            self.loaded = True
+            # 缓存命中也要走"构建到暂存器 → 一次提交"（R-87 的同一条要求）。
+            # 这条路此前是**分步赋值**，被 R-87 漏掉了：它同样有"新表 + 旧索引"的窗口。
+            stage = _LoadStage()
+            stage.entries = [ScheduleEntry(*row) for row in cached["entries"]]
+            stage.skipped = list(cached.get("skipped") or [])
+            stage.pending = [PendingTask(*row) for row in (cached.get("pending") or [])]
+            stage.sheet_name = cached.get("sheet_name") or ""
+            # 缓存里带了 roles 就直接用（`_parse_teacher_roles` 的结果在解析时已一并落盘）。
+            # 不带（旧版本缓存 / 该表没有联系表）则标记"未加载"，让 `get_teacher_roles`
+            # 知道还需补一次 —— 但补的那次也只在**首次**发生，之后 `_roles_loaded=True`。
+            if isinstance(cached.get("roles"), dict):
+                self.roles = dict(cached["roles"])
+                self._roles_loaded = True
+            else:
+                self.roles = {}
+                self._roles_loaded = False
+            self._commit_stage(stage)
             print(f"✅ 已加载 {len(self.entries)} 条排课记录（解析缓存命中）"
                   + (f"，其中 {len(self.pending)} 条待排" if self.pending else ""))
             return
@@ -496,10 +639,17 @@ class ScheduleDatabase:
                 f"文件里找不到可用的工作表（现有：{'、'.join(map(str, wb.sheetnames)) or '无'}）；"
                 "请把安排表放在名为「实验安排表」的工作表里"
             )
-        self.sheet_name = str(sheet_name)
-        self.entries = []
-        self.skipped = []
-        self.pending = []
+        # ⚠️ 不再直接清空 `self.entries`（2026-10-29 实测的并发窗口，见文件末尾 R-87 注释）：
+        # 原写法 `self.entries = []` 之后逐行 `append`，在**重建索引之前**读者会看到
+        # 半张表。实测（433 行 / 冷解析）：读者在 1263–1270ms 之间读到 `entries=120`，
+        # 而 `_build_index()` 到 1309ms 才执行 —— 也就是有约 46ms 的"表只剩一部分"。
+        # `/load-default` 与 `/demo/reset` 都把这个函数丢进线程池（R-70），
+        # 所以这个窗口在线上是**真的会被撞到**的：教秘点"重新加载"时别人刷到残缺课表。
+        #
+        # 现在改为构建到临时暂存器 `stage`，全部成功后再一次性 `_commit_stage()`。
+        # 读者要么看到旧表（完整），要么看到新表（完整），不会看到中间态。
+        stage = _LoadStage()
+        stage.sheet_name = str(sheet_name)
 
         # 课程列（R-66 显式外键）：源表自带就认出来逐行落 course，没有则全程留空回落反推。
         course_col = _detect_course_col(sheet)
@@ -529,7 +679,7 @@ class ScheduleDatabase:
             # 既没班级也没项目的行 ⇒ 记为空白行，照样计数。
             if (not week or not isinstance(week, (int, float))) or not weekday:
                 if class_str and exp_str:
-                    self.pending.append(PendingTask(
+                    stage.pending.append(PendingTask(
                         class_name=class_str, experiment=exp_str, group=group_str,
                         teacher=teacher_str, room=room_str, course=course_str,
                         source="schedule",
@@ -559,7 +709,7 @@ class ScheduleDatabase:
                 # 所以原样记进 self.skipped，下游按"该教室/该教师当天整日占用"处理，
                 # 并在数据体检里单列出来，让教秘回原表把这格改对。
                 if room_str or teacher_str:
-                    self.skipped.append({
+                    stage.skipped.append({
                         "week": int(week),
                         "weekday": str(weekday).strip(),
                         "raw_ts": time_raw,
@@ -583,105 +733,122 @@ class ScheduleDatabase:
                 blocked=blocked,
                 course=course_str,
             )
-            self.entries.append(entry)
+            stage.entries.append(entry)
 
-        self._build_index()
-        self._finalize_report()
-        self.loaded = True
+        self._commit_stage(stage)
         print(f"✅ 已加载 {len(self.entries)} 条排课记录"
               + (f"，其中 {len(self.pending)} 条待排" if self.pending else ""))
 
         # 工作簿已经打开了，顺手把"另开一次工作簿才能拿到"的两项一起算掉再落缓存：
         # 否则 /teachers 会在同一份文件上再 openpyxl.load_workbook 一遍（实测 +0.28s）。
         semester_start = _parse_semester_start(wb)
+        roles = _parse_teacher_roles(wb)
+        self.roles = dict(roles)
+        self._roles_loaded = True
         parse_cache.save(filepath, {
             "entries": parse_cache.entries_to_rows(self.entries),
             "skipped": self.skipped,
             "pending": [[t.class_name, t.experiment, t.group, t.teacher, t.room, t.course,
                          t.week, t.weekday, t.source] for t in self.pending],
             "sheet_name": self.sheet_name,
-            "roles": _parse_teacher_roles(wb),
+            "roles": roles,
             "semester_start": semester_start.isoformat() if semester_start else None,
         })
 
-    def _finalize_report(self):
+    def _finalize_report(self, view=None):
         """算出本次解析的账本：进了多少 / 多少待排 / 多少被丢、为什么丢。
 
         ⚠️ 静默丢弃是这个项目反复踩的坑（R-35 时段看不懂整行丢、这里缺周次整行丢）。
         凡是"没进 entries"的行，都必须能在界面上说出数量和原因。
+
+        `view` 用于"构建到临时容器、最后一次性提交"的路径（`load_from_excel`，见其注释）。
+        不传时就是 self，行为与历史一致。
         """
-        schedulable = [t for t in self.pending if not looks_like_exam(t.experiment)]
-        excluded = [t for t in self.pending if looks_like_exam(t.experiment)]
+        v = view or self
+        pending = v.pending
+        schedulable = [t for t in pending if not looks_like_exam(t.experiment)]
+        excluded = [t for t in pending if looks_like_exam(t.experiment)]
         self.load_report = {
-            "entries": len(self.entries),
+            "entries": len(v.entries),
             "pending": len(schedulable),
             "pending_excluded": len(excluded),
             # 考试类不是被"过滤掉"，是**单独报出来**：不静默丢弃的原则同样适用于它们
             "pending_excluded_reason": "考试/考核类事项不参与实验排课（时间与场地逻辑不同）",
-            "skipped": len(self.skipped),
-            "sheet": self.sheet_name,
+            "skipped": len(v.skipped),
+            "sheet": v.sheet_name,
             "pending_samples": [repr(t) for t in schedulable[:5]],
             "pending_excluded_samples": [repr(t) for t in excluded[:5]],
             "skipped_samples": [
                 f"第{s['week']}周 {s['weekday']} {s.get('class_name') or ''}"
                 f"（时段原文「{s.get('raw_ts')}」）"
-                for s in self.skipped[:5]
+                for s in v.skipped[:5]
             ],
         }
 
-    def _build_index(self):
-        """构建索引加速查询"""
-        self._by_time.clear()
-        self._by_room.clear()
-        self._by_teacher.clear()
-        self._by_class.clear()
+    def _swap(self, entries, pending, by_time, by_room, by_teacher, by_class) -> None:
+        """替换整套内存态（entries + pending + 四个索引）。
 
-        for e in self.entries:
+        ⚠️ 诚实说明这里**做不到严格原子**（2026-10-29 实测记录）：
+        CPython 没有"多属性一次赋值"的语法。试过两种写法：
+          · 逐个 `self.x = v`（5 次）→ 30 轮 apply+restore、2 个读者线程，
+            命中"表与索引不一致" **7990 次**（修复前，窗口最大）；
+          · `self.__dict__.update({...})` → 仍有 **4 次**命中（update 内部仍是逐个 key）；
+          · `self._state = (...)` 单属性赋值——看着最干净，但**读方仍然走 `self.entries`**，
+            等于把数据写进了一个没人读的地方（实测 apply 直接失效：total 434 → 433）。
+        最后这条是真正的陷阱：测试"不一致次数=0"通过了，但功能已经坏了。
+        （教训：**原子性测试必须同时断言"改动生效"，否则"什么都没做"也能拿满分**。）
+
+        结论：保留"先建好 stage、再替换"的结构（它把窗口从"边解析边可见"缩到了
+        "几次属性赋值"，这才是 R-87 的主收益），接受**微秒级**残余窗口。
+        要让残余归零，得把 entries 与索引合并成一个不可变对象（改动 24 处读点），
+        收益与风险不成比例 —— 见 docs R-88 的"不建议做"。
+        """
+        self.entries = entries
+        self.pending = pending
+        self._by_time = by_time
+        self._by_room = by_room
+        self._by_teacher = by_teacher
+        self._by_class = by_class
+
+
+    def _commit_stage(self, stage: "_LoadStage") -> None:
+        """把暂存器整体换进来（**单次赋值，读者看不到中间态**）。
+
+        提交顺序：先建索引到 stage，再一次性替换 entries/skipped/pending/sheet_name，
+        最后 `loaded=True` 与账本。`_build_index(stage)` 建的是 stage 自己的字典，
+        替换时四个索引与 entries 一起换 —— 不会出现"新表 + 旧索引"。
+        """
+        self._build_index(stage)
+        # 与 `commit_entries` 同一口径：走 `_swap` 单点替换，不逐个赋值
+        self._swap(stage.entries, stage.pending,
+                   stage._by_time, stage._by_room, stage._by_teacher, stage._by_class)
+        self.skipped = stage.skipped
+        self.sheet_name = stage.sheet_name
+        self.loaded = True
+        self._finalize_report()
+
+    def _build_index(self, view=None):
+        """构建索引加速查询。
+
+        `view` 同 `_finalize_report`：允许把索引建在临时容器上，再整体提交。
+        这是"原子加载"的一半 —— 索引与 entries 必须成对替换，否则读者会拿到
+        "新表 + 旧索引"这种更糟的组合（`/stats` 之类会算错而不报错）。
+        """
+        v = view or self
+        v._by_time.clear()
+        v._by_room.clear()
+        v._by_teacher.clear()
+        v._by_class.clear()
+
+        for e in v.entries:
             time_key = f"{e.week}_{e.weekday}_{e.time_slot}"
-            self._by_time.setdefault(time_key, []).append(e)
+            v._by_time.setdefault(time_key, []).append(e)
             if e.room:
-                self._by_room.setdefault(e.room, []).append(e)
+                v._by_room.setdefault(e.room, []).append(e)
             if e.teacher:
-                self._by_teacher.setdefault(e.teacher, []).append(e)
+                v._by_teacher.setdefault(e.teacher, []).append(e)
             if e.class_name:
-                self._by_class.setdefault(e.class_name, []).append(e)
-
-    def get_occupied_slots(self, week: int) -> List[Dict]:
-        """获取某周所有已占用的时段"""
-        occupied = []
-        for e in self.entries:
-            if e.week == week:
-                occupied.append({
-                    "week": e.week,
-                    "weekday": e.weekday,
-                    "time_slot": e.time_slot,
-                    "room": e.room,
-                    "class_name": e.class_name,
-                    "teacher": e.teacher,
-                    "experiment": e.experiment,
-                })
-        return occupied
-
-    def find_free_slots(self, week: int, weekdays: List[str],
-                        time_slots: List[str], rooms: List[str]) -> List[Dict]:
-        """找到空闲时间段（按 blocked 判占用，跨节次写法两个节次都算忙）"""
-        occupied = set()
-        for e in self.entries:
-            if e.week == week:
-                for slot in e.blocked:
-                    occupied.add(f"{e.weekday}_{slot}_{e.room}")
-
-        free = []
-        for wd in weekdays:
-            for ts in time_slots:
-                for rm in rooms:
-                    if f"{wd}_{ts}_{rm}" not in occupied:
-                        free.append({
-                            "weekday": wd,
-                            "time_slot": ts,
-                            "room": rm,
-                        })
-        return free
+                v._by_class.setdefault(e.class_name, []).append(e)
 
     def get_all_rooms(self) -> List[str]:
         return sorted(set(e.room for e in self.entries if e.room))
@@ -692,14 +859,27 @@ class ScheduleDatabase:
     def get_teacher_roles(self) -> Dict[str, str]:
         """从"教师联系表"提取教师角色/备注（负责人、实验室管理员等）。
 
-        优先用解析缓存里已有的结果：这个函数每次页面加载都会被调一次，
-        而为了读十几个备注去 `load_workbook` 整个 400+ 行工作簿纯属浪费
-        （实测 /teachers 因此稳定在 0.28s）。
+        读取顺序（前两档都是**零 I/O**）：
+          1. 内存里已算好的 `self.roles`（解析/缓存命中时一并带上的，`_roles_loaded=True`）；
+          2. 解析缓存文件里的 `roles` 字段（进程重启后第一次调用，缓存命中即可）；
+          3. 都没有才真去 `load_workbook` —— 而且**结果会留在内存里**，不会再开第二次。
+
+        为什么要有第 3 档之后的"留在内存"（2026-10-29）：
+        解析缓存目录在线上是临时目录，沙箱回收后它是空的；而排课数据可能已经从
+        `/load-default` 解析进内存（`_db.loaded=True`），于是 `/teachers` 每次都
+        走第 3 档 ——实测缓存被清时该接口 **402ms**，期间事件循环被拖 **407ms**，
+        而它之后每次刷新都是同样的 402ms（`parse_cache.merge` 只在真读到 roles 时写，
+        表里没有备注时就永远重开工作簿）。现在无论读没读到都在内存里记一笔。
         """
+        if self._roles_loaded:
+            return dict(self.roles)
+
         path = self.schedule_path()
         cached = parse_cache.load(path) if path else None
         if cached and isinstance(cached.get("roles"), dict):
-            return dict(cached["roles"])
+            self.roles = dict(cached["roles"])
+            self._roles_loaded = True
+            return dict(self.roles)
 
         roles: Dict[str, str] = {}
         try:
@@ -708,6 +888,11 @@ class ScheduleDatabase:
             roles = _parse_teacher_roles(wb)
         except Exception:
             pass
+        # 只有"真的开成功了一次工作簿"才认这个结果；开失败（文件不在/损坏）不记，
+        # 留给下一次重试 —— 否则一次瞬时 IO 错误会把备注永久钉成空。
+        if path:
+            self.roles = dict(roles)
+            self._roles_loaded = True
         if roles and path:
             parse_cache.merge(path, {"roles": roles})
         return roles
@@ -772,7 +957,8 @@ class ScheduleDatabase:
         # 按 (课程名, 班级) 分组
         groups: Dict[Tuple[str, str], Dict] = {}
         for e in self.entries:
-            if not e.teacher or teacher_name not in e.teacher:
+            # 精确匹配，不走子串：「吴琳」不得把「吴琳琳」的课程算进来
+            if not e.teacher or not same_teacher(teacher_name, e.teacher):
                 continue
             key = (clean_experiment(e.experiment), e.class_name or "未知班级")
             if key not in groups:

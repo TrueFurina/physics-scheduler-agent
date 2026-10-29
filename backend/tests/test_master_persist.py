@@ -88,6 +88,67 @@ def test_from_dict_corrupt_falls_back_closed(tmp_path):
     assert md.initialized is False
 
 
+def test_from_dict_corrupt_leaves_every_table_untouched():
+    """坏数据时**五张表都不许被改** —— 这才是 fail-closed 的严格含义。
+
+    2026-10-29 实测的缺陷：旧实现边解析边赋值，喂
+    `{"courses": {...新的...}, "experiments": "not-a-dict"}` 之后得到
+        experiments=['旧项目'] / courses=['新课'] / teachers=['旧师']
+    而 `initialized` 仍是 True —— **三张表互相矛盾，还被当成已初始化继续用**。
+
+    上一版 `test_from_dict_corrupt_falls_back_closed` 的 docstring 就写着"不产半态"，
+    但它只断言了 `initialized is False`，完全没查其余四张表。
+    **断言不足让这个缺陷活了下来** —— 这类"测了一个指标就以为测了整个承诺"
+    是最常见的假安全感。
+    """
+    md = MasterData()
+    md.experiments = {"旧项目": {"course": "旧课", "teachers": set(),
+                                 "rooms": set(), "classes": set()}}
+    md.courses = {"旧课": {"experiments": {"旧项目"}}}
+    md.teachers = {"旧师": {"projects": {"旧项目"}}}
+    md.rooms = {"旧房": {"capacity": 40}}
+    md.classes = {"旧班": {"groups": {"1组"}, "weekday": "周一", "weekdays": {"周一"},
+                           "time_slots": {"567"}, "week_min": 2, "week_max": 10}}
+    md.initialized = True
+    before = md.to_dict()
+
+    # courses 是合法的（会被先解析），experiments 坏掉 ⇒ 旧实现会留下半态
+    md.from_dict({"courses": {"新课": {"experiments": []}}, "experiments": "not-a-dict"})
+
+    after = md.to_dict()
+    assert after == before, (
+        "坏数据之后主数据被改了（出现半态）：\n"
+        f"  before: {before}\n  after : {after}"
+    )
+    assert md.initialized is True, "对象原本是已初始化，坏数据不该把它改掉"
+
+
+def test_from_dict_success_replaces_all_tables():
+    """正向控制：数据合法时五张表都要被替换（别把守卫做成"永远不动"）。"""
+    md = MasterData()
+    md.experiments = {"旧项目": {"course": "旧课", "teachers": set(),
+                                 "rooms": set(), "classes": set()}}
+    md._rebuild_courses()
+    md.initialized = True
+
+    md.from_dict({
+        "experiments": {"新项目": {"course": "新课", "teachers": ["新师"],
+                                   "rooms": ["新房"], "classes": ["新班"]}},
+        "teachers": {"新师": {"projects": ["新项目"]}},
+        "rooms": {"新房": {"capacity": 60}},
+        "classes": {"新班": {"groups": ["1组"], "weekday": "周二",
+                             "weekdays": ["周二"], "time_slots": ["678"],
+                             "week_min": 3, "week_max": 12}},
+    })
+
+    assert set(md.experiments) == {"新项目"}
+    assert set(md.teachers) == {"新师"}
+    assert set(md.rooms) == {"新房"}
+    assert set(md.classes) == {"新班"}
+    assert set(md.courses) == {"新课"}, "课程聚合没跟着重建"
+    assert md.initialized is True
+
+
 # ---------------------------------------------------------------- 落盘恢复
 
 def test_persist_then_restore_survives_restart(store_path, tmp_path, monkeypatch):
@@ -230,3 +291,96 @@ def test_stale_empty_master_store_is_discarded_and_rebuilt(store_path, tmp_path,
     assert "扭摆法" in api._master_data.experiments
     assert set(api._master_data.classes) == {"一班", "二班"}
     assert master_store.load() is None, "脏落盘应被清掉"
+
+
+# ---------------------------------------------------------------- build 必须原子（R-91）
+#
+# 2026-10-29 实测：`build_from_entries` 原来是"五次 clear + 逐行 setdefault"，
+# 期间并发读者看到"主数据被清空、只填了一部分"。真实表 433 行、20 轮重建、
+# 3 个读者线程下**462192 次**读到实验项目数不是 25（集中在 9 和 13）。
+#
+# 调用方：`/master/init`（一键初始化）、`_ensure_master_data_locked`（冷启动反推基线）；
+# 并发读者：`/master/overview`、`/parallel/*`、`/export/*` —— 它们会拿到残缺主数据，
+# 算出的班级覆盖/课程归属都是错的，且不报错。
+
+def test_build_from_entries_builds_on_a_temp_instance():
+    """结构锁：`build_from_entries` 必须把实际逻辑委托给**临时实例**上的填充函数。
+
+    为什么不用"函数体里不许有 .clear()"这种判据（第一版就是那样，结果漏判）：
+    把逻辑抽到 `_build_from_entries_into` 之后，`build_from_entries` 里本来就没有
+    `clear()` 了 —— 于是"退回就地改写"（`self._build_from_entries_into(...)`）
+    也能通过。**判据必须盯"是否用临时实例"，而不是"有没有某个调用"。**
+
+    正确形态：函数体里出现 `MasterData()`（新建实例）且对**它**调用填充函数。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(MasterData.build_from_entries))
+    tree = ast.parse(src)
+
+    makes_temp = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "MasterData"
+        for n in ast.walk(tree)
+    )
+    assert makes_temp, (
+        "build_from_entries 没有新建临时 MasterData —— 就地改写会让并发读者"
+        "看到「主数据被清空、只填了一半」（实测 462192 次命中）"
+    )
+
+    fills_on_temp = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr.startswith("_build_from_entries")
+        and isinstance(n.func.value, ast.Name) and n.func.value.id != "self"
+        for n in ast.walk(tree)
+    )
+    assert fills_on_temp, (
+        "填充逻辑没有作用在临时实例上（应形如 `stage._build_from_entries_into(...)`）"
+    )
+
+
+def test_build_from_entries_replaces_all_tables():
+    """行为锁：重建后五张表都应反映新安排表，且课程聚合一致。"""
+    from app.utils.excel_parser import ScheduleEntry
+
+    md = MasterData()
+    md.experiments = {"旧项目": {"course": "旧课", "teachers": set(),
+                                 "rooms": set(), "classes": set()}}
+    md._rebuild_courses()
+    md.initialized = True
+
+    entries = [
+        ScheduleEntry(1, "周一", "567", "一班", "1组", "声速测量", "A410", "吴琳"),
+        ScheduleEntry(1, "周一", "678", "二班", "1组", "牛顿环测透镜曲率半径", "A411", "柯达"),
+    ]
+    md.build_from_entries(entries)
+
+    assert set(md.experiments) == {"声速测量", "牛顿环测透镜曲率半径"}
+    assert set(md.teachers) == {"吴琳", "柯达"}
+    assert set(md.rooms) == {"A410", "A411"}
+    assert set(md.classes) == {"一班", "二班"}
+    assert "旧项目" not in md.experiments, "旧数据没被清掉"
+    assert md.initialized is True
+
+
+def test_build_from_entries_failure_leaves_object_untouched():
+    """坏输入（entries 里有非预期对象）不许留下半态 —— 与 `from_dict` 同一条承诺。"""
+    md = MasterData()
+    md.experiments = {"旧项目": {"course": "旧课", "teachers": set(),
+                                 "rooms": set(), "classes": set()}}
+    md._rebuild_courses()
+    md.initialized = True
+    before = md.to_dict()
+
+    class Bad:
+        @property
+        def experiment(self):
+            raise RuntimeError("坏对象")
+
+    try:
+        md.build_from_entries([Bad()])
+    except RuntimeError:
+        pass                        # 异常可以冒出来，但状态必须干净
+
+    assert md.to_dict() == before, "失败后主数据被改了（半态）"

@@ -72,12 +72,6 @@ def intervals_overlap(a: Optional[Tuple[int, int]], b: Optional[Tuple[int, int]]
     return max(a[0], b[0]) < min(a[1], b[1])
 
 
-def labels_overlap(a: str, b: str) -> bool:
-    """两个节次标签是否重叠。任一方不认识 ⇒ 视为重叠（保守：宁可少推荐）。"""
-    ca, cb = CLOCK.get(a), CLOCK.get(b)
-    if ca is None or cb is None:
-        return True
-    return intervals_overlap(ca, cb)
 
 
 def span_labels(raw: Optional[str], fallback: str = "") -> List[str]:

@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 from typing import List, Dict, Optional, Tuple
-from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import ScheduleDatabase, same_teacher
 from app.utils.time_model import parse_clock_range
 from app.agent.llm_intent_parser import LLMIntentParser
 
@@ -194,50 +194,6 @@ class RescheduleAgent:
             "original_text": text,
         }
 
-    def find_available_slots(self, target_week: int,
-                             exclude_rooms: Optional[List[str]] = None,
-                             teacher_name: Optional[str] = None) -> List[Dict]:
-        """查找指定周的空闲时段（教室空闲 + 教师自身时间空闲）"""
-        if not self.db.loaded:
-            return []
-
-        weekdays = ["周一", "周二", "周三", "周四", "周五"]
-        time_slots = ["567", "678", "91011"]  # 下午三个时段
-        rooms = self.db.get_all_rooms()
-
-        if exclude_rooms:
-            rooms = [r for r in rooms if r not in exclude_rooms]
-
-        # 已占用：{weekday_time_room} 集合（教室被占）
-        occupied = set()
-        # 教师已占用：{weekday_time} 集合（教师自身该时段有课）
-        teacher_occupied = set()
-        for e in self.db.entries:
-            if e.week == target_week:
-                # 按 blocked（真实占住的全部节次）落占用：`14:00-17:00` 这类
-                # 跨节次写法同时占 567 和 678，只按主标签记会让 678 判成空闲。
-                for slot in getattr(e, "blocked", None) or [e.time_slot]:
-                    occupied.add(f"{e.weekday}_{slot}_{e.room}")
-                    if teacher_name and e.teacher and teacher_name in e.teacher:
-                        teacher_occupied.add(f"{e.weekday}_{slot}")
-
-        available = []
-        for wd in weekdays:
-            for ts in time_slots:
-                # 检查0：教师自身该时段是否有课
-                if teacher_name and f"{wd}_{ts}" in teacher_occupied:
-                    continue
-                for rm in rooms:
-                    # 检查1：教室空闲
-                    if f"{wd}_{ts}_{rm}" in occupied:
-                        continue
-                    available.append({
-                        "weekday": wd,
-                        "time_slot": ts,
-                        "room": rm,
-                    })
-
-        return available
 
     def find_slots_with_reasons(self, target_week: int,
                                 teacher_name: Optional[str] = None) -> Dict:
@@ -271,7 +227,9 @@ class RescheduleAgent:
                             "time_raw": e.time_raw or "",
                             "blocked": list(e.blocked),
                         }
-                    if teacher_name and e.teacher and teacher_name in e.teacher:
+                    # 精确匹配（不走子串）：「吴琳」不得把「吴琳琳」的课算成本人有课。
+                    # 走同一个判据函数，与写路径/课程列表口径一致。
+                    if teacher_name and e.teacher and same_teacher(teacher_name, e.teacher):
                         tk = f"{e.weekday}_{slot}"
                         if tk not in teacher_occupied:
                             teacher_occupied[tk] = {

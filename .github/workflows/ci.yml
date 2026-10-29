@@ -55,6 +55,18 @@ jobs:
       - name: Ruff lint gate
         run: ruff check --config ruff.toml .
 
+      - name: Event-loop blocking audit
+        # 2026-10-29 加：这是"重活跑在事件循环上"的静态判据（R-81/R-84 各抓到一处：
+        # `_ensure_loaded` 整表解析、`get_teacher_roles` 开工作簿、`parse_request` 打 LLM）。
+        # 它**不需要起服务**，纯 AST 分析，0.2s —— 是最便宜的一道门，却没进过 CI。
+        #
+        # 判据分三档（脚本内注释有完整理由）：
+        #   · suspicious（重活在事件循环上）**必须为 0**，除非在 KNOWN_BLOCKING 里
+        #     且带实测数字（当前只有 `/upload`，附 343ms + 44ms 空窗的说明）；
+        #   · 零 await 的轻查询（13 个，1–5ms）与基线快照比对，**只拦新增**；
+        #   · 基线变化需 `--update-baseline` 显式更新并提交，评审能看见。
+        run: python scripts/audit_async_blocking.py backend/app/api/reschedule.py
+
       - name: Pytest
         working-directory: backend
         env:
@@ -81,3 +93,44 @@ jobs:
       - name: Type check + unit tests
         working-directory: frontend
         run: npm run verify
+
+  coverage:
+    name: coverage (行覆盖率门槛)
+    runs-on: ubuntu-latest
+    # 为什么单独一个 job（2026-10-29）：项目铁律是"守卫必须敢红"（R-25），
+    # 但没有覆盖率图时"这段代码从没被执行过"只能靠人想到去点 —— R-70 就是这样
+    # 漏掉"主路径第 ③ 步零覆盖"的。R-81 补测 LLM 调用路径之前，
+    # `llm_intent_parser.py` 只有 46.4%：`httpx` 之后那些行（真实解析/consult/候选方案）
+    # 一行都没跑过，而它们恰恰最容易静默出错（空 choices、429、超时）。
+    #
+    # 用 `scripts/coverage_probe.py`（标准库 sys.monitoring，不引入 pytest-cov）：
+    # 本轮实测 PyPI 镜像不可达，装不上 pytest-cov；而本项目要求"能复现"，
+    # 所以宁可用 100 行自研探针，也不写一条跑不通的命令进文档。
+    #
+    # 分母口径是 **AST 枚举的可执行语句行**（fail-closed）：没被 import 的文件算 0%，
+    # 不会因为"没被加载"而虚高 —— 这正是 R-25 那种"把没测伪装成测过"的反面。
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"      # sys.monitoring 需要 3.12+，探针里有显式守卫
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Coverage gate
+        working-directory: backend
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          PYTHONIOENCODING: utf-8
+        # 门槛 80%：CI 干净检出（无 schedule.xlsx，真实表用例 skip）实测 87.7%，
+        # 本地（有真实表）88.3%。留 7 个点余量 —— 门槛的作用是"拦住覆盖率断崖"，
+        # 不是逼人为数字写测试。--fail-zero 才是硬要求：任何文件整份零覆盖即红。
+        run: python ../scripts/coverage_probe.py --fail-under 80 --fail-zero --top 10

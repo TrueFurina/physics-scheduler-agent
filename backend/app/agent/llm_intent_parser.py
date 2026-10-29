@@ -98,6 +98,33 @@ _DEFAULT_BASE = _CHANNELS["zhipu"]["base"]
 _DEFAULT_MODEL = _CHANNELS["zhipu"]["model"]
 
 
+def _first_message_content(payload: dict) -> str:
+    """从 OpenAI 兼容响应里取第一条消息的 content。
+
+    ⚠️ 不要写 `payload.get("choices", [{}])[0]` —— 默认值只在**键不存在**时生效，
+    而 `{"choices": []}`（上游限流/内容审核时真的会这么回）会让 `[0]` 抛
+    `IndexError: list index out of range`。那个异常随后被外层 `except Exception`
+    吞成一句 `LLM 调用异常：list index out of range` —— 不会崩服务，但把 Python 内部
+    错误原样摆到 `/chat` 的返回里，教秘看到的是"系统坏了"，而真相是"上游没给内容"。
+
+    空/缺字段一律返回空串，由调用方按"空响应"处理（那里有明确的文案）。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+
 def _endpoint_host(base_url: str) -> str:
     """从端点里取主机名，用于诊断输出（不含任何密钥）。"""
     m = re.match(r"^https?://([^/]+)", base_url or "")
@@ -249,7 +276,10 @@ class LLMIntentParser:
                 if resp.status_code != 200:
                     return {"error": f"LLM 调用失败：HTTP {resp.status_code}", "needs_followup": False}
 
-                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                content = _first_message_content(resp.json())
+                if not content.strip():
+                    return {"error": "LLM 返回了空内容（上游限流或内容审核拦截时常见）",
+                            "needs_followup": False}
                 return self._extract_json(content)
         except Exception as e:
             return {"error": f"LLM 调用异常：{e!s}", "needs_followup": False}
@@ -323,7 +353,9 @@ class LLMIntentParser:
                 )
                 if resp.status_code != 200:
                     return {"error": f"LLM 调用失败：HTTP {resp.status_code}"}
-                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                content = _first_message_content(resp.json())
+                if not content.strip():
+                    return {"error": "LLM 返回了空内容（上游限流或内容审核拦截时常见）"}
                 return {"reply": content}
         except Exception as e:
             return {"error": f"LLM 调用异常：{e!s}"}
@@ -381,7 +413,9 @@ class LLMIntentParser:
                 if resp.status_code != 200:
                     return {"error": f"LLM 调用失败：HTTP {resp.status_code}"}
 
-                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                content = _first_message_content(resp.json())
+                if not content.strip():
+                    return {"error": "LLM 返回了空内容（上游限流或内容审核拦截时常见）"}
                 result = self._extract_json(content)
                 if "plans" in result:
                     return {"plans": result["plans"]}

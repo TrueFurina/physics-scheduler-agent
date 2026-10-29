@@ -75,7 +75,32 @@ class MasterData:
 
     # ------------------------------------------------------------------ 反推
     def build_from_entries(self, entries) -> "MasterData":
-        """从安排表行反推五张实体表（绪论课 / 考试类跳过，其余如实收录）。"""
+        """从安排表行反推五张实体表（绪论课 / 考试类跳过，其余如实收录）。
+
+        **不就地改写 `self`**（2026-10-29，R-91）：原实现先 `self.experiments.clear()`
+        等五次 clear，再逐行 `setdefault` 填充 —— 期间并发读者看到的是"表被清空、
+        只填了一部分"。实测（真实表 433 行、20 轮重建、3 个读者线程）：
+        **462192 次**读到实验项目数不是 25（分布集中在 9 和 13）。
+
+        危害面比 R-87 更广：`/master/init`（一键初始化）、`_ensure_master_data_locked`
+        （冷启动反推基线）都调它，而 `/master/overview`、`/parallel/*`、
+        `/export/*` 会并发读同一份 `_master_data` —— 它们拿到的是**残缺主数据**，
+        算出的班级覆盖/课程归属都是错的，且不报错。
+
+        现在改为 build 到临时实例，全部完成后一次性搬运（与 `from_dict` 同一手法）。
+        """
+        stage = MasterData()
+        stage._build_from_entries_into(entries)
+        self.courses = stage.courses
+        self.experiments = stage.experiments
+        self.teachers = stage.teachers
+        self.rooms = stage.rooms
+        self.classes = stage.classes
+        self.initialized = stage.initialized
+        return self
+
+    def _build_from_entries_into(self, entries) -> None:
+        """真正的反推逻辑（就地改写 **self**；由 `build_from_entries` 在临时实例上调用）。"""
         self.courses.clear()
         self.experiments.clear()
         self.teachers.clear()
@@ -137,7 +162,6 @@ class MasterData:
 
         self._rebuild_courses()
         self.initialized = True
-        return self
 
     def _rebuild_courses(self):
         """课程表由实验项目的 `course` 字段反向聚合，永远一致。"""
@@ -147,9 +171,6 @@ class MasterData:
             self.courses.setdefault(course, {"experiments": set()})["experiments"].add(name)
 
     # ------------------------------------------------------------------ 查询
-    def project_classes(self, experiment: str) -> Set[str]:
-        """某实验项目适用哪些班级（反推自历史开课记录）。"""
-        return set(self.experiments.get(experiment, {}).get("classes", set()))
 
     def classes_of(self, class_name: str) -> Set[str]:
         """某班级要上哪些实验项目（反向索引，反推自历史开课记录）。"""
@@ -318,29 +339,54 @@ class MasterData:
         }
 
     def from_dict(self, d: dict) -> "MasterData":
-        """to_dict 的逆操作：恢复五张表并重建课程聚合。坏数据fail-closed（回退反推基线）。"""
+        """to_dict 的逆操作：恢复五张表并重建课程聚合。
+
+        **fail-closed 的严格含义**（2026-10-29 修）：坏数据时本对象**一个字段都不改**，
+        保持调用前的状态，由调用方回退到"按安排表反推基线"。
+
+        此前它会边解析边赋值，遇到坏数据只 catch 住异常就返回 —— 于是可能出现
+        "courses 已经是新的、experiments/teachers 还是旧的"这种半态。
+        实测复现：喂 `{"courses": {...新的...}, "experiments": "not-a-dict"}` 之后
+        `experiments=['旧项目'] / courses=['新课'] / teachers=['旧师']`，而
+        `initialized` 仍是 `True` —— 三张表互相矛盾，还被当成"已初始化"继续用。
+
+        现有测试 `test_from_dict_corrupt_falls_back_closed` 的 docstring 就写着
+        "不产半态"，但它只断言了 `initialized is False`，没查其余四张表 ——
+        断言不足让这个缺陷活了很久。本轮一并补上那几条断言。
+        """
         try:
-            self.courses = {n: {"experiments": set(v["experiments"])}
-                            for n, v in (d.get("courses") or {}).items()}
-            self.experiments = {n: {"course": v.get("course") or DEFAULT_COURSE,
-                                    "teachers": set(v.get("teachers") or []),
-                                    "rooms": set(v.get("rooms") or []),
-                                    "classes": set(v.get("classes") or [])}
-                                for n, v in (d.get("experiments") or {}).items()}
-            self.teachers = {n: {"projects": set(v.get("projects") or [])}
-                             for n, v in (d.get("teachers") or {}).items()}
-            self.rooms = {n: {"capacity": v.get("capacity")}
-                          for n, v in (d.get("rooms") or {}).items()}
-            self.classes = {n: {"groups": set(v.get("groups") or []),
-                                "weekday": v.get("weekday") or "",
-                                "weekdays": set(v.get("weekdays") or []),
-                                "time_slots": set(v.get("time_slots") or []),
-                                "week_min": v.get("week_min"), "week_max": v.get("week_max")}
-                            for n, v in (d.get("classes") or {}).items()}
-            self._rebuild_courses()
+            # 先build到**临时对象**上：任何一步失败都不会污染 self
+            stage = MasterData()
+            stage.courses = {n: {"experiments": set(v["experiments"])}
+                             for n, v in (d.get("courses") or {}).items()}
+            stage.experiments = {n: {"course": v.get("course") or DEFAULT_COURSE,
+                                     "teachers": set(v.get("teachers") or []),
+                                     "rooms": set(v.get("rooms") or []),
+                                     "classes": set(v.get("classes") or [])}
+                                 for n, v in (d.get("experiments") or {}).items()}
+            stage.teachers = {n: {"projects": set(v.get("projects") or [])}
+                              for n, v in (d.get("teachers") or {}).items()}
+            stage.rooms = {n: {"capacity": v.get("capacity")}
+                           for n, v in (d.get("rooms") or {}).items()}
+            stage.classes = {n: {"groups": set(v.get("groups") or []),
+                                 "weekday": v.get("weekday") or "",
+                                 "weekdays": set(v.get("weekdays") or []),
+                                 "time_slots": set(v.get("time_slots") or []),
+                                 "week_min": v.get("week_min"), "week_max": v.get("week_max")}
+                             for n, v in (d.get("classes") or {}).items()}
+            stage._rebuild_courses()
+
             # 空表（无项目且无班级）不认作"已初始化"：它多半是历史脏落盘，
             # 认了就等于用一份空主数据覆盖安排表反推出来的基线（实测清空过 25 个项目）。
-            self.initialized = bool(self.experiments or self.classes)
+            initialized = bool(stage.experiments or stage.classes)
+
+            # 全部成功，一次性搬过来（五张表 + 标记一起换）
+            self.courses = stage.courses
+            self.experiments = stage.experiments
+            self.teachers = stage.teachers
+            self.rooms = stage.rooms
+            self.classes = stage.classes
+            self.initialized = initialized
             return self
         except (TypeError, AttributeError, KeyError) as e:
             print(f"⚠️ 主数据落盘文件损坏（{e}），回退到安排表反推基线")

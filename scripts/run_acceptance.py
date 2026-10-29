@@ -133,6 +133,15 @@ def main():
         step("verify（前端 tsc + vitest）", ["npm", "run", "verify"], cwd=FRONTEND, timeout=900)
 
     # 2) 独立核查器（写入类探针自清理 / 显式 --cleanup）
+    #
+    # 2a) 静态审计（不需要服务，`--skip-ui` 时也应跑）
+    # 为什么它在验收里（2026-10-29）：`audit_async_blocking.py` 是 R-81/R-84 修
+    # 「重活跑在事件循环上」时建立的判据，但一直**只靠人手工跑**。本轮把它改成可进门的形态
+    # （`suspicious` 必须为 0；零 await 轻查询与基线比对、只拦新增），并接进来。
+    # 这类"我建了判据却没人跑"是最典型的自欺：脚本在、结论对，但永远不会变红。
+    step("audit_async_blocking（事件循环阻塞审计）",
+         [PY, "scripts/audit_async_blocking.py", "backend/app/api/reschedule.py"])
+
     step("verify_intro_filter（绪论/考试不进求解器）",
          [PY, "scripts/verify_intro_filter.py"], reset=True)
     step("verify_master_roundtrip（台账可导回 + 清理）",
@@ -162,6 +171,18 @@ def main():
          timeout=900, reset=True)
     step("probe_approval_chain（审批链 11 项）",
          [PY, "scripts/probe_approval_chain.py", "--restore"], timeout=900, reset=True)
+
+    # 4b) 真重启闭环（进程 A 写 → 杀掉 → 进程 B 读）
+    #
+    # 为什么它必须在验收里（2026-10-29）：这个探针早就写好了，但一直**只靠人记得跑**。
+    # 它测的是"审批通过 → 进程重启 → 课表还在吗"，即 R-68-A / R-18 那一族
+    # 「内存态一切正常、只有重启才暴露」的缺陷。而 R-78（`--skip-audit` 藏了 20 小时红灯）
+    # 与 R-79（`--skip-ui` 藏了"断言改瞎"）的教训正是：**不进门的检查等于没检查**。
+    #
+    # 它自己起 8028/8029 两个 uvicorn 子进程，与本脚本用的 8023 不冲突；
+    # 开工前备份 `requests.db`、`finally` 里还原，异常也不留脏态。
+    step("probe_restart_replay（真重启重放）",
+         [PY, "scripts/probe_restart_replay.py"], timeout=900)
 
     # 5) 独立冲突校验器（最慢，放最后）
     if not args.skip_audit:

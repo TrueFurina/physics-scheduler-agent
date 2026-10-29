@@ -30,7 +30,7 @@ import sqlite3
 from typing import Dict, List, Optional
 
 from app.master_data import is_schedulable_project
-from app.utils.excel_parser import PendingTask, ScheduleEntry
+from app.utils.excel_parser import PendingTask, ScheduleEntry, commit_entries
 
 # 与 parallel_scheduler._tasks_of 的兜底一致：没有组名的任务按 1 组处理
 UNIT_EMPTY_GROUP = "1组"
@@ -249,8 +249,13 @@ def snapshot(db) -> dict:
 
 
 def restore(db, snap: dict) -> None:
-    """恢复快照并重建索引（索引必须现场重建，否则占用查询读到旧状态）。"""
-    db.entries = [ScheduleEntry(
+    """恢复快照并重建索引。
+
+    必须**成对提交**（`commit_entries`）：先换表再建索引的话，中间那几毫秒里
+    读者拿到的是"旧表 + 新索引"或"新表 + 旧索引"，占用查询会算出错的冲突。
+    实测（2026-10-29）这种行为有 7990 次采样命中不一致状态。
+    """
+    entries = [ScheduleEntry(
         week=int(r["week"]), weekday=r["weekday"], time_slot=r["time_slot"],
         class_name=r.get("class_name") or "", group=r.get("group") or "",
         experiment=r.get("experiment") or "", room=r.get("room") or "",
@@ -258,14 +263,14 @@ def restore(db, snap: dict) -> None:
         blocked=list(r.get("blocked") or [r["time_slot"]]),
         course=r.get("course") or "",
     ) for r in snap.get("entries") or []]
-    db.pending = [PendingTask(
+    pending = [PendingTask(
         class_name=p.get("class_name") or "", experiment=p.get("experiment") or "",
         group=p.get("group") or "", teacher=p.get("teacher") or "",
         room=p.get("room") or "", course=p.get("course") or "",
         week=p.get("week"), weekday=p.get("weekday") or "",
         source=p.get("source") or "schedule",
     ) for p in snap.get("pending") or []]
-    db._build_index()
+    commit_entries(db, entries, pending)
 
 
 # ---------------------------------------------------------------------------
@@ -289,12 +294,13 @@ def apply_plan(db, plan_rows: List[dict]) -> dict:
         room=r["room"], teacher=r["teacher"], time_raw="", blocked=[r["time_slot"]],
     ) for r in plan_rows]
 
-    db.entries = kept + new_entries
-    db._build_index()
     # 已排掉的待排任务不再算待排：否则总览永远显示"含 N 个待排单元"，
     # 而求解器又因 seen 去重不会重排它们 —— 界面与行为会对不上。
-    db.pending = [t for t in getattr(db, "pending", None) or []
-                  if unit_key(t.class_name, t.experiment, t.group) not in plan]
+    pending_left = [t for t in getattr(db, "pending", None) or []
+                    if unit_key(t.class_name, t.experiment, t.group) not in plan]
+    # 表、待排、四个索引**一次提交**（同 restore 的理由：分步替换会让读者
+    # 读到"新表 + 旧索引"，占用/冲突判断随之出错且不报错）。
+    commit_entries(db, kept + new_entries, pending_left)
     return {"kept": len(kept), "replaced_with": len(new_entries),
             "total": len(db.entries)}
 

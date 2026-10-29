@@ -329,6 +329,14 @@ def test_real_table_full_coverage():
 # 为什么表现为 flaky：只有 CP-SAT 在时限内没排完（负载高 / 时间盒紧）才走贪心，
 # 平时走 CP-SAT 就看不见。下面三条把两个缺陷分别锁死。
 
+# 为什么这一条必须挂 skipif（2026-10-29 实测）：它 `load_from_excel(REAL_XLSX)`，
+# 而 CI 的干净检出**不含** `schedule.xlsx`（.gitignore 排除）⇒ 直接
+# `FileNotFoundError: ...\schedule.xlsx` 判红。R-74 加这三条判据时，只有
+# `test_real_table_full_coverage` 带了装饰器，这条漏了 —— 于是 CI 上**一直是红的**，
+# 而本地（有真实表）永远是绿的，两边看到的不是同一件事。
+# 同文件的另外两条（`test_greedy_fill_never_takes_kept_cells` /
+# `test_expand_release_does_not_erase_kept`）用合成表，不需要它。
+@pytest.mark.skipif(not os.path.exists(REAL_XLSX), reason="真实排课表不在仓库里")
 def test_greedy_path_never_collides_with_kept_courses():
     """确定性复现：把时间盒压到必然 UNKNOWN ⇒ 强制走贪心+展开路径。
 

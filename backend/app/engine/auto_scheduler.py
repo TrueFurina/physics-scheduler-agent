@@ -49,6 +49,7 @@ from typing import AbstractSet, Dict, List, Optional, Set, Tuple
 from ortools.sat.python import cp_model
 
 from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
+from app.engine.solver_factory import new_solver
 
 # 可排课时段（工作日 3 个下午时段）
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
@@ -347,8 +348,9 @@ class AutoScheduler:
 
         model.Maximize(sum(x.values()))
 
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = max(1.0, float(flatten_seconds) + 2.0)
+        # worker 数受 SOLVER_WORKERS 控制：内存随 worker 线性增长，而 ortools
+        # 内存不足时是 `bad allocation` 直接 abort（拦不住），见 solver_factory
+        solver = new_solver(max_time_seconds=max(1.0, float(flatten_seconds) + 2.0))
         status = solver.Solve(model)
         ok = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
@@ -370,8 +372,7 @@ class AutoScheduler:
                         model.Add(z >= sum(in_week))
                 model.Minimize(z)
 
-                solver2 = cp_model.CpSolver()
-                solver2.parameters.max_time_in_seconds = max(0.5, float(flatten_seconds))
+                solver2 = new_solver(max_time_seconds=max(0.5, float(flatten_seconds)))
                 status2 = solver2.Solve(model)
                 if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                     solver, status = solver2, status2

@@ -7,13 +7,14 @@
 import json
 import os
 import sys
+import threading
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.utils import parse_cache
-from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry, _LoadStage
 
 DATA_CANDIDATES = [
     os.path.join(os.path.dirname(__file__), "..", "..", "schedule.xlsx"),
@@ -203,3 +204,162 @@ def test_course_survives_cache_row_roundtrip():
     e2 = ScheduleEntry(*row)
     assert e2.course == "光学实验"
     assert e2.experiment == "扭摆法" and e2.blocked == ["567"]
+
+
+# ---------------------------------------------------------------- 加载必须原子（R-87）
+#
+# 2026-10-29 实测的并发窗口：`load_from_excel` 原来 `self.entries = []` 之后逐行
+# `append`，`_build_index()` 在最后才跑。433 行冷解析时，读者在 1263–1270ms 读到
+# `entries=120`，而索引 1309ms 才建好 —— 约 46ms 里"课表只剩 120 条"。
+# 这个函数在 `/load-default`、`/demo/reset` 里都跑在**线程池**上（R-70），
+# 所以不是理论问题：教秘点"重新加载"时，别人的页面会刷出残缺课表。
+#
+# 修法是"构建到临时暂存器 → 一次性提交"。下面两条锁住它：
+#   · 结构锁：`load_from_excel` 体内不许再出现 `self.entries = []` / `self.entries.append`；
+#   · 行为锁：并发读的每一次采样，entries 要么是旧值、要么是满值。
+
+
+
+def test_load_builds_into_stage_not_in_place():
+    """结构锁：解析期间不许就地清空/追加 `self.entries`（否则读者能看到半张表）。
+
+    2026-10-29 起实现体拆成两层：`load_from_excel`（持 `_LOAD_LOCK`，只做委派）
+    + `_load_from_excel_locked`（真正的解析）。两者都要查 —— 只看外层会因为
+    "真实逻辑搬走了"而假绿。
+    """
+    import inspect
+    src = (inspect.getsource(ScheduleDatabase.load_from_excel)
+           + inspect.getsource(ScheduleDatabase._load_from_excel_locked))
+    code = "\n".join(line.split("#")[0] for line in src.split("\n"))
+    for bad in ("self.entries = []", "self.entries.append"):
+        assert bad not in code, (
+            f"load_from_excel 里还有就地改写（{bad}）——"
+            "并发读者会看到「表被清空、只填了一半」的中间态。应改为构建 _LoadStage 后 _commit_stage。"
+        )
+    assert "_commit_stage" in code, "没有走暂存器提交路径"
+
+
+def test_commit_stage_swaps_entries_and_indexes_together():
+    """提交必须**成对替换** entries 与四个索引 —— 否则会出现"新表 + 旧索引"。"""
+    d = ScheduleDatabase()
+    d.entries = [ScheduleEntry(1, "周一", "567", "旧班", "g", "旧项目", "A1", "旧师")]
+    d._build_index()
+    assert d._by_teacher  # 前提：旧索引非空
+
+    stage = _LoadStage()
+    stage.entries = [ScheduleEntry(2, "周二", "678", "新班", "g", "新项目", "A2", "新师")]
+    stage.sheet_name = "新表"
+    d._commit_stage(stage)
+
+    assert [e.week for e in d.entries] == [2]
+    assert set(d._by_teacher) == {"新师"}, f"索引没跟着换：{set(d._by_teacher)}"
+    assert set(d._by_class) == {"新班"}
+    assert d.sheet_name == "新表"
+    assert d.loaded is True
+
+
+def test_concurrent_reader_never_sees_a_partial_table(tmp_path, monkeypatch):
+    """行为锁：并发读的每次采样，entries 要么是旧值(0 条)、要么是满值(3 条)。
+
+    用小表 + 强制冷解析（不打缓存），把"清空 → 逐行 append"的窗口拉出来。
+    修复前该窗口能让读者读到 1 或 2 条；修复后只可能读到 0 或 3。
+    """
+    import os as _os
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    from app.utils import parse_cache
+    monkeypatch.setattr(parse_cache, "load", lambda p: None)   # 强制真解析
+
+    xlsx = _os.path.join(_os.path.dirname(__file__), "..", "..", "schedule.xlsx")
+    if not _os.path.exists(xlsx):
+        pytest.skip("真实排课表不在仓库里")
+
+    d = ScheduleDatabase()
+    d.load_from_excel(xlsx)                       # 先装一份，做"旧表"
+    full = len(d.entries)
+    assert full > 100, f"真实表应有几百条，实得 {full}"
+
+    bad: list[int] = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            n = len(d.entries)
+            if 0 < n < full:                      # 半张表 = 中间态
+                bad.append(n)
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    for _ in range(3):
+        d.load_from_excel(xlsx)
+    stop.set()
+    t.join(timeout=5)
+
+    assert not bad, f"并发读者看到了半张表（样本 {bad[:5]}，共 {len(bad)} 次）"
+
+
+def test_concurrent_loads_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    """并发加载必须串行：不许"我加载完了，读到的却是别人的表"。
+
+    2026-10-29 实测（无锁）：20 轮「两个线程同时加载不同规模的表」有 **2 次**
+    某线程在 `load_from_excel` 返回后读到对方的表 —— 因为后提交的那个赢，
+    而先提交的调用方以为自己成功了。
+
+    危害比"半张表"更糟：教秘上传 A 表，界面上生效的可能是 B 表，且不报错。
+    修法是给整表加载加模块级 `_LOAD_LOCK`（数据源是进程级单例，锁也跟着它）。
+    """
+    import os as _os
+    import threading
+
+    import openpyxl
+
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(parse_cache, "load", lambda p: None)   # 强制真解析，拉长窗口
+
+    real = _os.path.join(_os.path.dirname(__file__), "..", "..", "schedule.xlsx")
+    if not _os.path.exists(real):
+        pytest.skip("真实排课表不在仓库里")
+
+    big = _os.path.join(str(tmp_path), "big.xlsx")
+    import shutil
+    shutil.copy2(real, big)
+
+    wb = openpyxl.load_workbook(real)
+    ws = wb[wb.sheetnames[1]]
+    for r in range(ws.max_row, 6, -1):        # 只留 3 行数据
+        ws.delete_rows(r)
+    small = _os.path.join(str(tmp_path), "small.xlsx")
+    wb.save(small)
+
+    d = ScheduleDatabase()
+    d.load_from_excel(big)
+    big_n = len(d.entries)
+    d.load_from_excel(small)
+    small_n = len(d.entries)
+    assert big_n > small_n > 0, f"前提：两张表规模不同（{big_n} vs {small_n}）"
+
+    mismatches = []
+    for _ in range(10):
+        barrier = threading.Barrier(2)
+        seen: dict[str, int] = {}
+
+        def load(path, tag, expect, _barrier=barrier, _seen=seen):
+            # 默认参数绑定当轮的 barrier/seen：否则闭包会捕获最后一次迭代的对象
+            # （ruff B023）。这里每轮都是新对象，绑定后行为才确定。
+            _barrier.wait()
+            d.load_from_excel(path)
+            _seen[tag] = len(d.entries)       # 加载返回后立刻读
+
+        ts = [threading.Thread(target=load, args=(big, "big", big_n)),
+              threading.Thread(target=load, args=(small, "small", small_n))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=30)
+        for tag, expect in (("big", big_n), ("small", small_n)):
+            if seen.get(tag) != expect:
+                mismatches.append((tag, expect, seen.get(tag)))
+
+    assert not mismatches, (
+        f"并发加载互相覆盖了 {len(mismatches)} 次（样本 {mismatches[:3]}）——"
+        "load_from_excel 必须持 _LOAD_LOCK"
+    )

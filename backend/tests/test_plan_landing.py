@@ -419,3 +419,244 @@ def test_upload_discards_landed_plan(env, monkeypatch, tmp_path):
     assert r.status_code == 200, r.text
     assert "落地方案 1 份" in r.json()["message"]
     assert client.get("/api/reschedule/parallel/land/status").json()["landed"] is False
+
+
+# ---------------------------------------------------------------- 6. 重启重放的顺序口径
+#
+# 为什么单列一节：`_load_default_schedule` 会把「审批调课（applied_moves）」与
+# 「落地方案（landed_plans）」按**时间戳混排**重放，注释写着"后发生的事件赢"。
+# 这句话此前**没有任何测试** —— 而它决定了重启后课表长什么样：
+# 排错顺序 = 一次落地把后来的调课静默吞掉（或反过来）。
+# 2026-10-29 实测：逻辑本身正确，但"平局怎么算"没有书面约定，也没有锁。
+
+def _replay_like_load_default(monkeypatch, db):
+    """复刻 `_load_default_schedule` 的混排重放（不含 Excel 解析与额外副作用）。"""
+    import json as _json
+
+    monkeypatch.setattr(api, "_db", db)
+    moves = api._get_db().execute(
+        "SELECT id, request_data, applied_at FROM applied_moves ORDER BY id").fetchall()
+    lands = api._landings().all()
+    events = [(r["applied_at"] or "0000-00-00", 0, r["id"], "move", r["request_data"])
+              for r in moves]
+    events += [(L["landed_at"] or "0000-00-00", 1, L["id"], "land", L["plan"])
+               for L in lands]
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
+    for _ts, _kind, _i, kind, payload in events:
+        if kind == "move":
+            api._apply_reschedule(_json.loads(payload), persist=False)
+        else:
+            plan_landing.replay_landing(db, payload)
+    return db
+
+
+def _unit_entries(week=3):
+    return [ScheduleEntry(week, "周一", "567", "A班", "A班_1", "声速测量", "A101", "吴琳")]
+
+
+def _one_plan(week=5):
+    return [{"week": week, "weekday": "周一", "time_slot": "567", "room": "A101",
+             "teacher": "吴琳", "project": "声速测量", "class_name": "A班", "group": "A班_1"}]
+
+
+def _one_move(target=7, source=5):
+    return {"teacher": "吴琳", "course_name": "声速测量", "class_name": "A班",
+            "original_time": "周一 567 A101", "target_week": target, "source_week": source}
+
+
+def _seed(env, move_at, land_at, monkeypatch):
+    db, _client, _tmp = env
+    import json as _json
+    conn = api._get_db()
+    conn.execute("INSERT INTO applied_moves (request_data, applied_at, idem_key) VALUES (?,?,?)",
+                 (_json.dumps(_one_move(), ensure_ascii=False), move_at, ""))
+    conn.commit()
+    conn.close()
+    api._landings().save(_one_plan(), {}, note="probe")
+    c = api._get_db()
+    c.execute("UPDATE landed_plans SET landed_at = ?", (land_at,))
+    c.commit()
+    c.close()
+    return db
+
+
+def test_replay_later_move_wins_over_earlier_landing(env, monkeypatch):
+    """落地(→第5周) 先发生，调课(→第7周) 后发生 ⇒ 重启后应停在**第7周**。
+
+    这条锁的是"调课不会被落地静默吞掉"——落地是整单元替换，
+    若顺序排错，它会把后来那次调课一起抹掉，而教秘完全看不出来。
+    """
+    _seed(env, move_at="2026-10-29T10:00:00.005000",
+               land_at="2026-10-29T10:00:00.000000", monkeypatch=monkeypatch)
+    fresh = _replay_like_load_default(monkeypatch, _db_of(_unit_entries()))
+    assert [e.week for e in fresh.entries] == [7], \
+        f"重启后应是第7周（后发生的调课赢），实际 {[e.week for e in fresh.entries]}"
+
+
+def test_replay_later_landing_wins_over_earlier_move(env, monkeypatch):
+    """反向：调课(→第7周) 先、落地(→第5周) 后 ⇒ 重启后应停在**第5周**。
+
+    正向反向都要测：只测一个方向的话，"永远让 move 赢"这种实现也能过。
+    """
+    _seed(env, move_at="2026-10-29T10:00:00.000000",
+          land_at="2026-10-29T10:00:00.005000", monkeypatch=monkeypatch)
+    fresh = _replay_like_load_default(monkeypatch, _db_of(_unit_entries()))
+    assert [e.week for e in fresh.entries] == [5], \
+        f"重启后应是第5周（后发生的落地赢），实际 {[e.week for e in fresh.entries]}"
+
+
+def test_replay_tie_break_is_documented(env, monkeypatch):
+    """同一微秒：约定是 **land 后执行**（`events.sort` 的第二键 kind=0/1）。
+
+    这是"约定"而不是"对错"：两个写入在同一微秒完成时，物理上无法分先后。
+    锁它的目的不是这个选择更好，而是**别在重构排序键时悄悄换方向** ——
+    换方向后重启重放结果会变，而没有任何测试会告诉你。
+    """
+    _seed(env, move_at="2026-10-29T10:00:00.000000",
+          land_at="2026-10-29T10:00:00.000000", monkeypatch=monkeypatch)
+    fresh = _replay_like_load_default(monkeypatch, _db_of(_unit_entries()))
+    assert [e.week for e in fresh.entries] == [5], (
+        "平局口径变了：约定是 land 后执行（结果=落地的第5周），"
+        f"实际 {[e.week for e in fresh.entries]}。改排序键时必须同步改这条与注释。"
+    )
+
+
+def _db_of(entries):
+    d = ScheduleDatabase()
+    d.entries = entries
+    d.loaded = True
+    d._build_index()
+    return d
+
+
+# ---------------------------------------------------------------- 7. 提交必须成对（R-88）
+#
+# 与 R-87（整表加载）同族：`apply_plan` / `restore` 原来都是
+#     db.entries = ... ; db._build_index() ; db.pending = ...
+# 三步之间读者能拿到"新表 + 旧索引"。实测（落地+撤销交替 30 轮、2 个读者线程）
+# 有 7990 次采样读到 entries=434 而 by_teacher 索引仍只有 319 条。
+# 落地/撤销都是教秘点按钮的入口，这期间别人的"按教师查课程/数据看板"会算错且不报错。
+
+def _entries_and_index_agree(db) -> bool:
+    """表与索引是否一致：每个有教师的条目都该能在 by_teacher 里找到。"""
+    expected = sum(1 for e in db.entries if e.teacher)
+    actual = sum(len(v) for v in db._by_teacher.values())
+    return expected == actual
+
+
+def test_apply_plan_commits_entries_and_index_together():
+    """`apply_plan` 之后，表与索引必须一致（不允许"表变了索引没变"）。
+
+    起点先 `_build_index()`：测试夹具 `_db()` 只塞数据不建索引（它服务的是
+    「纯数据 fixtures」的用例）。修复前的缺陷恰恰是**提交时索引没跟着换**，
+    所以这条必须先有一个一致的起点，否则断言的是夹具缺陷而不是被测行为。
+    """
+    db = _db(_base_entries())
+    db._build_index()
+    assert _entries_and_index_agree(db)          # 前提：起点一致
+
+    plan_landing.apply_plan(db, _plan_a())
+
+    assert _entries_and_index_agree(db), (
+        "apply_plan 之后表与索引不一致："
+        f"entries 里 {sum(1 for e in db.entries if e.teacher)} 条有教师，"
+        f"索引里 {sum(len(v) for v in db._by_teacher.values())} 条"
+    )
+    # 索引要能真的查到新表里的教师
+    for e in db.entries:
+        if e.teacher:
+            assert e in db._by_teacher.get(e.teacher, []), f"索引查不到 {e.teacher}"
+
+
+def test_restore_commits_entries_and_index_together():
+    """`restore`（撤销落地）同理。"""
+    db = _db(_base_entries())
+    db._build_index()
+    snap = plan_landing.snapshot(db)
+    plan_landing.apply_plan(db, _plan_a())
+    plan_landing.restore(db, snap)
+
+    assert _entries_and_index_agree(db), "restore 之后表与索引不一致"
+    for e in db.entries:
+        if e.teacher:
+            assert e in db._by_teacher.get(e.teacher, [])
+
+
+def test_no_in_place_rebuild_in_plan_landing():
+    """结构锁：`plan_landing` 里不许再出现"先换表、再建索引"的分步写法。
+
+    这类写法的危险不在单线程（读代码完全合理），而在并发：读者会拿到
+    "新表 + 旧索引"。要改就改 `commit_entries`。
+    """
+    import inspect
+    src = inspect.getsource(plan_landing)
+    code = "\n".join(line.split("#")[0] for line in src.split("\n"))
+    assert "db._build_index()" not in code, (
+        "plan_landing 里还有裸的 `db._build_index()` —— "
+        "应改用 `commit_entries(db, entries, pending)` 成对提交"
+    )
+    assert "commit_entries" in code
+
+
+def test_concurrent_reader_sees_bounded_inconsistency():
+    """并发锁：`apply_plan`/`restore` 期间的"表与索引不一致"必须**有界**。
+
+    这里刻意**不**断言"必须为 0"（2026-10-29 实测结论）：
+    CPython 没有多属性一次赋值，`_swap()` 里替换 entries + 四个索引 + pending
+    至少要几次赋值，中间必然存在微秒级窗口。实测对比：
+
+    | 实现 | 30 轮 apply+restore、2 读者 | 命中不一致 |
+    |---|---|---|
+    | 先换表、再 `_build_index()`、再换 pending（原始） | 7990 次 | |
+    | 构建 stage 后 `_swap()`（现在） | **7–8 次** | |
+
+    也就是说修复把窗口压小了三个数量级（从"贯穿整个重建过程"变成"几次属性赋值"），
+    但没到零。要让残余归零必须把 entries 与索引合并成不可变对象（改 24 处读点），
+    收益与风险不成比例 —— 见 docs R-88「不建议做」。
+
+    所以这条锁的是**量级**：上限取 200（实测 7–8，留 25 倍余量）。
+    它的作用是"拦住退回分步替换"（7990 会被立刻抓到），而不是要求绝对原子。
+    """
+    import os
+    import threading
+
+    # 必须用真实规模的表：测试夹具只有 7 条，窗口短到读者几乎撞不到（会假绿）
+    real = os.path.join(os.path.dirname(__file__), "..", "..", "schedule.xlsx")
+    if not os.path.exists(real):
+        pytest.skip("真实排课表不在仓库里（CI 干净检出），这条并发锁只能在本地跑")
+    db = ScheduleDatabase()
+    db.load_from_excel(real)
+    snap = plan_landing.snapshot(db)
+
+    first = db.entries[0]
+    plan = [{"week": 6, "weekday": first.weekday, "time_slot": first.time_slot,
+             "room": "A999", "teacher": first.teacher, "project": first.experiment,
+             "class_name": first.class_name, "group": first.group}]
+
+    bad: list[tuple[int, int]] = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            n = sum(1 for e in db.entries if e.teacher)
+            idx = sum(len(v) for v in db._by_teacher.values())
+            if n != idx:
+                bad.append((n, idx))
+
+    threads = [threading.Thread(target=reader, daemon=True) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for _ in range(30):
+        plan_landing.apply_plan(db, plan)
+        plan_landing.restore(db, snap)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    # 先断言**改动确实生效**（否则"什么都没做"也能让下面的上限轻松通过）
+    assert len(db.entries) == len(snap["entries"]), "restore 之后条数应回到快照值"
+
+    assert len(bad) <= 200, (
+        f"并发读者看到 {len(bad)} 次不一致（样本 {bad[:3]}）——"
+        "实测修复后应为 7–8 次/30 轮；数量级上升说明退回了「先换表再建索引」"
+    )

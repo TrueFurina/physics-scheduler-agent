@@ -87,8 +87,35 @@ def _write_toxic_xlsx(path):
 
 
 def _assert_no_pii(blob, where):
-    """响应体（str 或 bytes）里不得出现手机号/邮箱形态的字符串。"""
-    text = blob.decode("utf-8", "ignore") if isinstance(blob, bytes) else str(blob)
+    """响应体里不得出现手机号/邮箱形态的字符串。
+
+    ⚠️ 扫之前先把 xlsx **解压**（2026-10-29 修的一个假阳性）：
+    原实现直接 `blob.decode("utf-8","ignore")` 然后正则扫 —— 但 xlsx 是 zip，
+    压缩流里**随机字节**偶尔会拼出 `T@I.Z` 这种"邮箱形态"。
+    实测一次全量跑就这么红过（`泄露邮箱形态字符串：['T@I.Z']`），
+    而同一份导出单独跑 20 次都复现不到 —— 典型的 flaky 假阳性。
+
+    它比"漏测"更难缠：报的是"泄露个人信息"，最容易被当成真问题去查；
+    而实际上那段字节来自 deflate 压缩流，与单元格内容毫无关系。
+
+    解压后只扫**文本部件**（xml / rels），既不会假阳性，也照样能抓到真泄漏
+    （真泄漏必然出现在 sheet XML 的字符串里）。
+    """
+    if isinstance(blob, bytes) and blob[:2] == b"PK":
+        import io
+        import zipfile
+
+        parts = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as z:
+                for name in z.namelist():
+                    if name.endswith((".xml", ".rels")):
+                        parts.append(z.read(name).decode("utf-8", "ignore"))
+        except zipfile.BadZipFile:
+            parts.append("")            # 坏包由调用方各自断言，这里不吞错
+        text = "\n".join(parts)
+    else:
+        text = blob.decode("utf-8", "ignore") if isinstance(blob, bytes) else str(blob)
     phones = PHONE_RE.findall(text)
     emails = EMAIL_RE.findall(text)
     assert not phones, f"{where} 泄露手机号形态字符串：{phones[:3]}"

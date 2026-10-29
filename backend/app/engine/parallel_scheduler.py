@@ -24,6 +24,7 @@ from collections import defaultdict, Counter
 from ortools.sat.python import cp_model
 
 from app.utils.excel_parser import ScheduleDatabase, looks_like_exam
+from app.engine.solver_factory import new_solver
 
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 # 真实表 433 条里 71 条（16%）在周六/周日 —— 一所学校"金工 5、6 周排周六"是常态。
@@ -496,8 +497,8 @@ class ParallelScheduler:
                                for i in range(n_u) for w in range(n_w)
                                for t in range(n_t) for r in range(n_r)))
 
-            solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = max_time_seconds
+            # 同 auto_scheduler：统一 worker 上限，避免内存随核数放大
+            solver = new_solver(max_time_seconds=max_time_seconds)
             status = solver.Solve(model)
 
             if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
