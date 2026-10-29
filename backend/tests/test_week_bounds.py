@@ -194,3 +194,39 @@ def test_impact_analysis_rejects_out_of_range_week(agent, monkeypatch):
     detail = str(getattr(ei.value, "detail", ei.value))
     assert "-1" in detail
     assert f"{LO}–{HI}" in detail
+
+
+# ---------- 5. 「这周/本周」与「第N周」同句 ----------
+# R23：`第6周` 与 `这周` 同时出现时，`target_week` 取了 `第6周` 的**字面值**，
+# 而没有把它当作**源周次**。整句「第六周的课上不了，这周先调一下」的语义是
+# 「从第 6 周挪到当前周」，结果却成了「挪到第 6 周」——调了个寂寞。
+#
+# 用户今天就在用第 6 周的课说"这周"，说明他是拿这个当**相对当下**的，
+# 对标 `下周` 分支（`base = source_week + 1`）的处理，`这周` 也应以源周次为基准。
+
+def test_this_week_with_source_week_is_relative_to_source(agent):
+    """「第6周的课上不了，这周调」→ 源周 6，目标 5（不是 6）。"""
+    r = _ask(agent, f"我是{MY_NAME}，第6周的{COURSE}上不了，这周先调一下")
+
+    assert r["success"] is True, r.get("message")
+    assert r["context"]["source_week"] == 6
+    assert r["target_week"] == 5, (
+        f"目标周应是源周−1=5，实际 {r['target_week']}（等于源周就是原地打转）"
+    )
+
+
+def test_this_week_alone_still_means_current_week(agent):
+    """只说「这周」= 按当前周处理，不因上面的改动而变。"""
+    r = _ask(agent, f"我是{MY_NAME}，把{COURSE}这周调一下")
+
+    assert r["success"] is True, r.get("message")
+    assert "source_week" not in (r.get("context") or {}) or r["context"]["source_week"] is None
+
+
+def test_this_week_at_first_week_is_refused_not_silently_wrapped(agent):
+    """源周 = 第 1 周时「这周」→ 第 0 周，超出范围，必须明说而不是夹成 1。"""
+    r = _ask(agent, f"我是{MY_NAME}，第1周的{COURSE}上不了，这周先调一下")
+
+    assert r["success"] is False
+    assert r["available_slots"] == []
+    assert f"第{LO}–{HI}周" in r["message"]
