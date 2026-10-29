@@ -255,8 +255,18 @@ def test_upload_master_endpoint_stores_tasks(monkeypatch, tmp_path):
     class _Up:
         filename = "m.xlsx"
 
-        async def read(self):
-            return p.read_bytes()
+        # 与真实 UploadFile.read(size) 签名一致：支持分块读取。
+        # 上传端点现在用 _read_upload_limited() 分块读并限大小，
+        # 桩若不接受 size 参数会 TypeError。
+        async def read(self, size: int = -1):
+            data = p.read_bytes()
+            if size is None or size < 0:
+                return data
+            if not hasattr(self, "_pos"):
+                self._pos = 0
+            chunk = data[self._pos:self._pos + size]
+            self._pos += len(chunk)
+            return chunk
 
     monkeypatch.setattr(api, "_upload_target", lambda name, suffixes: str(tmp_path / "saved.xlsx"))
     out = asyncio.run(api.upload_master(_Up()))

@@ -15,6 +15,12 @@ if (-not $RepoRoot) { $RepoRoot = "E:\Program\physics-scheduler-agent" }
 # numpy/OpenBLAS 在机器紧时会导入失败 —— 跑 Python 一律单线程（实测教训，见项目记忆）
 $env:OPENBLAS_NUM_THREADS = "1"
 
+# Demo mode: below, the launcher injects DEMO_MODE=1 + the demo password so
+# admin/admin123 stays consistent with the talk script. security.py only
+# accepts the default demo password when DEMO_MODE=1; production
+# (APP_ENV=production) refuses to start without a strong ADMIN_PASS (>= 16 chars).
+# Set ADMIN_PASS yourself if you need a stable non-demo value.
+
 $PythonExe = $env:PYTHON_EXE
 if (-not $PythonExe -or -not (Test-Path $PythonExe)) {
     $pyCandidates = @(

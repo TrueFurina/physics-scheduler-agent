@@ -9,17 +9,23 @@ uvicorn[standard]==0.52.4
 # /master/import-preview、/master/tasks-preview、/master/import 等）。
 # FastAPI 不内嵌它 —— 缺这个包时 `from app.main import app` 直接
 # RuntimeError，服务起不来（2026-10-24 交付评审 P0-1，干净环境复现两次）。
-python-multipart==0.0.20
+# 必须 >=0.0.32：0.0.20 存在无界 part 头 DoS（R12 实测
+# 单个 10MB header 耗时 1532ms，且发生在**鉴权之前**，攻击者无需令牌）。
+# 0.0.32 实测降到 2ms。详见 docs/依赖安全-20261029.md
+python-multipart==0.0.32
 
 # --- 配置与数据校验 ---
 pydantic==2.13.4
-python-dotenv==1.2.1
+python-dotenv==1.2.4
 
 # --- HTTP 客户端（调用外部 LLM 接口） ---
 httpx==0.28.1
 
 # --- 排课求解（并行排课 CP-SAT 模型） ---
-ortools==9.15.6755
+# 版本注意：9.15.6755 在 Python 3.12 上调用 CpSolver.Solve() 会段错误（SIGSEGV），
+# 且 Python 层无法捕获、pytest 直接中断。9.11.4210 实测正常（全量 368 passed）。
+# 详见 docs/ortools-compat.md；升级前请先在目标 Python 版本上跑最小复现。
+ortools==9.11.4210
 
 # --- Excel 解析 ---
 openpyxl==3.1.5

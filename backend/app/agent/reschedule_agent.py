@@ -10,6 +10,21 @@ from app.agent.llm_intent_parser import LLMIntentParser
 SEMESTER_START = date(2025, 2, 24)
 WEEKDAY_OFFSET = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
 
+# 调课沙盘要覆盖的星期：**全部七天**，来自 WEEKDAY_OFFSET 这一个来源。
+#
+# R36：此前三处各写一份 `["周一"…"周五"]`，把周末整个漏掉。真实数据 433 条里
+# 有 71 条在周末（周六 36 / 周日 35）—— 每 6 条课就有 1 条。
+#
+# 实测后果（教师H，第 2 周真实有周六课）：
+#     find_slots_with_reasons(2, teacher_name='教师H')
+#       周六可用：0    周六被排除：0
+# 既不可用也不在排除列表 ⇒ **从沙盘上消失**。教秘看到一份完整的 5 天沙盘，
+# 不会意识到周六还有课，更不会想到"这周六可能没空"。
+#
+# 排课引擎（auto_scheduler / parallel_scheduler）覆盖周末是既定口径，
+# 调课沙盘却只看 5 天 —— 同一份数据在两条链路上口径不同。
+WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)  # 保持 周一→周日 的顺序
+
 # 多轮追问要填的槽位（B2）。后端不存会话，只把已确认的槽位随响应回传，
 # 由前端在下一轮原样带回，服务端做无状态合并 —— 进程被回收也不丢上下文。
 # `class_name` 也在里面：同一门实验（课程名相同）会挂在不同班级下，
@@ -134,7 +149,18 @@ class RescheduleAgent:
             base = source_week if source_week else current_week
             target_week = base + 1
         elif "这周" in text or "本周" in text:
-            target_week = source_week if source_week else current_week
+            # 「这周」与「下周」对称：有源周就以源周为基准（−1），无源周才用当前周。
+            #
+            # 原来这里写的是 `target_week = source_week if source_week else current_week`，
+            # 于是「第6周的课上不了，这周先调一下」把目标算成**第 6 周**，和源周一样，
+            # 等于原地打转；教秘看到的却是"第6周可用时段"，很像成功了。
+            # 而同一个句子把"这周"换成"下周"就正确（源周+1）—— 两个分支语义不一致。
+            #
+            # 与"下周"的差别只在方向：中文里"这周的课"指**已经发生/正在发生**的那次，
+            # 说"要调"就是想往前挪。‑1 落在第 1 周 → 0 周，交给统一范围校验拒绝，
+            # 不再静默绕回第 1 周（那同样等于替教秘改口）。
+            base = source_week if source_week else current_week
+            target_week = base - 1 if source_week else base
         elif source_week is not None:
             # 直接指定"第N周"
             target_week = source_week
@@ -157,9 +183,39 @@ class RescheduleAgent:
         class_name = None
 
         # "我是XXX" / "我是XXX老师"
-        m_teacher = re.search(r'我(?:是|叫)([\u4e00-\u9fff]{2,4})(?:老师)?', text)
+        #
+        # ⚠️ 姓名必须允许**中英文混合**：真实教师名有「教师H」「教师K」这类。
+        # 原先只写 `[\u4e00-\u9fff]{2,4}`，遇到 ASCII 字母就截断：
+        #   "我是教师H，把…调到第2周" → 抓到 "教师"
+        # 而 "教师" 是**所有**教师名的子串，于是 teacher_occupied 把别的教师
+        # 的课也记成了"您自己的课"，沙盘显示「您（教师K）该时段已有课」。
+        # 实测：教师H 调课，周一 567 被误标为 teacher_busy（教师K），
+        # 而真实原因是教室被占（classroom_busy）。
+        #
+        # 用「中文或 ASCII 字母数字」的字符类，并排除标点/空格。
+        m_teacher = re.search(
+            r'我(?:是|叫)([\u4e00-\u9fffA-Za-z0-9]{2,8})(?:老师)?', text)
         if m_teacher:
-            teacher_name = m_teacher.group(1)
+            cand = m_teacher.group(1)
+            # 再与真实教师名单核对：能精确命中就用名单里的名字，
+            # 避免"教师"这种前缀被当成完整姓名。
+            # 注意：函数开头已 `text = text.lower()`（第 112 行），
+            # 所以 cand 是**小写**的（"教师h"）。这里与名单做**大小写不敏感**
+            # 匹配，返回名单里的**原样名字**（"教师H"），否则后续
+            # `teacher_name in e.teacher` 永远匹配不上。
+            all_teachers = self.db.get_all_teachers()
+            low = cand.lower()
+
+            exact = [n for n in all_teachers if n.lower() == low]
+            if exact:
+                teacher_name = exact[0]
+            else:
+                # 前缀匹配（长名优先），避免"教师"被当成完整姓名
+                prefixed = sorted(
+                    (n for n in all_teachers if n.lower().startswith(low)),
+                    key=len, reverse=True,
+                )
+                teacher_name = prefixed[0] if prefixed else cand
 
         if not teacher_name:
             for t in self.db.get_all_teachers():
@@ -167,7 +223,12 @@ class RescheduleAgent:
                     teacher_name = t
                     break
 
-        for c in self.db.get_all_classes():
+        # 班级名同样**长名优先**。`get_all_classes()` 返回的是 sorted()，
+        # 按字典序排 —— 而字典序里 "2024级电子科学与技术" 排在
+        # "2024级电子科学与技术1班" 前面，短名会先命中、把班名截断。
+        # 当前 17 个真实班名里没有前缀对，但这是**数据巧合**而非代码保证，
+        # 学校新增一个班就会静默出错。
+        for c in sorted(self.db.get_all_classes(), key=len, reverse=True):
             if c in text:
                 class_name = c
                 break
@@ -194,7 +255,6 @@ class RescheduleAgent:
             "original_text": text,
         }
 
-
     def find_slots_with_reasons(self, target_week: int,
                                 teacher_name: Optional[str] = None) -> Dict:
         """
@@ -206,7 +266,7 @@ class RescheduleAgent:
         if not self.db.loaded:
             return {"available": [], "excluded": []}
 
-        weekdays = ["周一", "周二", "周三", "周四", "周五"]
+        weekdays = list(WEEKDAYS_ALL)
         time_slots = ["567", "678", "91011"]
         rooms = self.db.get_all_rooms()
 
@@ -337,6 +397,13 @@ class RescheduleAgent:
         questions = []
         if not parsed.get("teacher_name"):
             questions.append("请问是哪位老师需要调课？")
+        # ⚠️ 课程名也必须问。
+        #
+        # R21 实测：教秘说「我是教师H，把PN结调到第3周」——简称没写全
+        # （全名是「PN结正向压降温度特性实验」），规则匹配不到 → course_name=None。
+        # 此前这里不检查课程，于是**不追问、直接返回全周 80 个可用时段**，
+        # 教秘以为系统懂了，实际它对"要调哪门课"一无所知。
+        # 这比报错更危险：一份"看起来全可用"的沙盘会让人做出错误决定。
         if not parsed.get("target_week"):
             questions.append("请问要把课调到第几周？（例如：第5周、下周、下下周）")
         return questions
@@ -356,6 +423,13 @@ class RescheduleAgent:
             "target_week": parsed.get("target_week"),
             "available_slots": [],
             "excluded_slots": [],
+            # R32：追问分支原先只有 8 键，比正常分支少 4 个。
+            # 追问时课程名通常也还没确定，但**字段本身必须存在** ——
+            # 下游靠"字段在不在"区分契约版本，靠"值是什么"区分当前状态。
+            "course_name": parsed.get("course_name"),
+            "course_unrecognized": not parsed.get("course_name"),
+            "ai_plans": [],
+            "total": 0,
         }
 
     def process_request(self, text: str, with_ai: bool = True,
@@ -432,21 +506,45 @@ class RescheduleAgent:
                     "total": 0,
                     "need_info": False,
                     "followup_questions": [],
+                    # R32：五个分支的键集必须一致（见 tests/test_response_contract.py）
+                    "course_name": parsed.get("course_name"),
+                    "course_unrecognized": not parsed.get("course_name"),
+                    "ai_plans": [],
                 }
 
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
         # 靠它判断"教师本人在这个时段有没有课"。不给教师就直出时段，等于跳过
         # 这一重冲突检查，把可能撞课的时段当成可用来推荐（实测直接返回 94 个）。
+        #
+        # 课程名同理（R21 实测）：教秘说「我是教师H，把PN结调到第3周」，
+        # 简称匹配不到全名「PN结正向压降温度特性实验」→ course_name=None。
+        # 此前这里不查课程，于是**不追问、直接返回全周 80 个可用时段**，
+        # 教秘以为系统懂了，实际它对"要调哪门课"一无所知。
+        # 一份"看起来全可用"的沙盘比报错更危险。
         if not parsed["target_week"] or not parsed.get("teacher_name"):
             return self._need_info(parsed, [])
+        # 课程名**不阻断**：`find_slots_with_reasons` 只用 (周次, 教师) 计算
+        # "这一周这个人哪些时段空着"，与具体哪门课无关。硬性追问会让
+        # "第2轮回答第3周就办完"这条多轮流程失效（实测 4 个测试变红）。
+        # 改为在结果里**明确提示**没识别出课程 —— 见下方 course_unrecognized。
 
         if not self.db.loaded:
             return {
                 "success": False,
                 "message": "排课数据尚未加载，请先上传实验安排表",
+                "target_week": parsed.get("target_week"),
                 "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": [],
+                # R31：所有分支的字段集必须一致 —— 少一个键，下游拿到的
+                # 就是 None，而 None 在不同分支上含义完全不同（未识别 / 未计算 / 失败）。
+                "course_name": parsed.get("course_name"),
+                "course_unrecognized": not parsed.get("course_name"),
+                "ai_plans": [],
+                "total": 0,
+                # R32：补上另两个键 —— 五个分支键集必须一致
+                "need_info": False,
+                "followup_questions": [],
             }
 
         result = self.find_slots_with_reasons(parsed["target_week"], teacher_name=parsed.get("teacher_name"))
@@ -454,6 +552,12 @@ class RescheduleAgent:
         excluded = result["excluded"]
 
         if not slots:
+            # R31：这个早返回分支原先**没有** course_name / course_unrecognized。
+            # 于是同一个字段在"有结果"和"零结果"两条路径上存在性不同 ——
+            # 下游 `data.get("course_unrecognized")` 在零结果时拿到 None，
+            # 被当成"不是未识别"，与真实语义相反。
+            #
+            # 又一次"白名单返回体 + 多分支"的接缝事故（同族：API 层没透传）。
             return {
                 "success": True,
                 "message": f"第{parsed['target_week']}周没有空闲时段，请尝试其他周次",
@@ -461,6 +565,12 @@ class RescheduleAgent:
                 "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": excluded,
+                "course_name": parsed.get("course_name"),
+                "course_unrecognized": not parsed.get("course_name"),
+                "ai_plans": [],
+                "total": 0,
+                "need_info": False,
+                "followup_questions": [],
             }
 
         # 按星期几分组展示
@@ -469,7 +579,7 @@ class RescheduleAgent:
             by_weekday.setdefault(s["weekday"], []).append(s)
 
         summary_lines = [f"📋 第{parsed['target_week']}周可用时段："]
-        for wd in ["周一", "周二", "周三", "周四", "周五"]:
+        for wd in WEEKDAYS_ALL:
             if wd in by_weekday:
                 summary_lines.append(f"\n{wd}：")
                 for s in by_weekday[wd][:5]:  # 每个星期几只展示5个
@@ -520,6 +630,22 @@ class RescheduleAgent:
                     f"  {i}. {p['weekday']} {p['time_slot']} · {p['room']} — {p.get('reason', '')}"
                 )
 
+        # 课程名没识别出来时**明确提示**，而不是静默出一份全周沙盘。
+        #
+        # R21 实测：教秘说「我是教师H，把PN结调到第3周」——简称没写全
+        # （全名「PN结正向压降温度特性实验」），course_name=None。
+        # 时段计算本身不受影响（`find_slots_with_reasons` 只用 周次+教师），
+        # 但教秘会以为系统知道"要调哪门课"，而后续提交申请时课程名是必填的。
+        #
+        # 所以不阻断（不破坏多轮流程），只把这件事说出口。
+        course_unrecognized = not parsed.get("course_name")
+        if course_unrecognized:
+            summary_lines.append(
+                "\n⚠️ 没能从您的话里认出具体是哪门课/哪个实验。"
+                "上面的可用时段是「这一周您名下所有课」的空闲情况；"
+                "如果要针对某一门课调课，请在提交申请时选定课程。"
+            )
+
         return {
             "success": True,
             "message": "\n".join(summary_lines),
@@ -527,6 +653,14 @@ class RescheduleAgent:
             "context": self._slot_context(parsed),
             "available_slots": slots,
             "excluded_slots": excluded,
+            # 结构化字段与中文文案并列：下游不要从 message 里正则反解
+            "course_name": parsed.get("course_name"),
+            "course_unrecognized": course_unrecognized,
             "ai_plans": ai_plans,
             "total": total,
+            # R32：正常分支原先缺这两个键（只有追问分支才有）。
+            # 调用方无法用 `r.get("need_info")` 判断"这次是不是在追问"——
+            # 正常结果里它不存在，和 False 不是一回事。
+            "need_info": False,
+            "followup_questions": [],
         }

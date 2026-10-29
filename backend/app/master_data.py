@@ -185,12 +185,33 @@ class MasterData:
     def upsert_course(self, name: str) -> str:
         name = (name or "").strip()
         if not name:
-            raise ValueError("课程名不能为空")
+            raise ValueError("课程名不能为空，请填写后再提交")
         self.courses.setdefault(name, {"experiments": set()})
         return name
 
     def delete_course(self, name: str):
-        """删课程：其下实验项目归回默认课程（不删项目，只改归属）。"""
+        """删课程：其下实验项目归回默认课程（不删项目，只改归属）。
+
+        ⚠️ R39：删除**默认课程本身**时必须明确拒绝。
+
+        原实现的语义是"把实验归回 DEFAULT_COURSE，再把课程条目删掉"。
+        当 `name == DEFAULT_COURSE` 时这两步互相抵消：
+
+            25 个实验的 course 被改成「大学物理实验」（它们本来就是这个）
+            pop 掉「大学物理实验」
+            _rebuild_courses() 又从实验聚合回来 → 课程原样回来
+
+        调用方拿到 `success: True`，界面上课程还在。**什么都没删，却报了成功。**
+
+        这不是"默认课程不让删"的简单规则：项目本来就只有一门课，
+        而它恰好是默认课程 —— 也就是说，当前数据下**任何课程都删不掉**。
+        与其静默空转，不如说清楚"默认课程是兜底归属，不能删"。
+        """
+        if name == DEFAULT_COURSE:
+            raise ValueError(
+                f"「{name}」是默认课程（其他课程的实验项目被删后会归回这里），不能删除。"
+                "如需调整，请先把要保留的实验项目改归到其他课程。"
+            )
         for ex in self.experiments.values():
             if ex.get("course") == name:
                 ex["course"] = DEFAULT_COURSE
@@ -201,7 +222,7 @@ class MasterData:
                           rooms: Optional[List[str]] = None, classes: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("实验项目名不能为空")
+            raise ValueError("实验项目名不能为空，请填写后再提交")
         ex = self.experiments.setdefault(
             name, {"course": DEFAULT_COURSE, "teachers": set(), "rooms": set(), "classes": set()})
         if course:
@@ -243,7 +264,7 @@ class MasterData:
     def upsert_teacher(self, name: str, projects: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("教师名不能为空")
+            raise ValueError("教师名不能为空，请填写后再提交")
         t = self.teachers.setdefault(name, {"projects": set()})
         if projects is not None:
             for p in projects:
@@ -265,7 +286,7 @@ class MasterData:
     def upsert_room(self, name: str, capacity: Optional[int] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("场地名不能为空")
+            raise ValueError("场地名不能为空，请填写后再提交")
         r = self.rooms.setdefault(name, {"capacity": None})
         if capacity is not None:
             r["capacity"] = capacity
@@ -283,7 +304,7 @@ class MasterData:
                      weekdays: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("班级名不能为空")
+            raise ValueError("班级名不能为空，请填写后再提交")
         c = self.classes.setdefault(name, _new_class())
         if groups is not None:
             for g in groups:

@@ -55,6 +55,14 @@ from app.engine.solver_factory import new_solver
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五"]
 TIME_SLOTS = ["567", "678", "91011"]
 
+# 所有 note 共用的范围声明（R37）。
+#
+# 周末已有课**仍记为占用**（`_busy` 按 `e.weekday` 收集，实测与周末课撞教室 0 次），
+# 但周末从不作为候选时段。这两件事的区别必须写出来：
+#   · 不写 → 读者以为"这周的空档都考虑过了"（实际少考虑了两天）
+#   · 写了 → 读者知道"周末得自己去排，或改这一句的范围"
+WEEKDAY_ONLY_NOTE = "；**只在工作日（周一至周五）排课，周末不作候选**（周末已有课仍计入占用）"
+
 # 时段标签 → 真实时钟区间（分钟）。`567` 与 `678` 在 15:45 首尾相接但**不重叠**。
 _SLOT_SPAN = {
     "567": (13 * 60 + 30, 15 * 60 + 45),
@@ -489,6 +497,10 @@ class AutoScheduler:
             "capacity_checked": False,
             "note": (
                 "OR-Tools CP-SAT 约束求解：教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
+                # R37：必须说清搜索范围。周末已有课**仍算占用**（不会被撞上），
+                # 但周末从不作为候选 —— 它不是"排不下"，是"没参与"。
+                # 不写这句，读者会以为这周的空档都考虑过了。
+                + WEEKDAY_ONLY_NOTE
                 + "；容量未校验（安排表无容量字段）"
             ),
         }
@@ -841,9 +853,10 @@ class AutoScheduler:
             "elapsed_s": round(time.time() - t_start, 1),
             "capacity_checked": False,
             "note": (
-                f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学段分 {len(chunks)} 片求解，"
+                f"全校一键排课（分片 CP-SAT）：{len(sections_all)} 个教学任务分 {len(chunks)} 片求解，"
                 f"片间回填教室/教师/班级占用；段级求解、组级产出（同周同教室连续格）；"
                 f"教室/教师/班级三重互斥 + 与现有安排表逐周对齐"
+                + WEEKDAY_ONLY_NOTE
                 + "；容量未校验（安排表无容量字段）"
             ),
         }
@@ -864,6 +877,16 @@ class AutoScheduler:
             unchecked.append("教室容量（安排表无容量字段）")
         if unchecked:
             lines.append("⚠️ 未校验：" + "、".join(unchecked))
+
+        # R37：排课范围也必须说出口。
+        #
+        # 前端只读 `message`（`setAutoScheduleMsg(r.data.message)`），
+        # 不读 `data.note` —— 只改 note 教秘看不到。
+        # 而"只在工作日排"这件事直接影响他怎么读这份结果：
+        # 看到"第3周：8 个教学任务"，他会以为这周就这些课；
+        # 实际周末那两天根本没参与搜索。
+        lines.append(
+            "📅 排课范围：**周一至周五**（周末不作候选；周末已有课仍计入占用，不会被撞掉）")
 
         if result["conflicts"]:
             lines.append(f"⚠️ 未排上 {len(result['conflicts'])} 个：")

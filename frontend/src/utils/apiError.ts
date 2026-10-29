@@ -50,6 +50,14 @@ function retryAfterSeconds(headers: Record<string, unknown> | undefined): number
   return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
 }
 
+/** 从响应头取 `X-Max-Upload-Bytes`（http 层），取不到返回 0。 */
+function maxUploadBytes(headers: Record<string, unknown> | undefined): number {
+  if (!headers) return 0;
+  const raw = headers['x-max-upload-bytes'] ?? headers['X-Max-Upload-Bytes'];
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /**
  * 从后端响应体里取一句话。
  * - `{ detail: "中文原因" }`        → 原样用（后端文案比前端猜得准）
@@ -90,6 +98,18 @@ export function describeApiError(err: unknown, fallback = '请求失败，请稍
       return wait
         ? `请求过于频繁，请 ${wait} 秒后再试。`
         : detail || '请求过于频繁，请稍后再试。';
+    }
+
+    // 413 单独处理：后端 `detail` 会写"设置环境变量 MAX_UPLOAD_MB"，
+    // 那是**运维**要做的事，教秘看到只会更困惑。而且 ensureHint 会追加
+    // "请稍后重试或刷新页面"——重试同一个超限文件永远不会成功。
+    //
+    // 正确的指引是：换个更小的文件（或拆分表格）。
+    // 上限值从 `X-Max-Upload-Bytes` 头读，前端不必硬编码 32MB。
+    if (status === 413) {
+      const cap = maxUploadBytes(res.headers);
+      const capText = cap ? `（上限 ${Math.round(cap / (1024 * 1024))} MB）` : '';
+      return `文件太大${capText}，请压缩表格或拆分成多个文件后重试。`;
     }
 
     if (detail) return ensureHint(detail);

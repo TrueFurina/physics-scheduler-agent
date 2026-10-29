@@ -1,6 +1,19 @@
 /// <reference types="vite/client" />
 
 /**
+ * `?raw` 导入的兜底声明（R35）。
+ *
+ * vite/client 已经声明了 `*?raw`，但本项目没在 tsconfig 的 `types` 里引用它，
+ * 于是 `import x from '....py?raw'` 在 tsc 下报「找不到模块」。
+ * 这里补一条最小的 ambient 声明，让"从后端源码读常量做一致性比对"这类
+ * 测试能在 tsc 下通过，而不是靠 `any` 绕过。
+ */
+declare module '*?raw' {
+  const content: string;
+  export default content;
+}
+
+/**
  * 给 `import.meta.env` 之外的项目级全局类型补丁。
  *
  * 当前只有一条：**测试里读文件/路径**要用到 `node:fs` / `node:path`。
@@ -13,7 +26,7 @@
  */
 declare module 'node:fs' {
   const fs: {
-    readFileSync(path: string, encoding: 'utf-8'): string;
+    readFileSync(path: string, encoding: 'utf-8' | 'utf8'): string;
   };
   export default fs;
 }
@@ -27,3 +40,6 @@ declare module 'node:path' {
 }
 
 declare const __dirname: string;
+
+/** 测试里的 CJS 读源码用法（vitest 运行时存在，tsc 需要 ambient 声明）。 */
+declare const require: (id: string) => any;

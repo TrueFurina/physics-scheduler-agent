@@ -313,8 +313,15 @@ function App() {
     room: { label: '场地课表', file: '场地课表_全部场地.xlsx' },
     master: { label: '基础数据台账', file: '实验排课基础数据台账.xlsx' },
   };
+  // 导出中状态：班级课表要 17 个 sheet，实测约 750ms（openpyxl 每 sheet 固定开销），
+  // 场地课表约 500ms。没有反馈时用户会重复点击，导致重复下载。
+  // 用 kind 而不是布尔值：可区分"正在导班级课表"与"正在导台账"。
+  const [exportingKind, setExportingKind] = useState<'class' | 'room' | 'master' | null>(null);
+
   const handleExportStandard = async (kind: 'class' | 'room' | 'master') => {
     const meta = EXPORT_KINDS[kind];
+    if (exportingKind) return;          // 防重复点击
+    setExportingKind(kind);
     try {
       const r = kind === 'class'
         ? await rescheduleApi.exportClassSchedule()
@@ -325,6 +332,8 @@ function App() {
     } catch (err: any) {
       // 失败要说清是哪一类 —— "导出失败"四个字教秘不知道该重试哪个按钮
       setMsg(`${meta.label}导出失败：${describeApiError(err)}`);
+    } finally {
+      setExportingKind(null);
     }
   };
 
@@ -478,7 +487,7 @@ function App() {
       pendingOtpRef.current = await sendPhoneCode(loginPhone);
       setCodeSent(true);
     } catch (err: any) {
-      setLoginErr(err?.message || '验证码发送失败');
+      setLoginErr(describeCloudError(err) || '验证码发送失败');
     } finally {
       setLoginBusy(false);
     }
@@ -501,7 +510,7 @@ function App() {
       const s = await verifyPhoneCode(pending, loginCode.trim());
       finishLogin(s);
     } catch (err: any) {
-      setLoginErr(err?.message || '验证码校验失败');
+      setLoginErr(describeCloudError(err) || '验证码校验失败');
     } finally {
       setLoginBusy(false);
     }
@@ -512,7 +521,7 @@ function App() {
     try {
       await signInWithWechat();   // 同标签页跳转，回调回到 location.origin
     } catch (err: any) {
-      setLoginErr(err?.message || '微信登录发起失败');
+      setLoginErr(describeCloudError(err) || '微信登录发起失败');
     }
   };
 
@@ -833,7 +842,18 @@ function App() {
         setRequestStatus('');
         setAiPlans([]);
         setPlansLoading(false);
-        setNlMsg(`✅ ${r.data.message.split('\n')[0]}`);
+        // 只取首行，是给这条灰字摘要用的（明细在沙盘页里）。
+        //
+        // ⚠️ R33：但「课程没认出来」的警告**也**在 message 里，位置在末尾
+        // （实测 35 行，警告在第 34 行）。只取首行 ⇒ 教秘一个字都看不到，
+        // 屏幕上只有一句 ✅，而他对“要调哪门课”其实一无所知。
+        // R21 写的是“只把这件事说出口”，但出口在 message 尾部，
+        // 前端从不展示 message 全文 —— 提示从来没有真正到达用户。
+        let summary = '✅ ' + r.data.message.split(String.fromCharCode(10))[0];
+        if (data.course_unrecognized) {
+          summary += '｜⚠️ 没认出是哪门课，请在下方「选择课程」里确认';
+        }
+        setNlMsg(summary);
         setView('reschedule');
         // 课程识别不出来（同名跨班/没提课程）时沙盘照常打开，由教秘在下拉里补选
         if (course && ctx.target_week) scheduleAiPlans(course, ctx.target_week);
@@ -843,10 +863,25 @@ function App() {
       // 这类消息原来是灰字，和"✅ 第7周可用时段"看起来是同一种反馈，
       // 教秘读不出"这条路走不通"。
       if (r.data.success === false) {
+        // 拒绝时同样要清空：否则屏幕上留着上一次的沙盘，而请输入框已清空，
+        // 教秘看到的是「❌ 范围外」+ 一片绿格子，两者互相矛盾。
+        setAvailable([]);
+        setExcluded(data.excluded_slots || []);
+        setAiPlans([]);
+        setPlansLoading(false);
         setNlMsg(`❌ ${r.data.message}`);
         return;
       }
-      setNlMsg(r.data.message);
+      // success=true 但一个时段都没有 —— 通常是「第N周该教师名下所有课时段
+      // 都已被占满」。这条也必须标成失败态，且**同样要清掉上一轮的沙盘**：
+      // 原来它走的是最后那行灰字，既不报错也不打开沙盘，教秘输入框清空后
+      // 屏幕上仍是上一次查询的绿格子 —— 看着像这次也成功了。
+      setAvailable([]);
+      setExcluded(data.excluded_slots || []);
+      setAiPlans([]);
+      setPlansLoading(false);
+      setNlMsg(`❌ ${r.data.message}`);
+      return;
     } catch (err: any) {
       setNlMsg(`❌ 请求失败：${describeApiError(err)}`);
     } finally {
@@ -1370,6 +1405,7 @@ function App() {
                 onExportClass={() => handleExportStandard('class')}
                 onExportRoom={() => handleExportStandard('room')}
                 onExportMaster={() => handleExportStandard('master')}
+                exportingKind={exportingKind}
               />
             </Suspense>
           )}

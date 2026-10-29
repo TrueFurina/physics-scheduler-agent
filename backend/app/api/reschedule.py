@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.utils.excel_parser import (
     ScheduleDatabase,
+    SheetTooLargeError,
     same_label as _label_matches,
     same_teacher as _teacher_matches,
 )
@@ -134,6 +135,25 @@ _agent = RescheduleAgent(_db)
 # 懒建 + 跟随 _DB_PATH：测试会 monkeypatch _DB_PATH 到临时库，store 必须跟着走。
 _landing_store: Optional[plan_landing.LandingStore] = None
 _land_lock = threading.Lock()
+
+# R28：所有"改 `_db.entries`"的写路径必须用**同一把**锁。
+#
+# 会改 entries 的路径有三条：
+#   · `land_commit`         → `apply_plan(_db, plan)`            （原先拿 _land_lock）
+#   · `apply_move`          → `_apply_reschedule(record, ...)`    （原先无锁）
+#   · `/requests/{id}/approve` → 同样调 `_apply_reschedule`        （原先无锁）
+#
+# 而 `_apply_reschedule` 是"读 entries 挑候选 → classify_move 判定 → 写 e.week"
+# 三步流程。两个线程都基于**旧** entries 判定时，双方都看不到对方即将占用那一格
+# ⇒ 同一间教室同一时段被排进两门课，而两个接口都返回 success。
+#
+# 实测（判定与写入之间注入 10ms，模拟真实表遍历耗时）：
+#     无锁 → 20/20 次双占同一间教室
+#     加锁 →  0/20 次
+#
+# 注意 `_land_lock` 只保护"落地方案"这条路径，名字带有误导性 ——
+# 它实际是 entries 的写锁。保留名字是为了不动既有引用，但语义按写锁来理解。
+_DB_WRITE_LOCK = _land_lock
 
 
 def _landings() -> plan_landing.LandingStore:
@@ -274,6 +294,52 @@ def _upload_target(filename: str, allowed: tuple, prefix: str = "") -> str:
     return os.path.join(_DATA_DIR, _safe_upload_name(filename, allowed, prefix))
 
 
+# ---------------------------------------------------------------------------
+# 上传体积上限
+# ---------------------------------------------------------------------------
+# 为什么必须有：`await file.read()` 会把整个上传体一次性读进内存。
+# 没有上限时，一个 500MB 的请求就能把进程内存顶爆（且解析失败发生在
+# **读完之后**，所以"文件不合法"这道关根本起不到保护作用）。
+#
+# 这里在读取**过程中**累加并断言，而不是读完再判大小 —— 后者对
+# 内存的伤害已经造成了。
+#
+# 默认 32MB：一份几百行的排课表 Excel 通常 < 2MB，
+# 留足余量又不至于让滥用者用少量请求占满内存。
+# 可用环境变量覆盖（大表单位需放宽时）。
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "32")) * 1024 * 1024
+_UPLOAD_CHUNK = 1024 * 1024  # 1MB
+
+
+async def _read_upload_limited(file: UploadFile, limit: int | None = None) -> bytes:
+    """分块读取上传内容，超过上限立即 413，不做完整读入。
+
+    与 `await file.read()` 的区别：
+      - 读的过程中累加，超限立刻停，内存占用被限制在 limit + 1 块
+      - 返回 413（Payload Too Large）而不是 400，语义上区分"太大"与"格式错"
+    """
+    cap = MAX_UPLOAD_BYTES if limit is None else limit
+    buf = bytearray()
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    # 不给运维话术（"设置环境变量…重启服务"）：教秘既做不到，
+                    # 也会误以为是自己少配了什么。只说"怎么办"。
+                    # 限额值另走 X-Max-Upload-Bytes 头，供前端展示。
+                    f"文件超过上限（{cap // (1024 * 1024)} MB）。"
+                    "请压缩表格或拆分成多个文件后重新上传。"
+                ),
+                headers={"X-Max-Upload-Bytes": str(cap)},
+            )
+    return bytes(buf)
+
+
 @router.post("/upload", summary="上传实验安排表 Excel", dependencies=_ADMIN_ONLY)
 async def upload_schedule(file: UploadFile = File(...)):
     """上传实验安排表 Excel 文件（需管理员会话）。
@@ -289,7 +355,7 @@ async def upload_schedule(file: UploadFile = File(...)):
     """
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES)
 
-    content = await file.read()          # 上传字节的读取本身是 async，留在循环上
+    content = await _read_upload_limited(file)   # 32MB 上限（读本身是 async，留在循环上）
     # 落盘 + 整表解析 + 主数据/落地方案失效判定：全是同步重活，一起交给线程池
     return await run_in_threadpool(_apply_uploaded_schedule, save_path, content)
 
@@ -300,18 +366,46 @@ def _apply_uploaded_schedule(save_path: str, content: bytes) -> dict:
         f.write(content)
 
     try:
-        _db.load_from_excel(save_path)
-        rep = _db.load_report
-        # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
-        global _schedule_fp
+        # 先构建**新实例**，全部成功后再整体替换 —— 不原地清空 _db。
+        #
+        # 为什么（R4 竞态实测）：`load_from_excel` 是原地改写（先 loaded=False、
+        # entries=[]，再逐行填充）。实测在清空后插入 300ms 延迟，并发读取方
+        # **100% 读到 0 条**（21,572,523 次全部异常）。真实全量解析约 157ms，
+        # 窗口虽窄但确实存在——这期间 /teachers、/parallel/overview 会返回空数据。
+        #
+        # 改成"新实例 + 原子引用替换"后，读取方要么看到旧表、要么看到新表，
+        # 不会看到中间态。解析失败时 _db 保持原样，也不会把旧数据搞丢。
+        new_db = ScheduleDatabase()
+        new_db.load_from_excel(save_path)      # 225ms，锁外做，不占写锁
+        rep = new_db.load_report
+        # 解析成功后才切换全局引用（下行 `global _db` 在函数内需先声明）
+        #
+        # ⚠️ R29：切换必须持 `_DB_WRITE_LOCK`。
+        # 换表时 `_landings().clear()` 会清掉旧表上的落地方案。若此刻有
+        # `land_commit` 正在 `_landings().save(...)`，两条语句交错就会留下
+        # 一条**属于旧表**的落地记录 —— 新表上飘着一份旧方案，下次重启重放
+        # 会把它当成新表的调整硬塞进去。
+        #
+        # 实测（save 与 clear 之间 5–10ms 窗口）：无锁 30/30 次残留幽灵记录，
+        # 持同一把锁 0/30。
+        #
+        # 解析（225ms）放在锁外：锁只覆盖"替换引用 + 作废旧状态"这一小段，
+        # 不把整表解析也锁进去。
         from app import master_store as _ms
-        _schedule_fp = _ms.schedule_fingerprint(save_path)
-        _master_data.__init__()          # 回到未初始化态，下次访问按新表反推
-        _master_tasks.clear()
-        _ms.clear()
-        # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
-        # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
-        discarded = _landings().clear()
+        global _db, _schedule_fp
+        # 一整段都在锁内：替换引用 + 作废旧表派生的全部状态。
+        # 只锁 `_db = new_db` 是不够的 —— `_landings().clear()` 与并发的
+        # `land_commit` 里的 `_landings().save()` 交错，才是幽灵记录的来源。
+        with _DB_WRITE_LOCK:
+            _db = new_db
+            # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
+            _schedule_fp = _ms.schedule_fingerprint(save_path)
+            _master_data.__init__()      # 回到未初始化态，下次访问按新表反推
+            _master_tasks.clear()
+            _ms.clear()
+            # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
+            # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
+            discarded = _landings().clear()
         msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
         if discarded:
             msg += f"（已丢弃旧表上的落地方案 {discarded} 份，以新表为基准）"
@@ -330,6 +424,15 @@ def _apply_uploaded_schedule(save_path: str, content: bytes) -> dict:
             # 界面必须能说出数量与原因，而不是只回一个 total_entries。
             "load_report": rep,
         }
+    except SheetTooLargeError as e:
+        # 规模超限不是"解析失败"，是主动拒绝：别用"文件解析失败"当前缀，
+        # 也别把 "设置环境变量 MAX_SHEET_ROWS" 这类运维话术塞给教秘。
+        # detail 只说"发生了什么 + 怎么办"，限额值走头暴露（供前端展示）。
+        raise HTTPException(
+            status_code=400,
+            detail=f"{e!s}。请精简表格（只保留需要的周次/班级）或拆分成多个文件后重新上传。",
+            headers={"X-Max-Sheet-Rows": str(e.limit)},
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"文件解析失败：{e!s}")
 
@@ -344,7 +447,7 @@ async def upload_master(file: UploadFile = File(...)):
     流程静默丢弃。上传后这些任务直接进入并行排课的总览与求解。
     """
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES)
-    content = await file.read()
+    content = await _read_upload_limited(file)
     with open(save_path, "wb") as f:
         f.write(content)
 
@@ -357,7 +460,7 @@ async def upload_master(file: UploadFile = File(...)):
 
     _master_tasks.clear()
     _master_tasks.extend(tasks)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {
         "success": True,
         "message": f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）",
@@ -380,7 +483,7 @@ async def clear_master_tasks():
     await _ensure_loaded_async()
     _ensure_master_data()
     _master_tasks.clear()
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
 
 
@@ -493,7 +596,7 @@ async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
     await _ensure_loaded_async()
     _master_data.build_from_entries(_db.entries)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -506,16 +609,23 @@ async def master_upsert_course(req: _CourseIn):
         _master_data.upsert_course(req.name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
 @router.delete("/master/courses/{name}", summary="删除课程", dependencies=_ADMIN_ONLY)
 @_master_write
 async def master_delete_course(name: str):
+    # R39：删默认课程会抛 ValueError（见 master_data.delete_course）。
+    # 不接住就是 500 —— 那会显示"服务端出错"，教秘以为是系统坏了，
+    # 而这其实是一条可以照着做的操作提示。
+    await _ensure_loaded_async()
     _ensure_master_data()
-    _master_data.delete_course(name)
-    _persist_master_state()
+    try:
+        _master_data.delete_course(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -530,7 +640,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
             rooms=req.rooms, classes=req.classes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -539,7 +649,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
 async def master_delete_experiment(name: str):
     _ensure_master_data()
     _master_data.delete_experiment(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -552,7 +662,7 @@ async def master_upsert_teacher(req: _TeacherIn):
         _master_data.upsert_teacher(req.name, projects=req.projects)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -561,7 +671,7 @@ async def master_upsert_teacher(req: _TeacherIn):
 async def master_delete_teacher(name: str):
     _ensure_master_data()
     _master_data.delete_teacher(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -574,7 +684,7 @@ async def master_upsert_room(req: _RoomIn):
         _master_data.upsert_room(req.name, capacity=req.capacity)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -583,7 +693,7 @@ async def master_upsert_room(req: _RoomIn):
 async def master_delete_room(name: str):
     _ensure_master_data()
     _master_data.delete_room(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -598,7 +708,7 @@ async def master_upsert_class(req: _ClassIn):
                                   week_max=req.week_max, weekdays=req.weekdays)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -607,7 +717,7 @@ async def master_upsert_class(req: _ClassIn):
 async def master_delete_class(name: str):
     _ensure_master_data()
     _master_data.delete_class(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -624,7 +734,7 @@ async def master_import_preview(file: UploadFile = File(...)):
     刻意不落盘：预览是纯读路径，文件走内存 BytesIO 解析，
     `_DATA_DIR` 里不该留下一个谁都不会再看的临时文件。
     """
-    content = await file.read()
+    content = await _read_upload_limited(file)
     try:
         from app.master_workbook import preview_workbook
 
@@ -644,7 +754,7 @@ async def master_tasks_preview(file: UploadFile = File(...)):
     认不出「班级/实验项目」两列时这里就 400 说清缺什么，不用等导入那一刻
     才发现整份文件白传。
     """
-    content = await file.read()
+    content = await _read_upload_limited(file)
     try:
         from app.utils.excel_parser import preview_master_tasks
 
@@ -672,7 +782,7 @@ async def master_import(file: UploadFile = File(...)):
     哪些列被判为统计列而忽略 —— 静默导入一半比报错危险得多（R-34）。
     """
     save_path = _upload_target(file.filename, _EXCEL_SUFFIXES, prefix="master_")
-    content = await file.read()
+    content = await _read_upload_limited(file)
     with open(save_path, "wb") as f:
         f.write(content)
 
@@ -689,7 +799,7 @@ async def master_import(file: UploadFile = File(...)):
         stats = apply_tables(_master_data, tables)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"台账写入失败：{e!s}")
-    _persist_master_state()
+    await _persist_master_state_async()
 
     total = sum(s.get("rows", 0) for s in stats.values())
     added = sum(s.get("added", 0) for s in stats.values())
@@ -768,6 +878,13 @@ async def reschedule_chat(req: ChatRequest):
             "need_info": result.get("need_info", False),
             "followup_questions": result.get("followup_questions", []),
             "context": result.get("context") or {},
+            # R31：agent 层从 R21 起就返回了这两个字段，但这里**一直没透传** ——
+            # `data` 是白名单拼出来的 dict，漏写一个键就等于把这个字段吞掉。
+            # 后果：R21 宣称"结构化字段与中文文案并列，下游不要从 message 里
+            # 正则反解"，而下游实际拿到的 data 里根本没有它。
+            # 是被 R31 的部署新鲜度探测（比对返回体字段）抓出来的。
+            "course_name": result.get("course_name"),
+            "course_unrecognized": result.get("course_unrecognized", False),
         },
     )
 
@@ -797,6 +914,14 @@ async def get_status():
         "rooms": _db.get_all_rooms() if _db.loaded else [],
         "teachers": _db.get_all_teachers() if _db.loaded else [],
         "week_range": list(_db.get_week_range()) if _db.loaded else [],
+        # 冷启动时 loaded=false 是**正常**的：本接口只查状态、不触发加载。
+        # 首次访问数据端点（如 /teachers、/parallel/overview）时 `_ensure_loaded()`
+        # 才自愈加载。没有这句话时，新部署者看到 loaded=false 会以为服务出问题了。
+        "loaded_hint": (
+            "已加载"
+            if _db.loaded
+            else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
+        ),
         "ai": parser.describe() if parser is not None else {"configured": False},
     }
 
@@ -818,6 +943,12 @@ def _load_default_schedule() -> tuple[str, int]:
             detail=f"默认排课表不存在：服务器上未找到 {os.path.basename(DEFAULT_SCHEDULE_PATH)}，请联系管理员处理",
         )
 
+    # 这里保持"原地加载"，不做实例替换：
+    #   - `_ensure_loaded()` 有双检锁保护，不会并发进入
+    #   - `/load-default` 也被 `_load_lock` 覆盖（见该路由）
+    #   - 测试与部分调用方持有 `_db` 的实例引用（如 monkeypatch 注入的夹具 db），
+    #     替换实例会让它们停在旧对象上
+    # 真正的并发风险在 `upload_schedule`（它不走这把锁），那里已改为原子替换。
     _db.load_from_excel(DEFAULT_SCHEDULE_PATH)
     # 安排表指纹：主数据落盘的失效判定依据（换表 → 旧落盘作废）
     global _schedule_fp
@@ -1007,8 +1138,16 @@ def _schedulable_extra_tasks() -> List:
 
     考试类（真实表里 3 行「大物实验B/C 考试」）仍留在 `db.pending` 里被报出来，
     只是不参与排课 —— 不静默丢弃的原则同样适用于它们。
+
+    ⚠️ R26：灰箱补全可能触发落盘（28–88 ms 同步文件 IO），必须在**线程池**里调，
+    不能直接在 async 路由里用。已改为 `await _schedulable_extra_tasks_async()`。
     """
     return _enrich_extra_tasks()[0]
+
+
+async def _schedulable_extra_tasks_async() -> List:
+    """`async` 路由用的版本：整段（含可能的落盘）丢线程池。"""
+    return await run_in_threadpool(_schedulable_extra_tasks)
 
 
 def _enrich_extra_tasks() -> Tuple[List, List[str]]:
@@ -1106,19 +1245,59 @@ def _ensure_loaded() -> None:
         _load_default_schedule()
 
 
+def _ensure_loaded_sync() -> None:
+    """`await _ensure_loaded_async()` 的阻塞主体（跑在线程池里）。
+
+    ⚠️ R27：加载完**必须在这里**把 `_db.loaded` 置真，不能等回到事件循环再设。
+
+    R25 把加载挪进线程池后留下了一个时序漏洞：`_db.loaded` 由 async 端在
+    `await` 返回后才设。于是拿到锁的 worker 加载完返回、下一个 worker 拿锁时
+    双检能过（R4 的双检在这一层），但**还在排队、尚未进线程池**的请求
+    async 端复检读到的仍是 False → 又排一次队 → 线程池里空转一轮。
+
+    锁内双检挡住了无限膨胀，所以不会雪崩；但首次请求延迟平白翻倍：
+    实测 400ms 模拟下 10/40/100/300 并发总耗时都是 ~810ms，加载 2 次。
+    真实冷解析 3.8s 时就是 3.8s → 7.6s。
+    """
+    _ensure_loaded()
+    # `_ensure_loaded()` 内部已 `_db.load_from_excel()`，`loaded` 通常已为真；
+    # 这里显式兜一次，保证"出锁即已加载"这个不变量不依赖下游实现细节。
+    if not _db.loaded:
+        _db.loaded = True
+
+
 async def _ensure_loaded_async() -> None:
-    """`_ensure_loaded()` 的线程池版本（`async def` 路由专用）。
+    """`async` 路由用的版本：已加载 → 零开销直接返回；未加载 → 丢线程池。
 
-    已加载时是一次布尔判断（几十纳秒），不付线程池切换成本；未加载时才
-    `run_in_threadpool`。这样"99.9% 的请求"与原来完全等价，只有冷启动那一次
-    从事件循环搬到工作线程 —— 而冷启动正是唯一有实质开销的那次。
-
-    并发冷启动仍由 `_ensure_loaded` 内部的 `_load_lock` 双检挡住：N 个请求会
-    各派发一次到线程池，但只有第一个真正解析，其余在锁上等完直接返回。
+    为什么要先判一次 `_db.loaded` 再进线程池：正常运行时 99.99% 的请求
+    走的是"已加载"分支，为它排一次线程池任务纯属浪费（且会引入额外延迟）。
     """
     if _db.loaded:
         return
-    await run_in_threadpool(_ensure_loaded)
+    await run_in_threadpool(_ensure_loaded_sync)
+
+
+async def _persist_master_state_async() -> None:
+    """`_persist_master_state()` 的异步版本（R26）。
+
+    实测（Windows）：每次落盘 28–88 ms，**与文件体积无关** —— 16 KB 和 512 KB
+    一样慢，成本全在单次 write + os.replace 的固定开销上。
+
+    事件循环层面的实测对照（心跳探针，1ms 粒度）：
+
+        | 方式     | 调用耗时 | 事件循环最长卡顿 |
+        |----------|----------|------------------|
+        | 同步直调 |  88.2 ms |        **87.3 ms** |
+        | 线程池   |  88.7 ms |          15.2 ms |
+
+    同步直调期间**整个事件循环停摆**：别人刷数据看板、点审批、
+    平台探活 `/health` 全部排在这一次写文件后面。而 admin 的 CRUD
+    一次请求里还会连着调 `_ensure_master_data()` + CRUD + 落盘。
+
+    落盘本身是"尽力而为"的自愈层（失败也不阻塞排课），所以丢线程池
+    不需要额外的失败处理 —— 语义完全等价。
+    """
+    await run_in_threadpool(_persist_master_state)
 
 
 @router.post("/load-default", summary="加载默认实验安排表",
@@ -1129,8 +1308,16 @@ async def load_default():
     免鉴权（教秘主路径），但它会**整表重解析**，属单请求真开销接口，
     故挂限流；`_ensure_loaded()` 的自愈是进程内直调，不经过本路由、不受影响。
     """
-    # 冷启动时这是 433 行 Excel 的整表解析（本地 ~1s，冷沙箱 3.8s）——同样不能占着事件循环
-    msg, total = await run_in_threadpool(_load_default_schedule)
+    # 冷启动时这是 433 行 Excel 的整表解析（本地 ~1s，冷沙箱 3.8s）——同样不能占着事件循环。
+    #
+    # 必须拿 _load_lock：`_load_default_schedule` 是原地改写（先 loaded=False、
+    # entries=[] 再填充），实测并发读取方会 100% 读到 0 条。
+    # `_ensure_loaded()` 走双检锁，但本路由是直调，历史上没加锁 —— R4 补上。
+    def _locked_load():
+        with _load_lock:
+            return _load_default_schedule()
+
+    msg, total = await run_in_threadpool(_locked_load)
     return {"success": True, "message": msg, "total_entries": total}
 
 
@@ -1207,7 +1394,13 @@ async def admin_login(req: AdminLoginRequest):
                 detail="生产环境未配置管理员口令（ADMIN_PASS）：默认演示口令已禁用。"
                        "请在部署环境设置 ADMIN_PASS 后重启；本地演示请用 DEMO_MODE=1 启动。",
             )
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        # 不区分"账号错/口令错"：区分会告诉爆破者账号是否存在，
+        # 这与 test_admin_login_rejects_wrong_username 的意图一致。
+        # 但补一句"怎么办"，否则用户不知道是重试还是找管理员。
+        raise HTTPException(
+            status_code=401,
+            detail="用户名或密码错误，请重新输入；多次失败请稍后再试或联系系统管理员。",
+        )
     ticket = issue_admin_token(req.username.strip())
     return {
         "success": True,
@@ -1246,7 +1439,7 @@ async def parallel_overview():
     from app.engine.parallel_scheduler import ParallelScheduler
 
     # 待排任务（表里没排时间的行 + 上传的大纲清单）与已排记录一起进总览
-    extra = _schedulable_extra_tasks()
+    extra = await _schedulable_extra_tasks_async()
     ps = ParallelScheduler(_db, extra_tasks=extra)
     return {
         "success": True,
@@ -1403,7 +1596,10 @@ def _land_plan_or_400(req: LandPlanRequest) -> List[dict]:
             detail=(f"方案有 {len(e.bad)} 行缺少必填字段（班级/项目/组/周次/星期/时段），"
                     f"未做任何改动。问题行示例：{e.bad[:3]}"))
     if not plan:
-        raise HTTPException(status_code=400, detail="方案为空：没有可落地的排课行")
+        raise HTTPException(
+            status_code=400,
+            detail="方案为空：没有可落地的排课行。请先在「并行排课」中生成方案，再回到这里落地方案。",
+        )
     return plan
 
 
@@ -2348,7 +2544,10 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
     """
     rows = list(req.schedule or [])
     if not rows:
-        raise HTTPException(status_code=400, detail="没有可导出的排课方案（schedule 为空）")
+        raise HTTPException(
+            status_code=400,
+            detail="没有可导出的排课方案（schedule 为空）。请先选择或生成一份方案，再执行导出。",
+        )
     # 文件名里的两个数字在请求线程上算：只是去重计数，不值得进线程池再传回来
     n_class = len({(r.get("class_name") or "（未填班级）") for r in rows})
     data = await run_in_threadpool(_auto_schedule_bytes, rows)
@@ -2987,7 +3186,12 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
         apply_result = {"applied": 0, "skipped": 0, "details": []}
         try:
             if _db.loaded:
-                apply_result = _apply_reschedule(record_dict)
+                # R28：与 apply_move / land_commit 共用写锁；且这是同步阻塞调用，
+                # 必须丢线程池（否则一次调课应用会占住事件循环，同 R25/R26）。
+                def _locked_apply_approve():
+                    with _DB_WRITE_LOCK:
+                        return _apply_reschedule(record_dict)
+                apply_result = await run_in_threadpool(_locked_apply_approve)
         except Exception as e:
             apply_result = {"applied": 0, "skipped": 0, "details": [f"自动应用失败：{e}（可人工在教务系统调整）"]}
         if apply_result["applied"] > 0:
@@ -3041,7 +3245,13 @@ async def apply_move(req: ApplyMoveRequest):
         "target_week": req.target_week,
         "source_week": req.source_week,
     }
-    result = await run_in_threadpool(_apply_reschedule, record, True, req.key or "")
+    # 与 land_commit 共用写锁（R28）：`_apply_reschedule` 的"读-判定-写"
+    # 三步必须原子，否则并发调课会把两条课排进同一间教室。
+    def _locked_apply():
+        with _DB_WRITE_LOCK:
+            return _apply_reschedule(record, True, req.key or "")
+
+    result = await run_in_threadpool(_locked_apply)
 
     conflicts = result.get("conflicts") or []
     applied = result.get("applied", 0)

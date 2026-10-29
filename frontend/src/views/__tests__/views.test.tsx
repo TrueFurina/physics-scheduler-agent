@@ -10,6 +10,8 @@
  * 背景：App.tsx 从 1711 行拆成 987 行 + 7 个视图后，这些视图之前**没有任何自动化保护**，
  * 只能靠跑一遍浏览器探针发现回归。探针慢且依赖环境，这里补最便宜的一层。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { Teacher, TeacherCourse } from '../../api/client';
@@ -138,8 +140,14 @@ describe('AdminView', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: '同意' }));
     expect(onApprove).toHaveBeenCalledWith(42, true, '同意调课');
+    // R34：驳回不再一键提交写死理由 —— 先进入填写态，理由由管理员填。
+    // （原先这里断言的就是 '时间冲突，请重新选择'，那正是要修的行为：
+    //   管理员因别的原因驳回，教师收到的却是"时间冲突"，会去改错东西。）
     fireEvent.click(screen.getByRole('button', { name: '驳回' }));
-    expect(onApprove).toHaveBeenCalledWith(42, false, '时间冲突，请重新选择');
+    expect(onApprove).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '教室检修' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认驳回' }));
+    expect(onApprove).toHaveBeenCalledWith(42, false, '教室检修');
   });
 
   it('0 工单显示空态（演示时不能是一块空白）', () => {
@@ -583,5 +591,120 @@ describe('DashboardView', () => {
     );
     expect(screen.getByText(/9\.4%/)).toBeTruthy();
     expect(screen.getByText(/448 格\/间/)).toBeTruthy();
+  });
+
+  /**
+   * 导出中的按钮状态（R13 性能基线的后果固化）。
+   *
+   * 班级课表要生成 17 个 sheet，实测约 750ms；场地课表约 500ms。
+   * 没有反馈时用户会以为没响应而重复点击 → 重复下载。
+   */
+  describe('导出中状态', () => {
+    const noop = () => {};
+
+    it('exportingKind=class 时该按钮显示"正在生成…"并禁用', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+          exportingKind="class"
+        />,
+      );
+      const generating = screen.getByRole('button', { name: /正在生成/ });
+      expect((generating as HTMLButtonElement).disabled).toBe(true);
+      // 原"班级课表"按钮已变为"正在生成"，因此不再以原名存在
+      expect(screen.queryByRole('button', { name: /班级课表/ })).toBeNull();
+      // 其他两类仍是原名
+      expect(screen.getByRole('button', { name: /场地课表/ })).toBeTruthy();
+    });
+
+    it('导出中所有导出按钮都禁用（防并发导出）', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+          exportingKind="room"
+        />,
+      );
+      for (const re of [/正在生成/, /班级课表/, /基础数据台账/]) {
+        const btn = screen.getByRole('button', { name: re });
+        expect((btn as HTMLButtonElement).disabled).toBe(true);
+      }
+    });
+
+    it('未导出时按钮可点击且无"正在生成"', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+        />,
+      );
+      expect((screen.getByRole('button', { name: /班级课表/ }) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.queryByRole('button', { name: /正在生成/ })).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R24：自然语言调课「零空闲时段」的静默回执
+//
+// 后端 `process_request` 在「该教师本周所有课时段全被占满」时返回
+// `success=True` + `available_slots=[]` + 「第N周没有空闲时段，请尝试其他周次」。
+// 前端原来的分支是：
+//
+//     if (data.available_slots?.length) { ...打开沙盘; return }
+//     if (r.data.success === false) { setNlMsg(`❌ ...`); return }
+//     setNlMsg(r.data.message)        // ← 零时段落到这里：灰字，无 ❌
+//
+// 三个后果叠在一起：
+//   1. 没有 ❌，和「✅ 第7周可用时段」是同一副灰字长相 —— 读不出"走不通"；
+//   2. 不打开沙盘，`available` 仍是**上一次查询**的绿格子；
+//   3. 输入框照常清空，视觉上像刚提交成功了一次。
+//
+// 这条路径跑在 App.tsx 的事件处理器里，没有可挂载的浅层组件，所以用
+// **源码契约**守卫：上面三条语义都必须能在源码里找到对应语句。
+// ---------------------------------------------------------------------------
+describe('App.tsx 自然语言调课的零时段回执（R24）', () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, '../../../src/App.tsx'), 'utf8',
+  );
+
+  /** 取出 handleNlReschedule 的函数体（到「返回身份选择」为止）。 */
+  function nlBody(): string {
+    const start = src.indexOf('const handleNlReschedule');
+    const end = src.indexOf('// 返回身份选择');
+    expect(start, 'handleNlReschedule 不见了').toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return src.slice(start, end)
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n');
+  }
+
+  it('零时段分支明确标成失败态（❌），不能落回普通灰字', () => {
+    const body = nlBody();
+    const empty = body.slice(body.indexOf("if (r.data.success === false)"));
+    expect(empty).toMatch(/setNlMsg\(`❌ \$\{r\.data\.message\}`\)/);
+    // 末尾那行"原样透传 message"的兜底必须已经被 return 挡住
+    expect(empty).not.toMatch(/\n\s*setNlMsg\(r\.data\.message\);\s*\n\s*\}\s*catch/);
+  });
+
+  it('零时段与拒绝分支都必须清空上一轮沙盘（否则旧绿格子冒充新结果）', () => {
+    const body = nlBody();
+    const tail = body.slice(body.indexOf("if (r.data.success === false)"));
+    const clears = (tail.match(/setAvailable\(\[\]\)/g) || []).length;
+    expect(clears).toBeGreaterThanOrEqual(2);   // 拒绝 1 次 + 零时段 1 次
   });
 });

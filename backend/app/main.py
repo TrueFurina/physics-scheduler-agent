@@ -88,6 +88,11 @@ async def lifespan(_app: FastAPI):
     放在 lifespan 而不是模块导入期，是为了让"导入 main"（测试、静态检查）
     不产生任何后台线程；只有真正起服务时才预热。
     """
+    # 启动时把管理员口令状态写进日志（不含口令本身）。
+    # 随机口令意味着重启后旧会话失效、管理员需重新登录——这是运维必须知道的信息。
+    from app.security import log_admin_password_state
+
+    log_admin_password_state(logging.getLogger("app.security"))
     warmup.start_background()
     yield
 
