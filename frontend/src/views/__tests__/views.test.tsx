@@ -10,6 +10,8 @@
  * 背景：App.tsx 从 1711 行拆成 987 行 + 7 个视图后，这些视图之前**没有任何自动化保护**，
  * 只能靠跑一遍浏览器探针发现回归。探针慢且依赖环境，这里补最便宜的一层。
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { Teacher, TeacherCourse } from '../../api/client';
@@ -646,5 +648,57 @@ describe('DashboardView', () => {
       expect((screen.getByRole('button', { name: /班级课表/ }) as HTMLButtonElement).disabled).toBe(false);
       expect(screen.queryByRole('button', { name: /正在生成/ })).toBeNull();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R24：自然语言调课「零空闲时段」的静默回执
+//
+// 后端 `process_request` 在「该教师本周所有课时段全被占满」时返回
+// `success=True` + `available_slots=[]` + 「第N周没有空闲时段，请尝试其他周次」。
+// 前端原来的分支是：
+//
+//     if (data.available_slots?.length) { ...打开沙盘; return }
+//     if (r.data.success === false) { setNlMsg(`❌ ...`); return }
+//     setNlMsg(r.data.message)        // ← 零时段落到这里：灰字，无 ❌
+//
+// 三个后果叠在一起：
+//   1. 没有 ❌，和「✅ 第7周可用时段」是同一副灰字长相 —— 读不出"走不通"；
+//   2. 不打开沙盘，`available` 仍是**上一次查询**的绿格子；
+//   3. 输入框照常清空，视觉上像刚提交成功了一次。
+//
+// 这条路径跑在 App.tsx 的事件处理器里，没有可挂载的浅层组件，所以用
+// **源码契约**守卫：上面三条语义都必须能在源码里找到对应语句。
+// ---------------------------------------------------------------------------
+describe('App.tsx 自然语言调课的零时段回执（R24）', () => {
+  const src = fs.readFileSync(
+    path.resolve(__dirname, '../../../src/App.tsx'), 'utf8',
+  );
+
+  /** 取出 handleNlReschedule 的函数体（到「返回身份选择」为止）。 */
+  function nlBody(): string {
+    const start = src.indexOf('const handleNlReschedule');
+    const end = src.indexOf('// 返回身份选择');
+    expect(start, 'handleNlReschedule 不见了').toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return src.slice(start, end)
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n');
+  }
+
+  it('零时段分支明确标成失败态（❌），不能落回普通灰字', () => {
+    const body = nlBody();
+    const empty = body.slice(body.indexOf("if (r.data.success === false)"));
+    expect(empty).toMatch(/setNlMsg\(`❌ \$\{r\.data\.message\}`\)/);
+    // 末尾那行"原样透传 message"的兜底必须已经被 return 挡住
+    expect(empty).not.toMatch(/\n\s*setNlMsg\(r\.data\.message\);\s*\n\s*\}\s*catch/);
+  });
+
+  it('零时段与拒绝分支都必须清空上一轮沙盘（否则旧绿格子冒充新结果）', () => {
+    const body = nlBody();
+    const tail = body.slice(body.indexOf("if (r.data.success === false)"));
+    const clears = (tail.match(/setAvailable\(\[\]\)/g) || []).length;
+    expect(clears).toBeGreaterThanOrEqual(2);   // 拒绝 1 次 + 零时段 1 次
   });
 });
