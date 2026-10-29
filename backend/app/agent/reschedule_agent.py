@@ -157,9 +157,39 @@ class RescheduleAgent:
         class_name = None
 
         # "我是XXX" / "我是XXX老师"
-        m_teacher = re.search(r'我(?:是|叫)([\u4e00-\u9fff]{2,4})(?:老师)?', text)
+        #
+        # ⚠️ 姓名必须允许**中英文混合**：真实教师名有「教师H」「教师K」这类。
+        # 原先只写 `[\u4e00-\u9fff]{2,4}`，遇到 ASCII 字母就截断：
+        #   "我是教师H，把…调到第2周" → 抓到 "教师"
+        # 而 "教师" 是**所有**教师名的子串，于是 teacher_occupied 把别的教师
+        # 的课也记成了"您自己的课"，沙盘显示「您（教师K）该时段已有课」。
+        # 实测：教师H 调课，周一 567 被误标为 teacher_busy（教师K），
+        # 而真实原因是教室被占（classroom_busy）。
+        #
+        # 用「中文或 ASCII 字母数字」的字符类，并排除标点/空格。
+        m_teacher = re.search(
+            r'我(?:是|叫)([\u4e00-\u9fffA-Za-z0-9]{2,8})(?:老师)?', text)
         if m_teacher:
-            teacher_name = m_teacher.group(1)
+            cand = m_teacher.group(1)
+            # 再与真实教师名单核对：能精确命中就用名单里的名字，
+            # 避免"教师"这种前缀被当成完整姓名。
+            # 注意：函数开头已 `text = text.lower()`（第 112 行），
+            # 所以 cand 是**小写**的（"教师h"）。这里与名单做**大小写不敏感**
+            # 匹配，返回名单里的**原样名字**（"教师H"），否则后续
+            # `teacher_name in e.teacher` 永远匹配不上。
+            all_teachers = self.db.get_all_teachers()
+            low = cand.lower()
+
+            exact = [n for n in all_teachers if n.lower() == low]
+            if exact:
+                teacher_name = exact[0]
+            else:
+                # 前缀匹配（长名优先），避免"教师"被当成完整姓名
+                prefixed = sorted(
+                    (n for n in all_teachers if n.lower().startswith(low)),
+                    key=len, reverse=True,
+                )
+                teacher_name = prefixed[0] if prefixed else cand
 
         if not teacher_name:
             for t in self.db.get_all_teachers():
