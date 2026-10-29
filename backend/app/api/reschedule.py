@@ -372,7 +372,7 @@ async def upload_master(file: UploadFile = File(...)):
 
     _master_tasks.clear()
     _master_tasks.extend(tasks)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {
         "success": True,
         "message": f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）",
@@ -453,7 +453,7 @@ async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
     await _ensure_loaded_async()
     _master_data.build_from_entries(_db.entries)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -465,7 +465,7 @@ async def master_upsert_course(req: _CourseIn):
         _master_data.upsert_course(req.name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -473,7 +473,7 @@ async def master_upsert_course(req: _CourseIn):
 async def master_delete_course(name: str):
     _ensure_master_data()
     _master_data.delete_course(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -487,7 +487,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
             rooms=req.rooms, classes=req.classes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -495,7 +495,7 @@ async def master_upsert_experiment(req: _ExperimentIn):
 async def master_delete_experiment(name: str):
     _ensure_master_data()
     _master_data.delete_experiment(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -507,7 +507,7 @@ async def master_upsert_teacher(req: _TeacherIn):
         _master_data.upsert_teacher(req.name, projects=req.projects)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -515,7 +515,7 @@ async def master_upsert_teacher(req: _TeacherIn):
 async def master_delete_teacher(name: str):
     _ensure_master_data()
     _master_data.delete_teacher(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -527,7 +527,7 @@ async def master_upsert_room(req: _RoomIn):
         _master_data.upsert_room(req.name, capacity=req.capacity)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -535,7 +535,7 @@ async def master_upsert_room(req: _RoomIn):
 async def master_delete_room(name: str):
     _ensure_master_data()
     _master_data.delete_room(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -549,7 +549,7 @@ async def master_upsert_class(req: _ClassIn):
                                   week_max=req.week_max, weekdays=req.weekdays)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -557,7 +557,7 @@ async def master_upsert_class(req: _ClassIn):
 async def master_delete_class(name: str):
     _ensure_master_data()
     _master_data.delete_class(name)
-    _persist_master_state()
+    await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
 
@@ -638,7 +638,7 @@ async def master_import(file: UploadFile = File(...)):
         stats = apply_tables(_master_data, tables)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"台账写入失败：{e!s}")
-    _persist_master_state()
+    await _persist_master_state_async()
 
     total = sum(s.get("rows", 0) for s in stats.values())
     added = sum(s.get("added", 0) for s in stats.values())
@@ -913,8 +913,16 @@ def _schedulable_extra_tasks() -> List:
 
     考试类（真实表里 3 行「大物实验B/C 考试」）仍留在 `db.pending` 里被报出来，
     只是不参与排课 —— 不静默丢弃的原则同样适用于它们。
+
+    ⚠️ R26：灰箱补全可能触发落盘（28–88 ms 同步文件 IO），必须在**线程池**里调，
+    不能直接在 async 路由里用。已改为 `await _schedulable_extra_tasks_async()`。
     """
     return _enrich_extra_tasks()[0]
+
+
+async def _schedulable_extra_tasks_async() -> List:
+    """`async` 路由用的版本：整段（含可能的落盘）丢线程池。"""
+    return await run_in_threadpool(_schedulable_extra_tasks)
 
 
 def _enrich_extra_tasks() -> Tuple[List, List[str]]:
@@ -1020,6 +1028,29 @@ async def _ensure_loaded_async() -> None:
     if _db.loaded:
         return
     await run_in_threadpool(_ensure_loaded_sync)
+
+
+async def _persist_master_state_async() -> None:
+    """`_persist_master_state()` 的异步版本（R26）。
+
+    实测（Windows）：每次落盘 28–88 ms，**与文件体积无关** —— 16 KB 和 512 KB
+    一样慢，成本全在单次 write + os.replace 的固定开销上。
+
+    事件循环层面的实测对照（心跳探针，1ms 粒度）：
+
+        | 方式     | 调用耗时 | 事件循环最长卡顿 |
+        |----------|----------|------------------|
+        | 同步直调 |  88.2 ms |        **87.3 ms** |
+        | 线程池   |  88.7 ms |          15.2 ms |
+
+    同步直调期间**整个事件循环停摆**：别人刷数据看板、点审批、
+    平台探活 `/health` 全部排在这一次写文件后面。而 admin 的 CRUD
+    一次请求里还会连着调 `_ensure_master_data()` + CRUD + 落盘。
+
+    落盘本身是"尽力而为"的自愈层（失败也不阻塞排课），所以丢线程池
+    不需要额外的失败处理 —— 语义完全等价。
+    """
+    await run_in_threadpool(_persist_master_state)
 
 
 @router.post("/load-default", summary="加载默认实验安排表",
@@ -1147,7 +1178,7 @@ async def parallel_overview():
     from app.engine.parallel_scheduler import ParallelScheduler
 
     # 待排任务（表里没排时间的行 + 上传的大纲清单）与已排记录一起进总览
-    extra = _schedulable_extra_tasks()
+    extra = await _schedulable_extra_tasks_async()
     ps = ParallelScheduler(_db, extra_tasks=extra)
     return {
         "success": True,
