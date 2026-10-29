@@ -753,3 +753,72 @@ def test_extract_tokens_dedup_under_many_duplicates():
     req = _Req({"authorization": ["Bearer same"] * 500})
     got = _extract_tokens(req)
     assert len(got) == 1, f"500 个重复头应压成 1 个候选，实际 {len(got)}"
+
+
+# ---------------------------------------------------------------------------
+# 15. 短行保护（R2 探针发现）
+# ---------------------------------------------------------------------------
+# 发现过程：用 openpyxl 构造「合并单元格表头」的文件（A1:D1 合并），
+# 上传后返回 400「文件解析失败：tuple index out of range」。
+#
+# 根因：`for row in ...: row[0], row[1], ..., row[7]` 硬解包，
+# 而合并单元格会让后续数据行的 tuple 变短（实测只剩 4 列）。
+# IndexError 被上层 `except Exception` 包成"解析失败"，把 Python 内部错误
+# 泄漏给了教秘。
+#
+# 这类畸形表在生产中很常见（教秘习惯合并表头单元格）。
+
+
+def _xlsx_with_merged_header() -> bytes:
+    import io as _io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["实验安排表", None, None, None])
+    ws.merge_cells("A1:D1")
+    ws.append(["周次", "星期", "节次", "班级"])
+    ws.append([1, "周一", "567", "甲班"])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_merged_header_does_not_crash():
+    """合并单元格表头不得导致 IndexError，也不得把内部错误泄漏到 detail。"""
+    r = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("merged.xlsx", _xlsx_with_merged_header(), "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, f"合并表头应能解析，实际 {r.status_code}: {r.text[:200]}"
+    body = r.json()
+    # 那条 4 列的数据行没有实验项目/场地/教师 → 判为待排而非崩溃
+    assert body["total_entries"] >= 0
+    # 关键：不得出现 Python 内部错误字样
+    assert "index out of range" not in r.text
+    assert "tuple index" not in r.text
+
+
+def test_short_rows_are_reported():
+    """短行应被计数并出现在 load_report 里，而不是静默补齐。"""
+    from app.utils.excel_parser import ScheduleDatabase
+    import tempfile, os as _os
+
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    _os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            f.write(_xlsx_with_merged_header())
+        db = ScheduleDatabase()
+        db.load_from_excel(path)
+        assert db.load_report.get("short_rows", None) == 1, (
+            f"短行未计数：{db.load_report.get('short_rows')}"
+        )
+    finally:
+        try:
+            _os.unlink(path)
+        except OSError:
+            pass

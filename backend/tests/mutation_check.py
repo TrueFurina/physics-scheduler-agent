@@ -41,6 +41,7 @@ FILES = {
     "M8": ["tests/test_api_auth.py"],
         "M9": ["tests/test_api_auth.py"],
         "M10": ["tests/test_api_auth.py"],
+        "M11": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -120,6 +121,13 @@ MUTANTS = [
     return [t for t in candidates if not (t in seen or seen.add(t))]""",
         """    return candidates  # MUTANT: 去掉去重""",
         "extract_tokens",
+    ),
+    (
+        "M11", "短行不补齐（合并单元格表头会崩）",
+        "app/utils/excel_parser.py",
+        "            if len(row) < 8:",
+        "            if False:  # MUTANT: 不补齐短行",
+        "merged_header",
     ),
 ]
 

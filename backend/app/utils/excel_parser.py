@@ -533,6 +533,7 @@ class ScheduleDatabase:
         self.pending: List["PendingTask"] = []
         # 本次加载的解析账本：进了多少条、多少条待排、多少条被丢、为什么丢
         self.load_report: Dict = {}
+        self._short_rows: int = 0
         self.sheet_name: str = ""
         self.loaded = False
 
@@ -580,7 +581,16 @@ class ScheduleDatabase:
         # 翻译成课程名。两列探测刻意分开（码翻译 ≠ 课程列探测），课程列永远优先。
         category_col = None if course_col is not None else _detect_course_category_col(sheet)
 
+        self._short_rows = 0
         for row in bounded_iter_rows(sheet, min_row=3, values_only=True):
+            # 短行保护：合并单元格的表头会让后续数据行的 tuple 变短
+            # （实测：A1:D1 合并后，数据行只剩 4 列 → IndexError:
+            #   tuple index out of range → 被上层包成
+            #   "文件解析失败：tuple index out of range"，把 Python 内部错误泄漏给教秘）。
+            # 这里补齐到 8 列，交给下面的既有逻辑判空并计入 skipped。
+            if len(row) < 8:
+                self._short_rows += 1
+                row = tuple(row) + (None,) * (8 - len(row))
             week, weekday, time_slot, class_name, group, experiment, room, teacher = \
                 row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
 
@@ -692,6 +702,9 @@ class ScheduleDatabase:
             # 考试类不是被"过滤掉"，是**单独报出来**：不静默丢弃的原则同样适用于它们
             "pending_excluded_reason": "考试/考核类事项不参与实验排课（时间与场地逻辑不同）",
             "skipped": len(self.skipped),
+            # 短行（列数不足 8）已被补齐为 None 继续处理，这里只报数量：
+            # 合并单元格的表头常导致后续行变短，教秘应当知道自己的文件"结构不规整"。
+            "short_rows": getattr(self, "_short_rows", 0),
             "sheet": self.sheet_name,
             "pending_samples": [repr(t) for t in schedulable[:5]],
             "pending_excluded_samples": [repr(t) for t in excluded[:5]],
