@@ -134,7 +134,18 @@ class RescheduleAgent:
             base = source_week if source_week else current_week
             target_week = base + 1
         elif "这周" in text or "本周" in text:
-            target_week = source_week if source_week else current_week
+            # 「这周」与「下周」对称：有源周就以源周为基准（−1），无源周才用当前周。
+            #
+            # 原来这里写的是 `target_week = source_week if source_week else current_week`，
+            # 于是「第6周的课上不了，这周先调一下」把目标算成**第 6 周**，和源周一样，
+            # 等于原地打转；教秘看到的却是"第6周可用时段"，很像成功了。
+            # 而同一个句子把"这周"换成"下周"就正确（源周+1）—— 两个分支语义不一致。
+            #
+            # 与"下周"的差别只在方向：中文里"这周的课"指**已经发生/正在发生**的那次，
+            # 说"要调"就是想往前挪。‑1 落在第 1 周 → 0 周，交给统一范围校验拒绝，
+            # 不再静默绕回第 1 周（那同样等于替教秘改口）。
+            base = source_week if source_week else current_week
+            target_week = base - 1 if source_week else base
         elif source_week is not None:
             # 直接指定"第N周"
             target_week = source_week
