@@ -512,3 +512,142 @@ def test_every_apply_reschedule_call_site_holds_write_lock():
         "_apply_reschedule 调用点没持写锁（并发调课会把两条课排进同一间教室）："
         + chr(10) + chr(10).join(offenders)
     )
+
+
+
+# ---------- R29：上传新表与调课应用之间的实例替换窗口 ----------
+#
+# `upload_schedule` 的写法是"先构建新实例 new_db，全部成功后再 `_db = new_db`
+# 替换引用"。这个模式解决了 R4 的中间态问题（读取方不会看到空表），
+# **但没有解决"替换那一刻"**：
+#
+#   t=0   land_commit 拿到 _db（旧实例），开始 apply_plan
+#   t=1   upload 完成解析，`_db = new_db`
+#   t=2   land_commit 继续在**旧实例**上写 e.week
+#   t=3   旧实例被丢弃 → 这次落地永久消失，接口却返回 success
+#
+# 实测 upload 解析耗时 225 ms（缓存命中 1 ms），窗口不小。
+#
+# 另一面：`apply_move` 里 `if _db.loaded` 与 `run_in_threadpool(...)` 之间
+# 有 await 点，`_apply_reschedule` 读的是模块级 `_db`（延迟绑定）——
+# 若此刻正好被替换，它会在**两个不同的实例**上各读写一部分。
+
+
+def test_upload_and_landing_share_a_lock():
+    """上传换表与落地/调课必须互斥，不能一边换引用一边往旧实例写。
+
+    R4 修的是"读到中间态"（空表），这轮修的是"写进被丢弃的实例"。
+    两者是同一个实例替换操作的读侧和写侧。
+    """
+    src = open(api.__file__, "r", encoding="utf-8").read()
+    lines = src.splitlines()
+
+    def body_of(name):
+        start = None
+        for i, line in enumerate(lines):
+            if line.startswith("def {}(".format(name)) or \
+                    line.startswith("async def {}(".format(name)):
+                start = i
+                break
+        assert start is not None, "找不到函数 {}".format(name)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("def ") or lines[j].startswith("async def ") \
+                    or lines[j].startswith("@"):
+                return "\n".join(lines[start:j])
+        return "\n".join(lines[start:])
+
+    body = body_of("upload_schedule")
+    assert "_DB_WRITE_LOCK" in body or "_land_lock" in body or "_load_lock" in body, (
+        "upload_schedule 替换 _db 引用时没拿锁 —— "
+        "此刻并发的 land_commit 会把落地写进即将被丢弃的旧实例，"
+        "而接口仍返回 success"
+    )
+
+
+
+
+
+
+
+def test_upload_swap_section_holds_write_lock():
+    """换表的"替换 + 作废旧状态"段必须在 `_DB_WRITE_LOCK` 内。
+
+    坏情形只有一种顺序：
+
+        land_commit 读旧表 → [换表完成，旧方案被 clear] → land_commit 才 save
+        ⇒ 这条落在**新表**上，成为旧表方案的幽灵
+
+    解析阶段（225ms）必须在锁外，否则每个上传都会拖住全部落地/调课；
+    但"替换引用 + clear 旧方案"这一小段必须在锁内，否则上面的顺序成立。
+
+    测试锚点选在 `_landings().clear()` —— 它是这一段里最后一个动作，
+    此刻锁必须已被持有。
+    """
+    import app.plan_landing as pl
+
+    observed = {}
+    orig_clear = pl.LandingStore.clear
+
+    def probe_clear(self, *a, **kw):
+        # 换表正在执行 clear：此刻 _DB_WRITE_LOCK 必须**不可获取**
+        got = api._DB_WRITE_LOCK.acquire(timeout=0)
+        if got:
+            api._DB_WRITE_LOCK.release()
+        observed["lock_free_during_clear"] = got
+        return orig_clear(self, *a, **kw)
+
+    import tempfile
+
+    class _FakeUpload:
+        filename = "swap.xlsx"
+
+        def __init__(self):
+            self._chunks = [b"x"]
+
+        async def read(self, size=-1):
+            return self._chunks.pop() if self._chunks else b""
+
+    tmpdir = tempfile.mkdtemp()
+    saved = (api._DB_PATH, api._landing_store, api.ScheduleDatabase,
+             api._upload_target, api._db)
+    try:
+        api._DB_PATH = os.path.join(tmpdir, "swap.db")
+        api._landing_store = None
+        api._landings()
+
+        class _Db:
+            def __init__(self):
+                self.entries = []
+                self.pending = []
+                self.loaded = True
+                self.load_report = {}
+                self._filepath = os.path.join(tmpdir, "swap.xlsx")
+
+            def load_from_excel(self, path):
+                return None
+
+            def get_all_rooms(self):
+                return []
+
+            def get_all_teachers(self):
+                return []
+
+            def get_week_range(self):
+                return (1, 16)
+
+        pl.LandingStore.clear = probe_clear
+        api.ScheduleDatabase = _Db
+        api._upload_target = lambda *a, **kw: os.path.join(tmpdir, "swap.xlsx")
+        try:
+            asyncio.run(api.upload_schedule(file=_FakeUpload()))
+        finally:
+            pl.LandingStore.clear = orig_clear
+
+        assert observed.get("lock_free_during_clear") is False, (
+            "换表执行 `_landings().clear()` 时写锁是空闲的 —— "
+            "并发的 land_commit 会在这之后把旧表方案 save 到新表上，成为幽灵记录"
+        )
+    finally:
+        api._DB_PATH, api._landing_store = saved[0], saved[1]
+        api.ScheduleDatabase, api._upload_target = saved[2], saved[3]
+        api._db = saved[4]      # 换表真的替换了全局 _db，必须还原
