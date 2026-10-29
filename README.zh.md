@@ -42,7 +42,20 @@
 
 - Python 3.10+
 - Node.js 18+
-- 环境变量：`JIYUAN_LVDONG_BASE_URL`、`JIYUAN_LVDONG_API_KEY`（LLM 凭据）
+- **LLM 凭据（任选其一，按以下优先级自动探测）**：
+
+| 优先级 | 环境变量 | 说明 |
+|---:|---|---|
+| 1 | `ZHIPU_API_KEY` | 永久免费不限量（主防线） |
+| 2 | `MODELSCOPE_API_KEY` | 免费 2000 次/天，热门时段可能 429 |
+| 3 | `TOKENHUB_API_KEY` | 一次性体验包，额度用尽报 402 |
+| 4 | `DEEPSEEK_API_KEY` | 余额制（付费） |
+| 5 | `AMD_API_KEY` / `XFYUN_API_KEY` | 免费档，有速率限制 |
+| — | `JIYUAN_LVDONG_API_KEY` | ⚠️ **已欠费 402，仅历史兜底，勿用** |
+
+> 只设其中一个即可；都未设时会自动按上表顺序探测（`app/agent/llm_intent_parser.py::_AUTO_ORDER`）。
+> **不配 LLM 也能用**：规则引擎承担全部排课逻辑，LLM 只增强意图解析与咨询问答，
+> 缺失时相关功能降级为规则解析（设 `LLM_DISABLED=1` 可显式关闭）。
 
 ### 后端
 
@@ -82,7 +95,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 486 个测试 + 前端 101 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 488 个测试 + 前端 101 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
@@ -101,7 +114,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # 调课智能体、LLM 意图解析
 │   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel 解析器 / 时间模型
-│   └── tests/                      # 486 个 pytest 测试
+│   └── tests/                      # 488 个 pytest 测试
 ├── frontend/
 │   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
 ├── scripts/                        # 独立审计器 + 发布预检
