@@ -65,6 +65,8 @@ FILES = {
     "M32": ["tests/test_weekend_coverage.py"],
     "M33": ["tests/test_scheduler_scope.py"],
     "M34": ["tests/test_master_delete.py"],
+    "M35": ["tests/test_master_consistency.py"],
+    "M36": ["tests/test_master_derived.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -353,6 +355,31 @@ MUTANTS = [
         """        if False:  # MUTANT: 不拦默认课程
             raise ValueError(""",
         "delete_default_course",
+    ),
+    (
+        "M35", "删教师后不再清理实验里的关联",
+        "app/master_data.py",
+        """        for ex in self.experiments.values():
+            ex.get("teachers", set()).discard(name)
+        self.teachers.pop(name, None)""",
+        """        self.teachers.pop(name, None)  # MUTANT: 不清理实验关联""",
+        "consistency",
+    ),
+    (
+        "M36", "派生任务按班级去重（丢掉其余组）",
+        "app/api/reschedule.py",
+        "            for g in _master_data.groups_of(cls):",
+        "            for g in sorted(_master_data.groups_of(cls))[:1]:  # MUTANT",
+        "per_group",
+    ),
+    (
+        "M37", "绪论/考试类也派生（会被求解器排课）",
+        "app/api/reschedule.py",
+        """        if not is_schedulable_project(exp_name):
+            continue""",
+        """        if False:  # MUTANT: 不过滤
+            continue""",
+        "intro_and_exam",
     ),
 ]
 
