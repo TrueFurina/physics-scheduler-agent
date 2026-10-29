@@ -169,7 +169,28 @@ class MasterData:
         return name
 
     def delete_course(self, name: str):
-        """删课程：其下实验项目归回默认课程（不删项目，只改归属）。"""
+        """删课程：其下实验项目归回默认课程（不删项目，只改归属）。
+
+        ⚠️ R39：删除**默认课程本身**时必须明确拒绝。
+
+        原实现的语义是"把实验归回 DEFAULT_COURSE，再把课程条目删掉"。
+        当 `name == DEFAULT_COURSE` 时这两步互相抵消：
+
+            25 个实验的 course 被改成「大学物理实验」（它们本来就是这个）
+            pop 掉「大学物理实验」
+            _rebuild_courses() 又从实验聚合回来 → 课程原样回来
+
+        调用方拿到 `success: True`，界面上课程还在。**什么都没删，却报了成功。**
+
+        这不是"默认课程不让删"的简单规则：项目本来就只有一门课，
+        而它恰好是默认课程 —— 也就是说，当前数据下**任何课程都删不掉**。
+        与其静默空转，不如说清楚"默认课程是兜底归属，不能删"。
+        """
+        if name == DEFAULT_COURSE:
+            raise ValueError(
+                f"「{name}」是默认课程（其他课程的实验项目被删后会归回这里），不能删除。"
+                "如需调整，请先把要保留的实验项目改归到其他课程。"
+            )
         for ex in self.experiments.values():
             if ex.get("course") == name:
                 ex["course"] = DEFAULT_COURSE
