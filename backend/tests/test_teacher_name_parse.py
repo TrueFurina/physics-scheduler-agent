@@ -102,3 +102,57 @@ def test_course_names_are_real_in_dataset(agent):
     names = {e.experiment for e in agent.db.entries if e.experiment}
     assert "PN结正向压降温度特性实验" in names
     assert "扭摆法测物体转动惯量" in names
+
+
+# ---------------------------------------------------------------------------
+# R22：班级名也要长名优先
+#
+# 班级名匹配原来是 `for c in get_all_classes(): if c in text`，
+# 而 get_all_classes 返回的是 **sorted()** —— 按字典序，不是按长度。
+#
+# 现在的真实数据里恰好没有"一个班名是另一个的子串"这种情况（已核验 17 个班名），
+# 所以线上没出过问题。但只要学校新增一个「2024级电子科学与技术1班」，
+# 才会发现：字典序里 "2024级电子科学与技术" < "2024级电子科学与技术1班"，
+# 短名先命中 → 班级名被截断，而 class_name 会写进调课申请落库。
+#
+# 这种"数据一变就静默出错"的依赖不该留着。这里用合成数据把它钉死。
+# ---------------------------------------------------------------------------
+class _FakeDb:
+    """最小替身：只需要 parse_request 用到的几个查询。"""
+
+    def __init__(self, classes):
+        self._classes = classes
+        self.entries = []
+
+    def get_week_range(self):
+        return (1, 16)
+
+    def get_all_teachers(self):
+        return []
+
+    def get_all_classes(self):
+        return sorted(self._classes)
+
+    def get_teacher_courses(self, name):
+        return []
+
+
+def test_class_name_prefers_longest_match():
+    short = "2024级电子科学与技术"
+    long = "2024级电子科学与技术1班"
+    # 断言前提：字典序确实把短名排在前面，否则这个用例根本没覆盖到风险
+    assert sorted([short, long])[0] == short
+
+    agent = RescheduleAgent(_FakeDb([short, long]))
+    p = agent.parse_request("把2024级电子科学与技术1班的实验调到第3周")
+    assert p.get("class_name") == long, (
+        f"应匹配更长的班名 {long!r}，实际 {p.get('class_name')!r}"
+    )
+
+
+def test_class_name_still_matches_short_when_only_short_mentioned():
+    short = "2024级电子科学与技术"
+    long = "2024级电子科学与技术1班"
+    agent = RescheduleAgent(_FakeDb([short, long]))
+    p = agent.parse_request("把2024级电子科学与技术的实验调到第3周")
+    assert p.get("class_name") == short
