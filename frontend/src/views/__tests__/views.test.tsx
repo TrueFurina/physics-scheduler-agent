@@ -140,8 +140,14 @@ describe('AdminView', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: '同意' }));
     expect(onApprove).toHaveBeenCalledWith(42, true, '同意调课');
+    // R34：驳回不再一键提交写死理由 —— 先进入填写态，理由由管理员填。
+    // （原先这里断言的就是 '时间冲突，请重新选择'，那正是要修的行为：
+    //   管理员因别的原因驳回，教师收到的却是"时间冲突"，会去改错东西。）
     fireEvent.click(screen.getByRole('button', { name: '驳回' }));
-    expect(onApprove).toHaveBeenCalledWith(42, false, '时间冲突，请重新选择');
+    expect(onApprove).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '教室检修' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认驳回' }));
+    expect(onApprove).toHaveBeenCalledWith(42, false, '教室检修');
   });
 
   it('0 工单显示空态（演示时不能是一块空白）', () => {
