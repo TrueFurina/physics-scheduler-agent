@@ -298,8 +298,15 @@ function App() {
     room: { label: '场地课表', file: '场地课表_全部场地.xlsx' },
     master: { label: '基础数据台账', file: '实验排课基础数据台账.xlsx' },
   };
+  // 导出中状态：班级课表要 17 个 sheet，实测约 750ms（openpyxl 每 sheet 固定开销），
+  // 场地课表约 500ms。没有反馈时用户会重复点击，导致重复下载。
+  // 用 kind 而不是布尔值：可区分"正在导班级课表"与"正在导台账"。
+  const [exportingKind, setExportingKind] = useState<'class' | 'room' | 'master' | null>(null);
+
   const handleExportStandard = async (kind: 'class' | 'room' | 'master') => {
     const meta = EXPORT_KINDS[kind];
+    if (exportingKind) return;          // 防重复点击
+    setExportingKind(kind);
     try {
       const r = kind === 'class'
         ? await rescheduleApi.exportClassSchedule()
@@ -310,6 +317,8 @@ function App() {
     } catch (err: any) {
       // 失败要说清是哪一类 —— "导出失败"四个字教秘不知道该重试哪个按钮
       setMsg(`${meta.label}导出失败：${describeApiError(err)}`);
+    } finally {
+      setExportingKind(null);
     }
   };
 
@@ -1334,6 +1343,7 @@ function App() {
                 onExportClass={() => handleExportStandard('class')}
                 onExportRoom={() => handleExportStandard('room')}
                 onExportMaster={() => handleExportStandard('master')}
+                exportingKind={exportingKind}
               />
             </Suspense>
           )}
