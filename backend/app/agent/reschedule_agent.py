@@ -10,6 +10,21 @@ from app.agent.llm_intent_parser import LLMIntentParser
 SEMESTER_START = date(2025, 2, 24)
 WEEKDAY_OFFSET = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
 
+# 调课沙盘要覆盖的星期：**全部七天**，来自 WEEKDAY_OFFSET 这一个来源。
+#
+# R36：此前三处各写一份 `["周一"…"周五"]`，把周末整个漏掉。真实数据 433 条里
+# 有 71 条在周末（周六 36 / 周日 35）—— 每 6 条课就有 1 条。
+#
+# 实测后果（教师H，第 2 周真实有周六课）：
+#     find_slots_with_reasons(2, teacher_name='教师H')
+#       周六可用：0    周六被排除：0
+# 既不可用也不在排除列表 ⇒ **从沙盘上消失**。教秘看到一份完整的 5 天沙盘，
+# 不会意识到周六还有课，更不会想到"这周六可能没空"。
+#
+# 排课引擎（auto_scheduler / parallel_scheduler）覆盖周末是既定口径，
+# 调课沙盘却只看 5 天 —— 同一份数据在两条链路上口径不同。
+WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)  # 保持 周一→周日 的顺序
+
 # 多轮追问要填的槽位（B2）。后端不存会话，只把已确认的槽位随响应回传，
 # 由前端在下一轮原样带回，服务端做无状态合并 —— 进程被回收也不丢上下文。
 # `class_name` 也在里面：同一门实验（课程名相同）会挂在不同班级下，
@@ -247,7 +262,7 @@ class RescheduleAgent:
         if not self.db.loaded:
             return []
 
-        weekdays = ["周一", "周二", "周三", "周四", "周五"]
+        weekdays = list(WEEKDAYS_ALL)
         time_slots = ["567", "678", "91011"]  # 下午三个时段
         rooms = self.db.get_all_rooms()
 
@@ -296,7 +311,7 @@ class RescheduleAgent:
         if not self.db.loaded:
             return {"available": [], "excluded": []}
 
-        weekdays = ["周一", "周二", "周三", "周四", "周五"]
+        weekdays = list(WEEKDAYS_ALL)
         time_slots = ["567", "678", "91011"]
         rooms = self.db.get_all_rooms()
 
@@ -607,7 +622,7 @@ class RescheduleAgent:
             by_weekday.setdefault(s["weekday"], []).append(s)
 
         summary_lines = [f"📋 第{parsed['target_week']}周可用时段："]
-        for wd in ["周一", "周二", "周三", "周四", "周五"]:
+        for wd in WEEKDAYS_ALL:
             if wd in by_weekday:
                 summary_lines.append(f"\n{wd}：")
                 for s in by_weekday[wd][:5]:  # 每个星期几只展示5个
