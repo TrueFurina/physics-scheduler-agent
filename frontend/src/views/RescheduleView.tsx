@@ -1,7 +1,7 @@
 import { Fragment } from 'react';
 import type { AvailableSlot, ExcludedSlot, TeacherCourse } from '../api/client';
 import type { ImpactResult, AiPlan } from '../types';
-import { GRID_TIME_SLOTS, WEEKDAYS, timeSlotLabels, weekdayLabels } from '../constants/labels';
+import { GRID_TIME_SLOTS, WEEKDAYS_ALL, timeSlotLabels, weekdayLabels } from '../constants/labels';
 
 interface Props {
   /**
@@ -102,9 +102,9 @@ export default function RescheduleView({
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-6">
         <h3 className="font-medium text-gray-900 mb-1">🗓️ 周课表沙盘（第{targetWeek}周）</h3>
         <p className="text-xs text-gray-400 mb-4">绿=可用时段 ｜ 红=被排除时段（含原因）</p>
-        <div className="grid" style={{ gridTemplateColumns: '70px repeat(5, 1fr)', gap: '6px' }}>
+        <div className="grid" style={{ gridTemplateColumns: '70px repeat(7, 1fr)', gap: '6px' }}>
           <div />
-          {WEEKDAYS.map((wd) => (
+          {WEEKDAYS_ALL.map((wd) => (
             <div key={wd} className="text-center text-xs font-medium text-gray-500 py-1">{weekdayLabels[wd]}</div>
           ))}
           {GRID_TIME_SLOTS.map((ts) => (
@@ -112,7 +112,7 @@ export default function RescheduleView({
               <div className="text-xs text-gray-500 flex items-center justify-center">
                 {timeSlotLabels[ts] || ts}
               </div>
-              {WEEKDAYS.map((wd) => {
+              {WEEKDAYS_ALL.map((wd) => {
                 const availSlot = available.find((s) => s.weekday === wd && s.time_slot === ts);
                 const exclSlot = excluded.find((e) => e.weekday === wd && e.time_slot === ts);
                 if (availSlot) {
@@ -147,7 +147,7 @@ export default function RescheduleView({
         )}
         {!showAllAvail ? (
           <div className="divide-y divide-gray-50">
-            {WEEKDAYS.map((wd) => {
+            {WEEKDAYS_ALL.map((wd) => {
               const daySlots = available.filter((s) => s.weekday === wd).slice(0, 4);
               if (daySlots.length === 0) return null;
               return (
