@@ -31,7 +31,7 @@
 
 | 层 | 技术 |
 |----|------|
-| 后端 | Python FastAPI + openpyxl + python-constraint |
+| 后端 | Python FastAPI + openpyxl + **OR-Tools CP-SAT**（`requirements.txt` 中为 `ortools`） |
 | 前端 | React + Vite + TypeScript + Tailwind CSS |
 | LLM | 律动基元（OpenAI 兼容，环境变量可替换） |
 | 数据 | 实验安排表（433条）+ 五表主数据（不含任何学生数据） |
@@ -82,7 +82,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 408 个测试 + 前端 89 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 482 个测试 + 前端 101 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
@@ -101,7 +101,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # 调课智能体、LLM 意图解析
 │   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel 解析器 / 时间模型
-│   └── tests/                      # 408 个 pytest 测试
+│   └── tests/                      # 482 个 pytest 测试
 ├── frontend/
 │   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
 ├── scripts/                        # 独立审计器 + 发布预检
