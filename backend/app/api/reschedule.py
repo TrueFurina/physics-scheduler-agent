@@ -733,6 +733,13 @@ async def reschedule_chat(req: ChatRequest):
             "need_info": result.get("need_info", False),
             "followup_questions": result.get("followup_questions", []),
             "context": result.get("context") or {},
+            # R31：agent 层从 R21 起就返回了这两个字段，但这里**一直没透传** ——
+            # `data` 是白名单拼出来的 dict，漏写一个键就等于把这个字段吞掉。
+            # 后果：R21 宣称"结构化字段与中文文案并列，下游不要从 message 里
+            # 正则反解"，而下游实际拿到的 data 里根本没有它。
+            # 是被 R31 的部署新鲜度探测（比对返回体字段）抓出来的。
+            "course_name": result.get("course_name"),
+            "course_unrecognized": result.get("course_unrecognized", False),
         },
     )
 
