@@ -463,7 +463,7 @@ function App() {
       pendingOtpRef.current = await sendPhoneCode(loginPhone);
       setCodeSent(true);
     } catch (err: any) {
-      setLoginErr(err?.message || '验证码发送失败');
+      setLoginErr(describeCloudError(err) || '验证码发送失败');
     } finally {
       setLoginBusy(false);
     }
@@ -486,7 +486,7 @@ function App() {
       const s = await verifyPhoneCode(pending, loginCode.trim());
       finishLogin(s);
     } catch (err: any) {
-      setLoginErr(err?.message || '验证码校验失败');
+      setLoginErr(describeCloudError(err) || '验证码校验失败');
     } finally {
       setLoginBusy(false);
     }
@@ -497,7 +497,7 @@ function App() {
     try {
       await signInWithWechat();   // 同标签页跳转，回调回到 location.origin
     } catch (err: any) {
-      setLoginErr(err?.message || '微信登录发起失败');
+      setLoginErr(describeCloudError(err) || '微信登录发起失败');
     }
   };
 
