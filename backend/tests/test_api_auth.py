@@ -822,3 +822,71 @@ def test_short_rows_are_reported():
             _os.unlink(path)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# 16. 4xx 文案可操作性（R3 审计发现）
+# ---------------------------------------------------------------------------
+# 审计方法：静态扫描 31 处 HTTPException + 运行时真实触发 10 个 4xx。
+# 发现并修复：
+#   1. 413 detail 含"设置环境变量 MAX_UPLOAD_MB 后重启服务"——运维话术漏给教秘
+#   2. 登录失败只说"用户名或密码错误"，没说怎么办
+#   3. 新建课程/教师/场地/班级 空名只说"不能为空"，没说下一步
+#
+# 这里锁定这几条，防止回退。
+
+
+def test_413_detail_has_no_ops_jargon():
+    """413 的 detail 不得出现环境变量/重启等运维话术。"""
+    import io as _io
+
+    from app.api import reschedule as rs
+
+    old = rs.MAX_UPLOAD_BYTES
+    try:
+        rs.MAX_UPLOAD_BYTES = 64 * 1024
+        big = b"PK\x03\x04" + b"A" * (200 * 1024)
+        r = client.post(
+            "/api/reschedule/upload",
+            files={"file": ("big.xlsx", _io.BytesIO(big), "application/octet-stream")},
+            headers=_admin_headers(),
+        )
+    finally:
+        rs.MAX_UPLOAD_BYTES = old
+
+    assert r.status_code == 413
+    detail = r.json()["detail"]
+    for bad in ("环境变量", "重启", "MAX_UPLOAD_MB", ".env", "配置文件"):
+        assert bad not in detail, f"413 detail 泄漏运维话术「{bad}」：{detail}"
+    assert ("压缩" in detail) or ("拆分" in detail), f"缺可操作建议：{detail}"
+
+
+def test_login_failure_says_what_to_do():
+    """登录失败要给出下一步，但仍不区分账号错/口令错（防账号枚举）。"""
+    r = client.post(
+        "/api/reschedule/admin-login",
+        json={"username": "admin", "password": "definitely-wrong-xxxx"},
+    )
+    assert r.status_code == 401
+    detail = r.json()["detail"]
+    assert "用户名或密码错误" in detail
+    assert any(k in detail for k in ("请", "联系", "稍后")), f"无可操作指引：{detail}"
+    # 不得泄漏"账号是否存在"
+    assert "不存在" not in detail and "无此用户" not in detail
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/api/reschedule/master/courses", {"name": ""}),
+        ("/api/reschedule/master/teachers", {"name": ""}),
+        ("/api/reschedule/master/rooms", {"name": ""}),
+        ("/api/reschedule/master/classes", {"name": ""}),
+    ],
+)
+def test_master_empty_name_says_what_to_do(path, body):
+    r = client.post(path, json=body, headers=_admin_headers())
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "不能为空" in detail
+    assert any(k in detail for k in ("请", "填写", "再")), f"无可操作指引：{detail}"

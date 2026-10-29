@@ -42,6 +42,8 @@ FILES = {
         "M9": ["tests/test_api_auth.py"],
         "M10": ["tests/test_api_auth.py"],
         "M11": ["tests/test_api_auth.py"],
+        "M12": ["tests/test_api_auth.py"],
+        "M13": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -128,6 +130,20 @@ MUTANTS = [
         "            if len(row) < 8:",
         "            if False:  # MUTANT: 不补齐短行",
         "merged_header",
+    ),
+    (
+        "M12", "413 文案回到运维话术",
+        "app/api/reschedule.py",
+        '"请压缩表格或拆分成多个文件后重新上传。"',
+        '"如确需上传更大的表格，请设置环境变量 MAX_UPLOAD_MB 后重启服务。"',
+        "413_detail",
+    ),
+    (
+        "M13", "空名校验去掉下一步指引",
+        "app/master_data.py",
+        'raise ValueError("课程名不能为空，请填写后再提交")',
+        'raise ValueError("课程名不能为空")',
+        "master_empty_name",
     ),
 ]
 

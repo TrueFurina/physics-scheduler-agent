@@ -164,7 +164,7 @@ class MasterData:
     def upsert_course(self, name: str) -> str:
         name = (name or "").strip()
         if not name:
-            raise ValueError("课程名不能为空")
+            raise ValueError("课程名不能为空，请填写后再提交")
         self.courses.setdefault(name, {"experiments": set()})
         return name
 
@@ -180,7 +180,7 @@ class MasterData:
                           rooms: Optional[List[str]] = None, classes: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("实验项目名不能为空")
+            raise ValueError("实验项目名不能为空，请填写后再提交")
         ex = self.experiments.setdefault(
             name, {"course": DEFAULT_COURSE, "teachers": set(), "rooms": set(), "classes": set()})
         if course:
@@ -222,7 +222,7 @@ class MasterData:
     def upsert_teacher(self, name: str, projects: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("教师名不能为空")
+            raise ValueError("教师名不能为空，请填写后再提交")
         t = self.teachers.setdefault(name, {"projects": set()})
         if projects is not None:
             for p in projects:
@@ -244,7 +244,7 @@ class MasterData:
     def upsert_room(self, name: str, capacity: Optional[int] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("场地名不能为空")
+            raise ValueError("场地名不能为空，请填写后再提交")
         r = self.rooms.setdefault(name, {"capacity": None})
         if capacity is not None:
             r["capacity"] = capacity
@@ -262,7 +262,7 @@ class MasterData:
                      weekdays: Optional[List[str]] = None) -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("班级名不能为空")
+            raise ValueError("班级名不能为空，请填写后再提交")
         c = self.classes.setdefault(name, _new_class())
         if groups is not None:
             for g in groups:

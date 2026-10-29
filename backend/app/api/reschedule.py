@@ -273,8 +273,11 @@ async def _read_upload_limited(file: UploadFile, limit: int = None) -> bytes:
             raise HTTPException(
                 status_code=413,
                 detail=(
+                    # 不给运维话术（"设置环境变量…重启服务"）：教秘既做不到，
+                    # 也会误以为是自己少配了什么。只说"怎么办"。
+                    # 限额值另走 X-Max-Upload-Bytes 头，供前端展示。
                     f"文件超过上限（{cap // (1024 * 1024)} MB）。"
-                    "如确需上传更大的表格，请设置环境变量 MAX_UPLOAD_MB 后重启服务。"
+                    "请压缩表格或拆分成多个文件后重新上传。"
                 ),
                 headers={"X-Max-Upload-Bytes": str(cap)},
             )
@@ -1043,7 +1046,13 @@ async def admin_login(req: AdminLoginRequest):
     后续请求依然是匿名的（这正是修复前的问题）。
     """
     if not check_admin_credentials(req.username, req.password):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        # 不区分"账号错/口令错"：区分会告诉爆破者账号是否存在，
+        # 这与 test_admin_login_rejects_wrong_username 的意图一致。
+        # 但补一句"怎么办"，否则用户不知道是重试还是找管理员。
+        raise HTTPException(
+            status_code=401,
+            detail="用户名或密码错误，请重新输入；多次失败请稍后再试或联系系统管理员。",
+        )
     ticket = issue_admin_token(req.username.strip())
     return {
         "success": True,
@@ -1245,7 +1254,10 @@ def _land_plan_or_400(req: LandPlanRequest) -> List[dict]:
             detail=(f"方案有 {len(e.bad)} 行缺少必填字段（班级/项目/组/周次/星期/时段），"
                     f"未做任何改动。问题行示例：{e.bad[:3]}"))
     if not plan:
-        raise HTTPException(status_code=400, detail="方案为空：没有可落地的排课行")
+        raise HTTPException(
+            status_code=400,
+            detail="方案为空：没有可落地的排课行。请先在「并行排课」中生成方案，再回到这里落地方案。",
+        )
     return plan
 
 
@@ -2032,7 +2044,10 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
 
     rows = list(req.schedule or [])
     if not rows:
-        raise HTTPException(status_code=400, detail="没有可导出的排课方案（schedule 为空）")
+        raise HTTPException(
+            status_code=400,
+            detail="没有可导出的排课方案（schedule 为空）。请先选择或生成一份方案，再执行导出。",
+        )
 
     order = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
     rows = [dict(r, course=(r.get("course") or r.get("project") or "")) for r in rows]
