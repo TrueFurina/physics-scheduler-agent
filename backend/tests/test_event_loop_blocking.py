@@ -218,3 +218,84 @@ def test_no_async_route_calls_ensure_loaded_directly():
         + "\n".join(offenders)
         + "\n应改为 `await _ensure_loaded_async()`"
     )
+
+
+# ---------- R26：主数据落盘也是同步文件 IO ----------
+#
+# `_persist_master_state()` 实测 28–88 ms，且**与文件体积无关**（16KB 和 512KB 一样慢，
+# 成本全在单次 write + os.replace 的固定开销）。它在 13 个 admin 路由里被同步调用，
+# 而 admin CRUD 一次请求会连着调 `_ensure_master_data()` + CRUD + 落盘。
+#
+# 事件循环层面的实测对照（1ms 心跳探针）：
+#     同步直调 → 事件循环最长卡顿 87.3 ms
+#     线程池   → 事件循环最长卡顿 15.2 ms（只剩调度抖动）
+#
+# 同步期间别人刷看板、点审批、平台探活 /health 全部排在这次写文件后面。
+
+def test_persist_master_state_runs_off_event_loop(monkeypatch):
+    seen = {}
+
+    def fake_persist():
+        seen["thread"] = threading.current_thread()
+        seen["done"] = True
+
+    monkeypatch.setattr(api, "_persist_master_state", fake_persist)
+
+    async def main():
+        await api._persist_master_state_async()
+
+    asyncio.run(main())
+
+    assert seen.get("done"), "落盘没被执行"
+    assert seen["thread"] is not threading.main_thread(), (
+        "主数据落盘跑在事件循环线程上 —— 一次写文件会把全站冻住 28–88ms"
+    )
+
+
+def test_schedulable_extra_tasks_off_event_loop(monkeypatch):
+    """灰箱补全可能触发落盘，整段也得在线程池里跑。"""
+    seen = {}
+
+    def fake_enrich():
+        seen["thread"] = threading.current_thread()
+        return ([], [])
+
+    monkeypatch.setattr(api, "_settle_marker", 1, raising=False)
+    monkeypatch.setattr(api, "_enrich_extra_tasks", fake_enrich, raising=False)
+
+    async def main():
+        await api._schedulable_extra_tasks_async()
+
+    asyncio.run(main())
+    assert seen["thread"] is not threading.main_thread(), \
+        "灰箱补全（含可能的落盘）跑在事件循环线程上"
+
+
+def test_no_async_route_calls_blocking_io_directly():
+    """静态守卫：async 路由里不许裸调落盘 / 懒加载 / 补全这三个阻塞函数。
+
+    R25/R26 各修了一批，但这是**会复发**的模式：新写一个 admin 端点，
+    顺手 `_persist_master_state()` 是最自然的动作。而后果只在并发时出现。
+    """
+    import re
+
+    BLOCKING = {
+        "_persist_master_state()": "_persist_master_state_async()",
+        "_ensure_loaded()": "_ensure_loaded_async()",
+        "_schedulable_extra_tasks()": "_schedulable_extra_tasks_async()",
+    }
+    src = open(api.__file__, "r", encoding="utf-8").read()
+    offenders = []
+    cur = None
+    for i, line in enumerate(src.splitlines(), 1):
+        m = re.match(r"(async )?def (\w+)", line)
+        if m:
+            cur = (m.group(2), bool(m.group(1)))
+        s = line.strip()
+        if cur and cur[1] and s in BLOCKING:
+            offenders.append(f"{cur[0]}:{i}  {s} → 应用 {BLOCKING[s]}")
+
+    assert offenders == [], (
+        "async 路由直接同步调用了阻塞函数（会冻住事件循环）：\n"
+        + "\n".join(offenders)
+    )
