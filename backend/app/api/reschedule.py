@@ -506,8 +506,15 @@ async def master_upsert_course(req: _CourseIn):
 
 @router.delete("/master/courses/{name}", summary="删除课程", dependencies=_ADMIN_ONLY)
 async def master_delete_course(name: str):
+    # R39：删默认课程会抛 ValueError（见 master_data.delete_course）。
+    # 不接住就是 500 —— 那会显示"服务端出错"，教秘以为是系统坏了，
+    # 而这其实是一条可以照着做的操作提示。
+    await _ensure_loaded_async()
     _ensure_master_data()
-    _master_data.delete_course(name)
+    try:
+        _master_data.delete_course(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     await _persist_master_state_async()
     return {"success": True, "data": _master_data.overview()}
 
