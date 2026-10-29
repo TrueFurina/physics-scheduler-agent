@@ -64,6 +64,7 @@ FILES = {
     "M31": ["tests/test_response_contract.py"],
     "M32": ["tests/test_weekend_coverage.py"],
     "M33": ["tests/test_scheduler_scope.py"],
+    "M34": ["tests/test_master_delete.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -343,6 +344,15 @@ MUTANTS = [
         'WEEKDAY_ONLY_NOTE = "；**只在工作日（周一至周五）排课，周末不作候选**（周末已有课仍计入占用）"',
         'WEEKDAY_ONLY_NOTE = ""  # MUTANT',
         "note_declares or summary_message",
+    ),
+    (
+        "M34", "删默认课程静默空转（返回成功但没删）",
+        "app/master_data.py",
+        """        if name == DEFAULT_COURSE:
+            raise ValueError(""",
+        """        if False:  # MUTANT: 不拦默认课程
+            raise ValueError(""",
+        "delete_default_course",
     ),
 ]
 
