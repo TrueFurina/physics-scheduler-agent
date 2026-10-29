@@ -62,6 +62,7 @@ FILES = {
     "M29": ["tests/test_api_auth.py"],
     "M30": ["tests/test_response_contract.py"],
     "M31": ["tests/test_response_contract.py"],
+    "M32": ["tests/test_weekend_coverage.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -327,6 +328,13 @@ MUTANTS = [
         """            "course_unrecognized": course_unrecognized,""",
         """            "course_unrecognized": False,  # MUTANT""",
         "contradicts",
+    ),
+    (
+        "M32", "沙盘退回只排 5 天（周末消失）",
+        "app/agent/reschedule_agent.py",
+        "WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)  # 保持 周一→周日 的顺序",
+        "WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)[:5]  # MUTANT: 只排工作日",
+        "weekend",
     ),
 ]
 
