@@ -1,4 +1,5 @@
 import type { RescheduleRequest } from '../api/client';
+import { useState } from 'react';
 
 interface Props {
   requests: RescheduleRequest[];
@@ -9,6 +10,30 @@ interface Props {
 
 /** 页面4：管理员审批台（F6）。 */
 export default function AdminView({ requests, loading, onBack, onApprove }: Props) {
+  // 正在填写驳回理由的那条申请；null = 没有在填
+  //
+  // R34：原先驳回是**一键写死理由**：
+  //     onClick={() => onApprove(r.id, false, '时间冲突，请重新选择')}
+  // 后端 `comment` 支持任意文本、`App.handleApprove` 也传下去了 —— 只有 UI 写死。
+  // 后果不是报错，而是**记录不实**：管理员因"教室维修"驳回，教师收到的
+  // 却是"时间冲突，请重新选择"，于是去改时间，改了也没用。
+  const [rejecting, setRejecting] = useState<RescheduleRequest | null>(null);
+  const [reason, setReason] = useState('');
+  const [hint, setHint] = useState('');
+
+  const confirmReject = () => {
+    const text = reason.trim();
+    if (!text) {
+      // 不退回写死的默认话术：那正是要修的问题。
+      setHint('请填写驳回理由（会原样告知教师，写清楚他该怎么做）');
+      return;
+    }
+    if (rejecting) onApprove(rejecting.id, false, text);
+    setRejecting(null);
+    setReason('');
+    setHint('');
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -56,7 +81,11 @@ export default function AdminView({ requests, loading, onBack, onApprove }: Prop
                   同意
                 </button>
                 <button
-                  onClick={() => onApprove(r.id, false, '时间冲突，请重新选择')}
+                  onClick={() => {
+                    setRejecting(r);
+                    setReason('');
+                    setHint('');
+                  }}
                   disabled={loading}
                   className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
                 >
@@ -64,6 +93,44 @@ export default function AdminView({ requests, loading, onBack, onApprove }: Prop
                 </button>
               </div>
             </div>
+
+            {rejecting?.id === r.id && (
+              <div className="mt-4 pt-4 border-t border-red-100">
+                <label className="text-sm text-red-700 font-medium">
+                  驳回理由（会原样告知教师）
+                </label>
+                <textarea
+                  value={reason}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    if (e.target.value.trim()) setHint('');
+                  }}
+                  rows={2}
+                  placeholder="例如：该教室周四起检修，请改约第4周"
+                  className="mt-2 w-full px-3 py-2 border border-red-200 bg-red-50 rounded-lg text-sm focus:ring-2 focus:ring-red-400 outline-none"
+                />
+                {hint && <div className="text-xs text-red-600 mt-1">{hint}</div>}
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={confirmReject}
+                    disabled={loading}
+                    className="px-4 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 text-sm font-medium"
+                  >
+                    确认驳回
+                  </button>
+                  <button
+                    onClick={() => {
+                      setRejecting(null);
+                      setReason('');
+                      setHint('');
+                    }}
+                    className="px-4 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 text-sm"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
