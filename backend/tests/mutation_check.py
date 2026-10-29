@@ -57,6 +57,7 @@ FILES = {
     "M24": ["tests/test_event_loop_blocking.py"],
     "M25": ["tests/test_event_loop_blocking.py"],
     "M26": ["tests/test_event_loop_blocking.py"],
+    "M27": ["tests/test_event_loop_blocking.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -182,10 +183,11 @@ MUTANTS = [
     (
         "M16", "审批不自动应用调课",
         "app/api/reschedule.py",
-        """            if _db.loaded:
-                apply_result = _apply_reschedule(record_dict)""",
-        """            if False:  # MUTANT: 不自动应用
-                apply_result = _apply_reschedule(record_dict)""",
+        """                def _locked_apply_approve():
+                    with _DB_WRITE_LOCK:
+                        return _apply_reschedule(record_dict)
+                apply_result = await run_in_threadpool(_locked_apply_approve)""",
+        """                apply_result = {"applied": 0, "skipped": 0, "details": []}""",
         "applies_move or reports_conflicts",
     ),
     (
@@ -268,6 +270,13 @@ MUTANTS = [
         _db.loaded = True""",
         "    pass  # MUTANT: loaded 交回 async 端设置",
         "cold_start",
+    ),
+    (
+        "M27", "调课写路径不拿写锁",
+        "app/api/reschedule.py",
+        "    def _locked_apply():\n        with _DB_WRITE_LOCK:\n            return _apply_reschedule(record, True, req.key or \"\")",
+        "    def _locked_apply():\n        return _apply_reschedule(record, True, req.key or \"\")",
+        "holds_write_lock",
     ),
 ]
 
