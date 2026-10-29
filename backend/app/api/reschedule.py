@@ -385,7 +385,7 @@ async def upload_master(file: UploadFile = File(...)):
 @router.get("/master-status", summary="主数据（大纲清单）状态")
 async def master_status():
     """当前主数据任务数、覆盖班级，以及安排表里"没排时间"的待排行数。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     pending_in_table = list(getattr(_db, "pending", None) or [])
     return {
         "success": True,
@@ -443,7 +443,7 @@ class _ClassIn(BaseModel):
 @router.get("/master/overview", summary="主数据五张实体表总览")
 async def master_overview():
     """五张实体表（课程/实验项目/教师/场地/班级）的完整状态。免鉴权：纯实体清单。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     return {"success": True, "data": _master_data.overview()}
 
@@ -451,7 +451,7 @@ async def master_overview():
 @router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_ADMIN_ONLY)
 async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _master_data.build_from_entries(_db.entries)
     _persist_master_state()
     return {"success": True, "data": _master_data.overview()}
@@ -459,7 +459,7 @@ async def master_init():
 
 @router.post("/master/courses", summary="新建课程", dependencies=_ADMIN_ONLY)
 async def master_upsert_course(req: _CourseIn):
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         _master_data.upsert_course(req.name)
@@ -479,7 +479,7 @@ async def master_delete_course(name: str):
 
 @router.post("/master/experiments", summary="新建/更新实验项目", dependencies=_ADMIN_ONLY)
 async def master_upsert_experiment(req: _ExperimentIn):
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         _master_data.upsert_experiment(
@@ -501,7 +501,7 @@ async def master_delete_experiment(name: str):
 
 @router.post("/master/teachers", summary="新建/更新教师", dependencies=_ADMIN_ONLY)
 async def master_upsert_teacher(req: _TeacherIn):
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         _master_data.upsert_teacher(req.name, projects=req.projects)
@@ -521,7 +521,7 @@ async def master_delete_teacher(name: str):
 
 @router.post("/master/rooms", summary="新建/更新场地", dependencies=_ADMIN_ONLY)
 async def master_upsert_room(req: _RoomIn):
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         _master_data.upsert_room(req.name, capacity=req.capacity)
@@ -541,7 +541,7 @@ async def master_delete_room(name: str):
 
 @router.post("/master/classes", summary="新建/更新班级", dependencies=_ADMIN_ONLY)
 async def master_upsert_class(req: _ClassIn):
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         _master_data.upsert_class(req.name, groups=req.groups, weekday=req.weekday or "",
@@ -632,7 +632,7 @@ async def master_import(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"台账解析失败：{e!s}")
 
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     try:
         stats = apply_tables(_master_data, tables)
@@ -662,7 +662,7 @@ async def export_master_workbook():
     两份各司其职 —— 统计表的「班级数」这类数值列如果拿去导入，会被判为统计列
     并显式忽略（见 `master_workbook._is_stat_column`），不会变成名叫「5」的班级。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     from app.master_workbook import build_workbook
 
@@ -991,6 +991,12 @@ def _ensure_loaded() -> None:
 
     改为此处自愈：默认表存在就直接加载，/load-default 仍可用（幂等）但不再是使用前提。
     并发请求用双检锁，保证 433 行 Excel 只解析一次。
+
+    ⚠️ R25：这是**同步阻塞**函数（冷启动整表重解析 + 重放已审批调课，实测
+    本地 193ms、冷沙箱约 3.8s）。它在 27 个 `async def` 路由里被直接调用，
+    只在首次访问时发生 —— 但那一次会把整个事件循环按住，连 `/health` 都不响应。
+    `async` 路由必须改用 `await _ensure_loaded_async()`：已加载时开销为 0，
+    冷启动时丢线程池。
     """
     if _db.loaded:
         return
@@ -998,6 +1004,22 @@ def _ensure_loaded() -> None:
         if _db.loaded:  # 双检：等锁期间可能已被别的请求加载完
             return
         _load_default_schedule()
+
+
+def _ensure_loaded_sync() -> None:
+    """`await _ensure_loaded_async()` 的阻塞主体（跑在线程池里）。"""
+    _ensure_loaded()
+
+
+async def _ensure_loaded_async() -> None:
+    """`async` 路由用的版本：已加载 → 零开销直接返回；未加载 → 丢线程池。
+
+    为什么要先判一次 `_db.loaded` 再进线程池：正常运行时 99.99% 的请求
+    走的是"已加载"分支，为它排一次线程池任务纯属浪费（且会引入额外延迟）。
+    """
+    if _db.loaded:
+        return
+    await run_in_threadpool(_ensure_loaded_sync)
 
 
 @router.post("/load-default", summary="加载默认实验安排表",
@@ -1121,7 +1143,7 @@ class ParallelExportRequest(BaseModel):
 @router.get("/parallel/overview", summary="并行排课-课程总览（项目×分组）")
 async def parallel_overview():
     """按班级聚合：每门课的全部实验项目、学生组别（并行排课入口数据）"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     from app.engine.parallel_scheduler import ParallelScheduler
 
     # 待排任务（表里没排时间的行 + 上传的大纲清单）与已排记录一起进总览
@@ -1144,7 +1166,7 @@ async def parallel_solve(req: ParallelSolveRequest):
     求解是 CPU 密集且同步（实测首次 0.9–1.7s）—— 放线程池，别让一键排课把
     同一时刻在刷沙盘/看板的人一起冻住。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     from app.engine.parallel_scheduler import ParallelScheduler
 
@@ -1188,7 +1210,7 @@ async def parallel_solve_all():
       - 本接口是**班级×项目×学生组**粒度（与安排表同一口径），结果可直接对照/导出班级课表。
     时间范围取主数据该班的「课程总时间范围」（星期可多天、节次、周次）。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     from app.engine.parallel_scheduler import ParallelScheduler
 
@@ -1299,7 +1321,7 @@ def _land_plan_or_400(req: LandPlanRequest) -> List[dict]:
              dependencies=[Depends(export_gate), Depends(rate_limit("parallel-land"))])
 async def land_preview(req: LandPlanRequest):
     """差异预览：新增 / 调整 / 未覆盖 / 原样保留四类账 + 警告。绝不写入。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     plan = _land_plan_or_400(req)
     diff = plan_landing.diff_plan(plan, _db.entries)
     diff["success"] = True
@@ -1314,7 +1336,7 @@ async def land_commit(req: LandPlanRequest):
     为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
     看到方案神秘消失 —— 与 R-36「审批通过课表一个字节没变」同族的不实。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     plan = _land_plan_or_400(req)
     with _land_lock:
         # diff 现算，不信预览那一份：预览与采纳之间可能有审批调课生效
@@ -1337,7 +1359,7 @@ async def land_commit(req: LandPlanRequest):
              dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
 async def land_undo():
     """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     with _land_lock:
         out = plan_landing.undo(_db, _landings())
     if not out.get("success"):
@@ -1349,7 +1371,7 @@ async def land_undo():
             dependencies=[Depends(rate_limit("parallel-land-status"))])
 async def land_status():
     """是否已落地、何时、多少条。_ensure_loaded 保证重启重放之后再回答。"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
     rec = _landings().latest()
     if not rec:
         return {"landed": False}
@@ -1465,7 +1487,7 @@ async def export_class_schedule(class_name: Optional[str] = None):
     - 该班若出现**跨课程撞车**（同一组在两门课被排进同一格），在表尾单独列出：
       两门课的任课教师互不知情，谁都不会觉得自己排错了，这是最难自发发现的一类。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     _ensure_master_data()
     import openpyxl
     from app.course_bridge import group_by_course, scan_cross_course
@@ -1522,7 +1544,7 @@ async def export_room_schedule(room: Optional[str] = None):
     `room` 留空 = 导出全部场地。⚠️ 没填场地的记录（绪论课等）**不能静默丢弃** ——
     它们单独进「（未填场地）」页，否则教秘会以为全表都被扫到了（R-35 口径）。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     import openpyxl
 
     entries = [e for e in _db.entries if (not room or (e.room or "").strip() == room)]
@@ -1562,7 +1584,7 @@ async def export_master_data():
     ⚠️ 口径：课次一律按**真实占用格数**计（`14:00-17:00` 算 2 格），
     与利用率面板保持一致；缺字段的记录归入"未标注/未指派"而不是丢弃。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
     import openpyxl
     from collections import defaultdict
 
@@ -1672,7 +1694,7 @@ async def export_master_data():
 @router.get("/data-audit", summary="数据体检报告（扫描现有安排表冲突）")
 async def data_audit():
     """一键审计现有实验安排表：教室冲突 / 教师时间冲突 / 数据覆盖情况"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
 
     weeks, teachers, rooms = set(), set(), set()
@@ -1786,7 +1808,7 @@ async def data_audit():
 @router.get("/stats", summary="统计面板（教室利用率/教师工作量）")
 async def stats():
     """统计现有安排表：教室利用率、教师工作量均衡度"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     from collections import defaultdict, Counter
 
@@ -1879,7 +1901,7 @@ async def schedule_grid(week: int, class_name: str = "", room: str = ""):
     - 冲突标记来自 `conflict_model.scan_table`（唯一权威），本端点不重算；
     - 周次超出覆盖范围直接 400 并说清范围（R-32：不夹取）。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     from app import schedule_grid
     from app.conflict_model import scan_table
@@ -1905,7 +1927,7 @@ async def impact_analysis(req: ChatRequest):
 
     基于三重冲突筛选结果，聚合出影响范围清单。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     # 解析请求（复用调课智能体解析）
     parsed = _agent.parse_request(req.message)
@@ -1989,7 +2011,7 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
     内连可行解都拿不到；60 个一片可解）。传 `max_sections` 可回到"只排前 N 个"的
     旧行为（调试/演示用）。
     """
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     from app.engine.auto_scheduler import AutoScheduler
     extra_tasks, task_assumptions = _enrich_extra_tasks()
@@ -2137,7 +2159,7 @@ async def auto_schedule_export(req: AutoScheduleExportRequest):
 @router.get("/teachers", summary="教师列表（F1 身份选择）")
 async def get_teachers():
     """返回全部教师列表（含角色/职称），供身份选择页展示（F1）"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     teachers = _db.get_all_teachers()
     roles = _db.get_teacher_roles()  # 从教师联系表提取角色备注
@@ -2157,7 +2179,7 @@ async def get_teachers():
 @router.get("/teachers/{teacher_name}/courses", summary="教师课程列表（F2）")
 async def get_teacher_courses(teacher_name: str):
     """按教师提取课程卡片，标注可调状态（F2）"""
-    _ensure_loaded()
+    await _ensure_loaded_async()
 
     courses = _db.get_teacher_courses(teacher_name)
     if not courses:
@@ -2556,7 +2578,7 @@ async def apply_move(req: ApplyMoveRequest):
       · 移动失败/冲突跳过一律如实返回，不假装成功（"同意但没生效"必须让教秘看见）。
     """
     if not _db.loaded:
-        _ensure_loaded()
+        await _ensure_loaded_async()
 
     record = {
         "teacher": req.teacher,
