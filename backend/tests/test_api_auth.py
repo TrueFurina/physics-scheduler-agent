@@ -1089,3 +1089,58 @@ def test_status_hint_says_loaded_when_loaded(monkeypatch):
     monkeypatch.setattr(rs._db, "loaded", True)
     r = client.get("/api/reschedule/status")
     assert r.json().get("loaded_hint") == "已加载"
+
+
+# ---------------------------------------------------------------------------
+# R31：agent 层返回的字段，API 层必须真的透传出去
+#
+# `reschedule_chat` 的 `data` 是**白名单拼出来的 dict**：
+#
+#     data={ "target_week": ..., "available_slots": ..., ... }
+#
+# 漏写一个键 = 该字段被静默吞掉。R21 在 agent 层加了
+# `course_name` / `course_unrecognized`，并注释写着"下游不要从 message 里
+# 正则反解"—— 但 API 层从未透传，下游根本拿不到。
+#
+# 这个 bug 在有 487 个测试的情况下活了十轮，因为：
+#   · agent 层的测试直接调 `process_request`，看得到字段
+#   · API 层的测试只断言 status_code / success
+# **两层各自都对，接缝处没人看。**
+# ---------------------------------------------------------------------------
+
+
+def test_chat_passes_through_course_fields():
+    """`/chat` 的 data 里必须带上 course_name 与 course_unrecognized。"""
+    r = client.post("/api/reschedule/chat", json={
+        "message": "我是吴琳，把声速测量调到第3周", "fast": True,
+    })
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert "course_name" in data, (
+        "API 层没透传 course_name —— agent 层返回了但被 data 白名单吞掉"
+    )
+    assert "course_unrecognized" in data, (
+        "API 层没透传 course_unrecognized —— R21 的软提示在下游拿不到"
+    )
+
+
+def test_chat_marks_unrecognized_course_via_structured_field():
+    """简称匹配不到全名时，结构化字段要标出来（而不是只在 message 里说）。"""
+    # 先预热：不加载数据会走"尚未加载"分支，验不到正常路径
+    client.get("/api/reschedule/teachers")
+    r = client.post("/api/reschedule/chat", json={
+        "message": "我是教师H，把PN结调到第3周", "fast": True,
+    })
+    assert r.status_code == 200
+    data = r.json()["data"]
+    if data.get("need_info"):
+        pytest.skip("该数据集下先追问了，未走到出结果的分支")
+    # 断言的是**两个字段之间的一致性**，不是某个固定值 ——
+    # 演示表里没有「PN结…」这门课，所以 course_name 一定是 None；
+    # 但真实表里可能有，不能把"这个数据集的结果"写成断言。
+    recognized = bool(data.get("course_name"))
+    flag = data.get("course_unrecognized")
+    assert flag is (not recognized), (
+        f"course_unrecognized={flag} 与 course_name={data.get('course_name')!r} 矛盾 —— "
+        "下游要么拿到错的标志，要么只能去正则解析 message"
+    )
