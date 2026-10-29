@@ -552,6 +552,12 @@ class RescheduleAgent:
                 "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": [],
+                # R31：所有分支的字段集必须一致 —— 少一个键，下游拿到的
+                # 就是 None，而 None 在不同分支上含义完全不同（未识别 / 未计算 / 失败）。
+                "course_name": parsed.get("course_name"),
+                "course_unrecognized": not parsed.get("course_name"),
+                "ai_plans": [],
+                "total": 0,
             }
 
         result = self.find_slots_with_reasons(parsed["target_week"], teacher_name=parsed.get("teacher_name"))
@@ -559,6 +565,12 @@ class RescheduleAgent:
         excluded = result["excluded"]
 
         if not slots:
+            # R31：这个早返回分支原先**没有** course_name / course_unrecognized。
+            # 于是同一个字段在"有结果"和"零结果"两条路径上存在性不同 ——
+            # 下游 `data.get("course_unrecognized")` 在零结果时拿到 None，
+            # 被当成"不是未识别"，与真实语义相反。
+            #
+            # 又一次"白名单返回体 + 多分支"的接缝事故（同族：API 层没透传）。
             return {
                 "success": True,
                 "message": f"第{parsed['target_week']}周没有空闲时段，请尝试其他周次",
@@ -566,6 +578,10 @@ class RescheduleAgent:
                 "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": excluded,
+                "course_name": parsed.get("course_name"),
+                "course_unrecognized": not parsed.get("course_name"),
+                "ai_plans": [],
+                "total": 0,
             }
 
         # 按星期几分组展示
