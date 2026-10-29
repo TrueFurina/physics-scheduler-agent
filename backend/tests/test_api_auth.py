@@ -890,3 +890,170 @@ def test_master_empty_name_says_what_to_do(path, body):
     detail = r.json()["detail"]
     assert "不能为空" in detail
     assert any(k in detail for k in ("请", "填写", "再")), f"无可操作指引：{detail}"
+
+
+# ---------------------------------------------------------------------------
+# 17. 上传重载的原子性（R4 竞态实测）
+# ---------------------------------------------------------------------------
+# 发现过程：`load_from_excel` 是原地改写（先 loaded=False、entries=[]，
+# 再逐行填充）。在清空后注入 300ms 延迟，并发读取方 **100% 读到 0 条**
+# （21,572,523 次读数全部异常）。真实全量解析约 157ms，窗口虽窄但确实存在。
+#
+# 修复：upload_schedule 改为「先构建新 ScheduleDatabase，成功后原子替换
+# 全局引用」，读取方要么看到旧表、要么看到新表。
+#
+# 修复后同一探针：异常读数 0 次。
+
+
+def test_upload_does_not_blank_db_during_reload(monkeypatch):
+    """上传期间，并发读取不得看到空表或半成品。"""
+    import threading
+    import time as _time
+
+    from app.api import reschedule as rs
+    from app.utils.excel_parser import ScheduleDatabase
+
+    # 准备一份可解析的 xlsx
+    import io as _io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["h1"])
+    ws.append(["h2"])
+    for i in range(10):
+        ws.append([i + 1, "周一", "567", "甲班", f"{i}组", "项目A", "A410", "吴老师"])
+    buf = _io.BytesIO()
+    wb.save(buf)
+    payload = buf.getvalue()
+
+    # 基线：先让 _db 处于已加载状态
+    base_db = ScheduleDatabase()
+    monkeypatch.setattr(rs, "_db", base_db)
+    monkeypatch.setattr(rs, "_master_data", rs.MasterData())
+    monkeypatch.setattr(rs, "_master_tasks", [])
+    import pathlib as _pathlib
+    import tempfile as _tempfile
+
+    _tmp = _pathlib.Path(_tempfile.mkdtemp())
+    monkeypatch.setattr(rs, "_DB_PATH", str(_tmp / "t.db"))
+    monkeypatch.setattr(rs, "_DATA_DIR", str(_tmp / "up"))
+    monkeypatch.setattr(rs, "_landing_store", None)
+
+    orig_load = ScheduleDatabase.load_from_excel
+
+    # 第一步：正常速度先传一次，建立 "10 条" 基线。
+    # 不先建基线的话，采样线程会在上传**之前**读到 0 条，误报为异常。
+    r0 = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("base.xlsx", payload, "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+    assert r0.status_code == 200, f"基线建立失败：{r0.status_code} {r0.text[:150]}"
+    assert len(rs._db.entries) == 10, f"基线条数异常：{len(rs._db.entries)}"
+
+    # 第二步：让解析变慢，放大重载窗口
+    def slow(self, *a, **kw):
+        r = orig_load(self, *a, **kw)
+        _time.sleep(0.6)
+        return r
+
+    monkeypatch.setattr(ScheduleDatabase, "load_from_excel", slow)
+
+    stop = threading.Event()
+    bad = []
+    reads = [0]
+    saw_nonempty = [0]
+
+    def reader():
+        while not stop.is_set():
+            cur = rs._db
+            n = len(cur.entries)
+            reads[0] += 1
+            # 记录"窗口内确实读到过数据"的证据：否则可能是读取线程根本没跑在窗口内，
+            # 测试会假绿（变异体存活正是这个原因）。
+            if n > 0:
+                saw_nonempty[0] += 1
+            # 只看条数，不看 loaded。
+            # 诊断（R4）：变异状态下读取方看到的是 (entries=0, loaded=False)，
+            # 因为 load_from_excel 先置 loaded=False 再清空。若把 loaded 当条件，
+            # 这类样本会被整个漏掉，测试假绿。
+            if n != 10:
+                bad.append((n, cur.loaded))
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+    r = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("s.xlsx", payload, "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+    stop.set()
+    t.join(timeout=3)
+
+    # 恢复
+    monkeypatch.setattr(ScheduleDatabase, "load_from_excel", orig_load)
+
+    assert r.status_code == 200, f"上传失败：{r.status_code} {r.text[:150]}"
+    assert reads[0] > 0, "并发读取未执行"
+    # 反假绿：读取线程必须在窗口内真的读到过非空数据，
+    # 否则"没发现异常"只是因为没读到，而不是因为原子性生效。
+    assert saw_nonempty[0] > 0, (
+        f"读取线程在 {reads[0]} 次采样中从未读到非空数据——"
+        "说明它没覆盖到上传窗口，此测试无效（需调大 sleep 或增加采样）"
+    )
+    assert not bad, (
+        f"上传期间读到不一致数据 {len(bad)} 次（含空表），"
+        f"示例 (entries, loaded)：{bad[:5]}"
+    )
+
+
+def test_upload_keeps_old_data_when_parse_fails(monkeypatch):
+    """解析失败时不应把现有 _db 搞空——旧数据要保持可用。"""
+    import io as _io
+
+    from app.api import reschedule as rs
+    from app.utils.excel_parser import ScheduleDatabase
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验安排表"
+    ws.append(["h1"])
+    ws.append(["h2"])
+    for i in range(3):
+        ws.append([i + 1, "周一", "567", "甲班", "1组", "项目A", "A410", "吴老师"])
+    ok = _io.BytesIO()
+    wb.save(ok)
+
+    monkeypatch.setattr(rs, "_DATA_DIR", str(__import__("tempfile").mkdtemp() + "/up"))
+    monkeypatch.setattr(rs, "_landing_store", None)
+    monkeypatch.setattr(rs, "_master_tasks", [])
+    monkeypatch.setattr(rs, "_master_data", rs.MasterData())
+
+    # 先加载成功
+    r1 = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("a.xlsx", ok.getvalue(), "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+    assert r1.status_code == 200, r1.text[:150]
+    before = len(rs._db.entries)
+    assert before == 3
+
+    # 再传一个坏文件
+    r2 = client.post(
+        "/api/reschedule/upload",
+        files={"file": ("bad.xlsx", b"not a zip", "application/vnd.ms-excel")},
+        headers=_admin_headers(),
+    )
+    assert r2.status_code == 400
+
+    after = len(rs._db.entries)
+    assert after == before, (
+        f"解析失败后旧数据被破坏：{before} -> {after}（应保持原样）"
+    )

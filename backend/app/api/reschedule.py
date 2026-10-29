@@ -295,10 +295,22 @@ async def upload_schedule(file: UploadFile = File(...)):
         f.write(content)
 
     try:
-        _db.load_from_excel(save_path)
-        rep = _db.load_report
+        # 先构建**新实例**，全部成功后再整体替换 —— 不原地清空 _db。
+        #
+        # 为什么（R4 竞态实测）：`load_from_excel` 是原地改写（先 loaded=False、
+        # entries=[]，再逐行填充）。实测在清空后插入 300ms 延迟，并发读取方
+        # **100% 读到 0 条**（21,572,523 次全部异常）。真实全量解析约 157ms，
+        # 窗口虽窄但确实存在——这期间 /teachers、/parallel/overview 会返回空数据。
+        #
+        # 改成"新实例 + 原子引用替换"后，读取方要么看到旧表、要么看到新表，
+        # 不会看到中间态。解析失败时 _db 保持原样，也不会把旧数据搞丢。
+        new_db = ScheduleDatabase()
+        new_db.load_from_excel(save_path)
+        rep = new_db.load_report
+        # 解析成功后才切换全局引用（下行 `global _db` 在函数内需先声明）
+        global _db, _schedule_fp
+        _db = new_db
         # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
-        global _schedule_fp
         from app import master_store as _ms
         _schedule_fp = _ms.schedule_fingerprint(save_path)
         _master_data.__init__()          # 回到未初始化态，下次访问按新表反推

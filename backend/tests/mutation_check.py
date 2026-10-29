@@ -44,6 +44,7 @@ FILES = {
         "M11": ["tests/test_api_auth.py"],
         "M12": ["tests/test_api_auth.py"],
         "M13": ["tests/test_api_auth.py"],
+        "M14": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -144,6 +145,16 @@ MUTANTS = [
         'raise ValueError("课程名不能为空，请填写后再提交")',
         'raise ValueError("课程名不能为空")',
         "master_empty_name",
+    ),
+    (
+        "M14", "上传时非原子替换（暴露空表中间态）",
+        "app/api/reschedule.py",
+        """        new_db = ScheduleDatabase()
+        new_db.load_from_excel(save_path)""",
+        """        new_db = ScheduleDatabase()
+        globals()["_db"] = new_db  # MUTANT
+        new_db.load_from_excel(save_path)""",
+        "blank_db",
     ),
 ]
 
