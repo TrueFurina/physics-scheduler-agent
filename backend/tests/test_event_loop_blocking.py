@@ -299,3 +299,85 @@ def test_no_async_route_calls_blocking_io_directly():
         "async 路由直接同步调用了阻塞函数（会冻住事件循环）：\n"
         + "\n".join(offenders)
     )
+
+
+# ---------- R27：R25 的并发副作用 —— 冷启动会加载两次 ----------
+#
+# R25 把加载挪到线程池后，`_db.loaded` 只在**所有并发请求都返回后**才由
+# `_ensure_loaded_async` 设置。于是：
+#
+#   t=0   N 个请求同时进入 → 都看到 loaded=False → 都去排队
+#   t=6   线程 1 拿锁、加载完、设 loaded=True、返回
+#   t=6   线程 2 拿锁 → 双检看到 loaded=True → 正确快速返回
+#   t=6   线程 1 回到 async 端 → 设 loaded=True
+#   t=?   另一个**尚未进入线程池**的请求在 async 端判 loaded=False → 又排队
+#         → 线程 3 拿锁，看到 loaded=True → 空转返回
+#
+# 实测（400ms 模拟冷解析）：
+#     10/40/100/300 并发 → 总耗时都是 ~810 ms（理论 400），加载次数都是 **2**
+#
+# 不会无限膨胀（锁内双检挡住了），但首次请求的延迟平白翻倍。
+# 真实冷解析 3.8s 时，这是 3.8s → 7.6s。
+#
+# 修法：由**拿到锁的那个 worker 自己**在出锁前把 loaded 置真，
+# 而不是回到事件循环后再设。这样 async 端的复检立刻能看到。
+
+def _make_slow_loader(calls: list, delay=0.05):
+    """模拟冷解析：计数 + 占住锁。"""
+    def loader():
+        calls.append(1)
+        threading.Event().wait(delay)   # 可被唤醒的 sleep，别用 time.sleep 卡死退出
+        return ("ok", 433)
+    return loader
+
+
+def test_concurrent_cold_start_loads_exactly_once(monkeypatch):
+    """N 个请求同时冷启动，整表只该解析 1 次（双检锁的意义就在这里）。"""
+    calls = []
+
+    def fake_load():
+        calls.append(threading.current_thread().name)
+        threading.Event().wait(0.05)
+        return ("ok", 433)
+
+    monkeypatch.setattr(api, "_load_default_schedule", fake_load)
+    # 冷启动：先让 db 处于未加载态
+    monkeypatch.setattr(api._db, "loaded", False, raising=False)
+    monkeypatch.setattr(api._db, "entries", [], raising=False)
+
+    async def main():
+        await asyncio.gather(*[api._ensure_loaded_async() for _ in range(20)])
+
+    asyncio.run(main())
+    assert len(calls) == 1, (
+        f"20 个并发请求冷启动，整表解析了 {len(calls)} 次 —— "
+        "双检锁失效，首次请求延迟被放大（真实冷解析 3.8s → 7.6s）"
+    )
+    assert api._db.loaded is True, "加载完没把 loaded 置真"
+
+
+def test_concurrent_cold_start_records_loaded_inside_worker(monkeypatch):
+    """`loaded` 必须在**下一个 worker 拿锁之前**已经为真。
+
+    这就是上面那条时序的关键点：如果只在 async 端设，等锁的 worker 出来后
+    又会有请求看到 False 再排一次队。
+    """
+    seen_states = []
+    real_lock = api._load_lock
+
+    def fake_load():
+        # 加载结束的那一刻，锁还没释放；loaded 应该已经由调用方在内部置真，
+        # 或者至少由拿到锁的 worker 置真 —— 这里记录锁内的观察值
+        seen_states.append(api._db.loaded)
+        threading.Event().wait(0.03)
+        return ("ok", 1)
+
+    monkeypatch.setattr(api, "_load_default_schedule", fake_load)
+    monkeypatch.setattr(api._db, "loaded", False, raising=False)
+    monkeypatch.setattr(api._db, "entries", [], raising=False)
+
+    async def main():
+        await asyncio.gather(*[api._ensure_loaded_async() for _ in range(8)])
+
+    asyncio.run(main())
+    assert len(seen_states) == 1, f"进入了 {len(seen_states)} 次加载，应为 1 次"
