@@ -16,6 +16,7 @@
 注意：「线上版本落后」是**信息项**不是失败项 —— 它正是发布的动机。
 """
 
+import json
 import os
 import re
 import subprocess
@@ -143,6 +144,31 @@ def main():
                   blocking=False)
         except Exception as e:
             check("线上可达性", True, f"打不到线上（{e}）—— 离线环境跳过", blocking=False)
+
+        # 6b. 线上**后端**新鲜度（R31）
+        #
+        # 上面只比前端产物 hash。R30 实测发现了这条盲区：
+        # 前端 hash 能比，后端却没有任何指纹 —— 「前端已发、后端还是旧版」
+        # 完全看不出来。当时是靠手工探 `/chat` 看有没有某个新字段才发现的。
+        #
+        # 这里把"后端新不新"变成一次可重复的探测（scripts/probe_backend_freshness.py）。
+        # 仍然是信息项：线上落后正是发布的动机，不该拦发布。
+        try:
+            import subprocess as _sp
+            fr = _sp.run(
+                [sys.executable, os.path.join(ROOT, "scripts", "probe_backend_freshness.py"),
+                 "--json"],
+                cwd=ROOT, capture_output=True, text=True, timeout=180)
+            fdata = json.loads(fr.stdout or "{}")
+            stale_rounds = [r["round"] for r in fdata.get("rows", []) if r["ok"] is False]
+            if stale_rounds:
+                check("线上后端新鲜度", True,
+                      f"⚠️ 后端落后：{', '.join(stale_rounds)} 的修复未上线"
+                      "（前端 hash 一致也会漏掉这种状态）", blocking=False)
+            else:
+                check("线上后端新鲜度", True, "仓库里的行为特征线上都有", blocking=False)
+        except Exception as e:  # noqa: BLE001
+            check("线上后端新鲜度", True, f"探测跳过（{e}）", blocking=False)
 
     # 7. 本地 8023 预览（信息项）
     if not offline:
