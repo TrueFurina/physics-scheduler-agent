@@ -65,3 +65,40 @@ def test_bare_prefix_is_not_treated_as_full_name(agent):
     # 要么解析出名单里的具体教师，要么为 None（触发追问），
     # 绝不能是 "教师" 这个前缀本身
     assert name != "教师", "'教师' 是前缀，不能当作完整姓名"
+
+
+# ---------------------------------------------------------------------------
+# R21：课程名未识别时要**说出口**，而不是静默出全周沙盘
+# ---------------------------------------------------------------------------
+# 实测：教秘说「我是教师H，把PN结调到第3周」——简称匹配不到全名
+# 「PN结正向压降温度特性实验」，course_name=None。
+#
+# 时段计算本身不受影响（find_slots_with_reasons 只用 周次+教师），
+# 但教秘会以为系统知道"要调哪门课"，而提交申请时课程名是必填的。
+#
+# 设计取舍：**不阻断**（阻断会让"第2轮回答第3周就办完"的多轮流程失效，
+# 实测 4 个测试变红），只把这件事说出口。
+
+
+def test_unrecognized_course_is_flagged(agent):
+    """简称匹配不到全名时，结果要明确标出 course_unrecognized。"""
+    r = agent.process_request("我是教师H，把PN结调到第3周", with_ai=False)
+    assert r.get("success") is True, "不应阻断：时段计算不依赖课程名"
+    assert r.get("course_unrecognized") is True
+    assert r.get("course_name") is None
+    assert "没能从您的话里认出" in r.get("message", ""), "提示缺失"
+
+
+def test_recognized_course_is_not_flagged(agent):
+    """全名能匹配上时不应误报。"""
+    r = agent.process_request("我是教师H，把PN结正向压降温度特性实验调到第3周", with_ai=False)
+    assert r.get("course_unrecognized") is False
+    assert r.get("course_name") == "PN结正向压降温度特性实验"
+    assert "没能从您的话里认出" not in r.get("message", "")
+
+
+def test_course_names_are_real_in_dataset(agent):
+    """守卫：测试里用的课程名必须真实存在于数据里，否则测的是假数据。"""
+    names = {e.experiment for e in agent.db.entries if e.experiment}
+    assert "PN结正向压降温度特性实验" in names
+    assert "扭摆法测物体转动惯量" in names
