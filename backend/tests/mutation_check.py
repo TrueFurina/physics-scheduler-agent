@@ -56,6 +56,7 @@ FILES = {
     "M23": ["tests/test_week_bounds.py"],
     "M24": ["tests/test_event_loop_blocking.py"],
     "M25": ["tests/test_event_loop_blocking.py"],
+    "M26": ["tests/test_event_loop_blocking.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -259,6 +260,14 @@ MUTANTS = [
         "    await run_in_threadpool(_persist_master_state)",
         "    _persist_master_state()  # MUTANT",
         "persist_master_state",
+    ),
+    (
+        "M26", "loaded 延迟到事件循环再生效（并发加载两次）",
+        "app/api/reschedule.py",
+        """    if not _db.loaded:
+        _db.loaded = True""",
+        "    pass  # MUTANT: loaded 交回 async 端设置",
+        "cold_start",
     ),
 ]
 
