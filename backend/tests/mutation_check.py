@@ -40,6 +40,7 @@ FILES = {
     "M7": ["tests/test_web_serving.py"],
     "M8": ["tests/test_api_auth.py"],
         "M9": ["tests/test_api_auth.py"],
+        "M10": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -110,6 +111,15 @@ MUTANTS = [
         """    n = int(getattr(sheet, "max_row", 0) or 0)
     if False:  # MUTANT: 不检查行数""",
         "sheet_size",
+    ),
+    (
+        "M10", "令牌候选不去重",
+        "app/security.py",
+        """    # 去重但保序
+    seen: set[str] = set()
+    return [t for t in candidates if not (t in seen or seen.add(t))]""",
+        """    return candidates  # MUTANT: 去掉去重""",
+        "extract_tokens",
     ),
 ]
 

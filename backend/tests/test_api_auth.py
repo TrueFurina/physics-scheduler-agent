@@ -688,3 +688,68 @@ def test_sheet_too_large_error_carries_structured_fields():
     assert e.limit == 20000
     assert e.actual == 50000
     assert isinstance(e, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# 14. 令牌候选去重（R1 变异发现：原测试不覆盖）
+# ---------------------------------------------------------------------------
+# 发现过程：把 `_extract_tokens` 的去重逻辑删掉（直接 `return candidates`），
+# `duplicate_authorization_values_are_all_considered` 等 3 个测试**仍然全绿**。
+# 说明去重本身没有任何测试保护。
+#
+# 去重不是功能问题（重复 token 仍能验过），而是：
+#   1. 同一 token 被重复验签 N 次 → N 次 HMAC 计算
+#   2. 攻击者可以塞上千个重复头放大 CPU（限流按请求计，不按头数计）
+# 所以它值得被锁住。
+
+
+def test_extract_tokens_deduplicates_preserving_order():
+    """同一令牌重复出现时只保留一份，且不改变首次出现的顺序。"""
+    from app.security import _extract_tokens
+
+    class _Req:
+        def __init__(self, items):
+            self._items = items
+
+        class _H:
+            def __init__(self, items):
+                self._items = items
+
+            def getlist(self, name):
+                return self._items.get(name, [])
+
+        @property
+        def headers(self):
+            return self._H(self._items)
+
+    req = _Req({
+        "authorization": ["Bearer tok-A", "Bearer tok-A", "Bearer tok-B"],
+        "x-admin-token": ["tok-A"],
+    })
+    got = _extract_tokens(req)
+    # tok-A 出现两次（Bearer + x-admin-token）→ 只留一个；tok-B 保留
+    assert got == ["tok-A", "tok-B"], f"去重或保序失效：{got}"
+
+
+def test_extract_tokens_dedup_under_many_duplicates():
+    """大量重复头不应产生等量候选——这是放大攻击的入口。"""
+    from app.security import _extract_tokens
+
+    class _Req:
+        class _H:
+            def __init__(self, items):
+                self._items = items
+
+            def getlist(self, name):
+                return self._items.get(name, [])
+
+        def __init__(self, items):
+            self._h = self._H(items)
+
+        @property
+        def headers(self):
+            return self._h
+
+    req = _Req({"authorization": ["Bearer same"] * 500})
+    got = _extract_tokens(req)
+    assert len(got) == 1, f"500 个重复头应压成 1 个候选，实际 {len(got)}"
