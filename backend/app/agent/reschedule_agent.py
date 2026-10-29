@@ -197,7 +197,12 @@ class RescheduleAgent:
                     teacher_name = t
                     break
 
-        for c in self.db.get_all_classes():
+        # 班级名同样**长名优先**。`get_all_classes()` 返回的是 sorted()，
+        # 按字典序排 —— 而字典序里 "2024级电子科学与技术" 排在
+        # "2024级电子科学与技术1班" 前面，短名会先命中、把班名截断。
+        # 当前 17 个真实班名里没有前缀对，但这是**数据巧合**而非代码保证，
+        # 学校新增一个班就会静默出错。
+        for c in sorted(self.db.get_all_classes(), key=len, reverse=True):
             if c in text:
                 class_name = c
                 break
