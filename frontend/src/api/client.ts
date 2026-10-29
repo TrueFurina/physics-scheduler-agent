@@ -86,6 +86,16 @@ export interface ChatResponse {
     followup_questions?: string[];
     /** 本轮已确认的槽位；下一轮请求原样带回，后端做无状态合并（多轮追问） */
     context?: NlSlotContext;
+    /**
+     * 本轮识别出的课程名；识别不出时为 null。
+     *
+     * R33：这两个字段从 R21 起后端就在返回（R31 才补上 API 层透传），
+     * 但前端类型里一直没有 —— 于是"要读它们"这件事在类型层面就是不可能的，
+     * 代码里自然也就没人读。`grep course_unrecognized frontend/src` 曾为 0。
+     */
+    course_name?: string | null;
+    /** true = 没认出是哪门课/哪个实验，需要教秘在沙盘页补选 */
+    course_unrecognized?: boolean;
   };
 }
 
