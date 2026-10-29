@@ -451,6 +451,13 @@ class RescheduleAgent:
             "target_week": parsed.get("target_week"),
             "available_slots": [],
             "excluded_slots": [],
+            # R32：追问分支原先只有 8 键，比正常分支少 4 个。
+            # 追问时课程名通常也还没确定，但**字段本身必须存在** ——
+            # 下游靠"字段在不在"区分契约版本，靠"值是什么"区分当前状态。
+            "course_name": parsed.get("course_name"),
+            "course_unrecognized": not parsed.get("course_name"),
+            "ai_plans": [],
+            "total": 0,
         }
 
     def process_request(self, text: str, with_ai: bool = True,
@@ -527,6 +534,10 @@ class RescheduleAgent:
                     "total": 0,
                     "need_info": False,
                     "followup_questions": [],
+                    # R32：五个分支的键集必须一致（见 tests/test_response_contract.py）
+                    "course_name": parsed.get("course_name"),
+                    "course_unrecognized": not parsed.get("course_name"),
+                    "ai_plans": [],
                 }
 
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
@@ -549,6 +560,7 @@ class RescheduleAgent:
             return {
                 "success": False,
                 "message": "排课数据尚未加载，请先上传实验安排表",
+                "target_week": parsed.get("target_week"),
                 "context": self._slot_context(parsed),
                 "available_slots": [],
                 "excluded_slots": [],
@@ -558,6 +570,9 @@ class RescheduleAgent:
                 "course_unrecognized": not parsed.get("course_name"),
                 "ai_plans": [],
                 "total": 0,
+                # R32：补上另两个键 —— 五个分支键集必须一致
+                "need_info": False,
+                "followup_questions": [],
             }
 
         result = self.find_slots_with_reasons(parsed["target_week"], teacher_name=parsed.get("teacher_name"))
@@ -582,6 +597,8 @@ class RescheduleAgent:
                 "course_unrecognized": not parsed.get("course_name"),
                 "ai_plans": [],
                 "total": 0,
+                "need_info": False,
+                "followup_questions": [],
             }
 
         # 按星期几分组展示
@@ -669,4 +686,9 @@ class RescheduleAgent:
             "course_unrecognized": course_unrecognized,
             "ai_plans": ai_plans,
             "total": total,
+            # R32：正常分支原先缺这两个键（只有追问分支才有）。
+            # 调用方无法用 `r.get("need_info")` 判断"这次是不是在追问"——
+            # 正常结果里它不存在，和 False 不是一回事。
+            "need_info": False,
+            "followup_questions": [],
         }
