@@ -11,6 +11,8 @@ interface Props {
   onRetry?: () => void;
   /** 导出教务两类标准课表（基于当前安排表：班级课表 / 场地课表） */
   onExportClass?: () => void;
+  /** 当前正在导出的种类；非空时禁用导出按钮并显示"生成中" */
+  exportingKind?: 'class' | 'room' | 'master' | null;
   onExportRoom?: () => void;
   /** 导出基础数据台账（实验项目/教师/场地/班级 四张实体表） */
   onExportMaster?: () => void;
@@ -26,7 +28,7 @@ const detailTitle = (total: number | undefined, shown: number) =>
 /** 📊 数据看板：安排表体检报告 + 利用率/工作量统计。 */
 export default function DashboardView({
   auditLoading, auditData, auditError = '', statsData, statsError = '', onRetry,
-  onExportClass, onExportRoom, onExportMaster,
+  onExportClass, onExportRoom, onExportMaster, exportingKind,
 }: Props) {
   // "没发现冲突"有两种：真干净，和"有一部分根本没检查"。后者不能标绿色。
   const noRoom = auditData?.missing_room_count ?? 0;
@@ -313,21 +315,27 @@ export default function DashboardView({
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={onExportClass}
-                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+                  disabled={!!exportingKind}
+                  title={exportingKind === 'class' ? '正在生成班级课表，请稍候' : undefined}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ⬇️ 班级课表（每班一页）
+                  {exportingKind === 'class' ? '⏳ 正在生成…' : '⬇️ 班级课表（每班一页）'}
                 </button>
                 <button
                   onClick={onExportRoom}
-                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium"
+                  disabled={!!exportingKind}
+                  title={exportingKind === 'room' ? '正在生成场地课表，请稍候' : undefined}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ⬇️ 场地课表（每间一页）
+                  {exportingKind === 'room' ? '⏳ 正在生成…' : '⬇️ 场地课表（每间一页）'}
                 </button>
                 <button
                   onClick={onExportMaster}
-                  className="px-3 py-1.5 bg-white text-emerald-700 border border-emerald-300 rounded-lg hover:bg-emerald-50 text-xs font-medium"
+                  disabled={!!exportingKind}
+                  title={exportingKind === 'master' ? '正在生成台账，请稍候' : undefined}
+                  className="px-3 py-1.5 bg-white text-emerald-700 border border-emerald-300 rounded-lg hover:bg-emerald-50 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ⬇️ 基础数据台账（4 张实体表）
+                  {exportingKind === 'master' ? '⏳ 正在生成…' : '⬇️ 基础数据台账（4 张实体表）'}
                 </button>
               </div>
               <p className="text-[11px] text-gray-400 mt-1.5">
