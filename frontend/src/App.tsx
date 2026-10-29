@@ -837,10 +837,25 @@ function App() {
       // 这类消息原来是灰字，和"✅ 第7周可用时段"看起来是同一种反馈，
       // 教秘读不出"这条路走不通"。
       if (r.data.success === false) {
+        // 拒绝时同样要清空：否则屏幕上留着上一次的沙盘，而请输入框已清空，
+        // 教秘看到的是「❌ 范围外」+ 一片绿格子，两者互相矛盾。
+        setAvailable([]);
+        setExcluded(data.excluded_slots || []);
+        setAiPlans([]);
+        setPlansLoading(false);
         setNlMsg(`❌ ${r.data.message}`);
         return;
       }
-      setNlMsg(r.data.message);
+      // success=true 但一个时段都没有 —— 通常是「第N周该教师名下所有课时段
+      // 都已被占满」。这条也必须标成失败态，且**同样要清掉上一轮的沙盘**：
+      // 原来它走的是最后那行灰字，既不报错也不打开沙盘，教秘输入框清空后
+      // 屏幕上仍是上一次查询的绿格子 —— 看着像这次也成功了。
+      setAvailable([]);
+      setExcluded(data.excluded_slots || []);
+      setAiPlans([]);
+      setPlansLoading(false);
+      setNlMsg(`❌ ${r.data.message}`);
+      return;
     } catch (err: any) {
       setNlMsg(`❌ 请求失败：${describeApiError(err)}`);
     } finally {
