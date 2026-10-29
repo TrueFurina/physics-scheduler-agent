@@ -324,20 +324,36 @@ async def upload_schedule(file: UploadFile = File(...)):
         # 改成"新实例 + 原子引用替换"后，读取方要么看到旧表、要么看到新表，
         # 不会看到中间态。解析失败时 _db 保持原样，也不会把旧数据搞丢。
         new_db = ScheduleDatabase()
-        new_db.load_from_excel(save_path)
+        new_db.load_from_excel(save_path)      # 225ms，锁外做，不占写锁
         rep = new_db.load_report
         # 解析成功后才切换全局引用（下行 `global _db` 在函数内需先声明）
-        global _db, _schedule_fp
-        _db = new_db
-        # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
+        #
+        # ⚠️ R29：切换必须持 `_DB_WRITE_LOCK`。
+        # 换表时 `_landings().clear()` 会清掉旧表上的落地方案。若此刻有
+        # `land_commit` 正在 `_landings().save(...)`，两条语句交错就会留下
+        # 一条**属于旧表**的落地记录 —— 新表上飘着一份旧方案，下次重启重放
+        # 会把它当成新表的调整硬塞进去。
+        #
+        # 实测（save 与 clear 之间 5–10ms 窗口）：无锁 30/30 次残留幽灵记录，
+        # 持同一把锁 0/30。
+        #
+        # 解析（225ms）放在锁外：锁只覆盖"替换引用 + 作废旧状态"这一小段，
+        # 不把整表解析也锁进去。
         from app import master_store as _ms
-        _schedule_fp = _ms.schedule_fingerprint(save_path)
-        _master_data.__init__()          # 回到未初始化态，下次访问按新表反推
-        _master_tasks.clear()
-        _ms.clear()
-        # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
-        # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
-        discarded = _landings().clear()
+        global _db, _schedule_fp
+        # 一整段都在锁内：替换引用 + 作废旧表派生的全部状态。
+        # 只锁 `_db = new_db` 是不够的 —— `_landings().clear()` 与并发的
+        # `land_commit` 里的 `_landings().save()` 交错，才是幽灵记录的来源。
+        with _DB_WRITE_LOCK:
+            _db = new_db
+            # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
+            _schedule_fp = _ms.schedule_fingerprint(save_path)
+            _master_data.__init__()      # 回到未初始化态，下次访问按新表反推
+            _master_tasks.clear()
+            _ms.clear()
+            # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
+            # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
+            discarded = _landings().clear()
         msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
         if discarded:
             msg += f"（已丢弃旧表上的落地方案 {discarded} 份，以新表为基准）"
