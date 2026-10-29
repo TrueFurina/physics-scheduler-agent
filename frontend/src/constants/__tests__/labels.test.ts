@@ -28,7 +28,14 @@ import { describe, expect, it } from 'vitest';
 // 用 vite 的 ?raw 读后端源码：不依赖 @types/node（本仓库没装，
 // views.test.tsx 里那几处 require/__dirname 已经因此让 tsc 报红）。
 import timeModelSrc from '../../../../backend/app/utils/time_model.py?raw';
-import { GRID_TIME_SLOTS, WEEKDAYS, timeSlotLabels } from '../../constants/labels';
+import rescheduleViewSrc from '../../views/RescheduleView.tsx?raw';
+
+/** 直接读源文件文本（走 vite ?raw，不依赖 @types/node）。 */
+function readSrc(rel: string): string {
+  if (rel === 'views/RescheduleView.tsx') return rescheduleViewSrc;
+  throw new Error('未注册的源文件：' + rel);
+}
+import { GRID_TIME_SLOTS, WEEKDAYS, WEEKDAYS_ALL, timeSlotLabels } from '../../constants/labels';
 
 /** 从后端源码里读出 CLOCK 的键（避免前端硬编码一份"我以为的后端口径"）。 */
 function backendClockKeys(): string[] {
@@ -80,5 +87,28 @@ describe('GRID_TIME_SLOTS 是旧口径（R35 记录，不修）', () => {
     expect([...GRID_TIME_SLOTS]).toEqual(['567', '678', '91011']);
     expect((GRID_TIME_SLOTS as readonly string[]).includes('MORNING')).toBe(false);
     expect(WEEKDAYS.length).toBe(5);
+  });
+});
+
+
+describe('WEEKDAYS_ALL 必须覆盖周末（R36）', () => {
+  /**
+   * 真实数据 433 条里 71 条在周末。调课沙盘此前只画 5 天，
+   * 那些课既不在"可用"也不在"被排除"里 —— 从界面上消失了。
+   *
+   * 修复后后端 `WEEKDAYS_ALL` 覆盖七天，前端沙盘列数也要跟着 7。
+   * 这条测试同时锁住"常量本身"和"沙盘用的就是这个常量"。
+   */
+  it('七天齐全且顺序为 周一→周日', () => {
+    expect([...WEEKDAYS_ALL]).toEqual(
+      ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
+    );
+  });
+
+  it('调课沙盘（RescheduleView）按 WEEKDAYS_ALL 渲染，不是 5 天', () => {
+    const src = readSrc('views/RescheduleView.tsx');
+    expect(src).toContain('WEEKDAYS_ALL');
+    expect(src).not.toContain('WEEKDAYS.map(');       // 旧 5 天常量不该再用
+    expect(src).toContain('repeat(7, 1fr)');          // 列数必须跟着 7
   });
 });
