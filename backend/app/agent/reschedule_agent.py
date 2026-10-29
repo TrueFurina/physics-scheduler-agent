@@ -409,6 +409,13 @@ class RescheduleAgent:
         questions = []
         if not parsed.get("teacher_name"):
             questions.append("请问是哪位老师需要调课？")
+        # ⚠️ 课程名也必须问。
+        #
+        # R21 实测：教秘说「我是教师H，把PN结调到第3周」——简称没写全
+        # （全名是「PN结正向压降温度特性实验」），规则匹配不到 → course_name=None。
+        # 此前这里不检查课程，于是**不追问、直接返回全周 80 个可用时段**，
+        # 教秘以为系统懂了，实际它对"要调哪门课"一无所知。
+        # 这比报错更危险：一份"看起来全可用"的沙盘会让人做出错误决定。
         if not parsed.get("target_week"):
             questions.append("请问要把课调到第几周？（例如：第5周、下周、下下周）")
         return questions
@@ -509,8 +516,18 @@ class RescheduleAgent:
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
         # 靠它判断"教师本人在这个时段有没有课"。不给教师就直出时段，等于跳过
         # 这一重冲突检查，把可能撞课的时段当成可用来推荐（实测直接返回 94 个）。
+        #
+        # 课程名同理（R21 实测）：教秘说「我是教师H，把PN结调到第3周」，
+        # 简称匹配不到全名「PN结正向压降温度特性实验」→ course_name=None。
+        # 此前这里不查课程，于是**不追问、直接返回全周 80 个可用时段**，
+        # 教秘以为系统懂了，实际它对"要调哪门课"一无所知。
+        # 一份"看起来全可用"的沙盘比报错更危险。
         if not parsed["target_week"] or not parsed.get("teacher_name"):
             return self._need_info(parsed, [])
+        # 课程名**不阻断**：`find_slots_with_reasons` 只用 (周次, 教师) 计算
+        # "这一周这个人哪些时段空着"，与具体哪门课无关。硬性追问会让
+        # "第2轮回答第3周就办完"这条多轮流程失效（实测 4 个测试变红）。
+        # 改为在结果里**明确提示**没识别出课程 —— 见下方 course_unrecognized。
 
         if not self.db.loaded:
             return {
@@ -592,6 +609,22 @@ class RescheduleAgent:
                     f"  {i}. {p['weekday']} {p['time_slot']} · {p['room']} — {p.get('reason', '')}"
                 )
 
+        # 课程名没识别出来时**明确提示**，而不是静默出一份全周沙盘。
+        #
+        # R21 实测：教秘说「我是教师H，把PN结调到第3周」——简称没写全
+        # （全名「PN结正向压降温度特性实验」），course_name=None。
+        # 时段计算本身不受影响（`find_slots_with_reasons` 只用 周次+教师），
+        # 但教秘会以为系统知道"要调哪门课"，而后续提交申请时课程名是必填的。
+        #
+        # 所以不阻断（不破坏多轮流程），只把这件事说出口。
+        course_unrecognized = not parsed.get("course_name")
+        if course_unrecognized:
+            summary_lines.append(
+                "\n⚠️ 没能从您的话里认出具体是哪门课/哪个实验。"
+                "上面的可用时段是「这一周您名下所有课」的空闲情况；"
+                "如果要针对某一门课调课，请在提交申请时选定课程。"
+            )
+
         return {
             "success": True,
             "message": "\n".join(summary_lines),
@@ -599,6 +632,9 @@ class RescheduleAgent:
             "context": self._slot_context(parsed),
             "available_slots": slots,
             "excluded_slots": excluded,
+            # 结构化字段与中文文案并列：下游不要从 message 里正则反解
+            "course_name": parsed.get("course_name"),
+            "course_unrecognized": course_unrecognized,
             "ai_plans": ai_plans,
             "total": total,
         }
