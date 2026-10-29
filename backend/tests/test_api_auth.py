@@ -1057,3 +1057,35 @@ def test_upload_keeps_old_data_when_parse_fails(monkeypatch):
     assert after == before, (
         f"解析失败后旧数据被破坏：{before} -> {after}（应保持原样）"
     )
+
+
+# ---------------------------------------------------------------------------
+# 18. /status 的加载提示（R18 走查 README bootstrap 时发现）
+# ---------------------------------------------------------------------------
+# 问题：冷启动后 `/status` 返回 loaded=false（这是正确的，该端点只查状态不触发
+# 懒加载）。但新部署者第一眼看到 false 会以为服务坏了 —— README 也没说"首次
+# 访问数据端点才加载"。
+#
+# 修复：/status 增加 loaded_hint，明确说明这是懒加载。
+
+
+def test_status_hint_explains_lazy_load(monkeypatch):
+    """未加载时 hint 必须解释这是懒加载，并指出如何触发。"""
+    from app.api import reschedule as rs
+
+    monkeypatch.setattr(rs._db, "loaded", False)
+    r = client.get("/api/reschedule/status")
+    assert r.status_code == 200
+    hint = r.json().get("loaded_hint", "")
+    assert hint, "/status 缺少 loaded_hint"
+    assert "懒加载" in hint or "未加载" in hint, f"未解释状态：{hint}"
+    # 要给出可操作的下一步
+    assert "teachers" in hint or "数据端点" in hint, f"未指出如何触发加载：{hint}"
+
+
+def test_status_hint_says_loaded_when_loaded(monkeypatch):
+    from app.api import reschedule as rs
+
+    monkeypatch.setattr(rs._db, "loaded", True)
+    r = client.get("/api/reschedule/status")
+    assert r.json().get("loaded_hint") == "已加载"
