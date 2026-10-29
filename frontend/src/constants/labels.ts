@@ -24,5 +24,17 @@ export const timeSlotLabels: Record<string, string> = {
 /** 沙盘网格里按顺序渲染的工作日。 */
 export const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五'] as const;
 
+/**
+ * 调课沙盘要渲染的**全部七天**（R36）。
+ *
+ * 后端 `WEEKDAYS_ALL` 已改为覆盖周末：真实数据 433 条里 71 条在周末，
+ * 而沙盘此前只画 5 天 —— 那些课"既不可用也不在排除列表"，从界面上消失了。
+ *
+ * `WEEKDAYS` 保留给并行排课沙盘（那里只排工作日三时段，属既定口径）。
+ */
+export const WEEKDAYS_ALL = [
+  '周一', '周二', '周三', '周四', '周五', '周六', '周日',
+] as const;
+
 /** 沙盘网格里按顺序渲染的时段（与 timeSlotLabels 的键保持一致）。 */
 export const GRID_TIME_SLOTS = ['567', '678', '91011'] as const;
