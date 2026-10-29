@@ -55,6 +55,7 @@ FILES = {
     "M22": ["tests/test_teacher_name_parse.py"],
     "M23": ["tests/test_week_bounds.py"],
     "M24": ["tests/test_event_loop_blocking.py"],
+    "M25": ["tests/test_event_loop_blocking.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -251,6 +252,13 @@ MUTANTS = [
         "    await run_in_threadpool(_ensure_loaded_sync)",
         "    _ensure_loaded_sync()  # MUTANT",
         "ensure_loaded",
+    ),
+    (
+        "M25", "主数据落盘退回同步执行",
+        "app/api/reschedule.py",
+        "    await run_in_threadpool(_persist_master_state)",
+        "    _persist_master_state()  # MUTANT",
+        "persist_master_state",
     ),
 ]
 
