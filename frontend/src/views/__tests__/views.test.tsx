@@ -584,4 +584,67 @@ describe('DashboardView', () => {
     expect(screen.getByText(/9\.4%/)).toBeTruthy();
     expect(screen.getByText(/448 格\/间/)).toBeTruthy();
   });
+
+  /**
+   * 导出中的按钮状态（R13 性能基线的后果固化）。
+   *
+   * 班级课表要生成 17 个 sheet，实测约 750ms；场地课表约 500ms。
+   * 没有反馈时用户会以为没响应而重复点击 → 重复下载。
+   */
+  describe('导出中状态', () => {
+    const noop = () => {};
+
+    it('exportingKind=class 时该按钮显示"正在生成…"并禁用', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+          exportingKind="class"
+        />,
+      );
+      const generating = screen.getByRole('button', { name: /正在生成/ });
+      expect((generating as HTMLButtonElement).disabled).toBe(true);
+      // 原"班级课表"按钮已变为"正在生成"，因此不再以原名存在
+      expect(screen.queryByRole('button', { name: /班级课表/ })).toBeNull();
+      // 其他两类仍是原名
+      expect(screen.getByRole('button', { name: /场地课表/ })).toBeTruthy();
+    });
+
+    it('导出中所有导出按钮都禁用（防并发导出）', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+          exportingKind="room"
+        />,
+      );
+      for (const re of [/正在生成/, /班级课表/, /基础数据台账/]) {
+        const btn = screen.getByRole('button', { name: re });
+        expect((btn as HTMLButtonElement).disabled).toBe(true);
+      }
+    });
+
+    it('未导出时按钮可点击且无"正在生成"', () => {
+      render(
+        <DashboardView
+          auditLoading={false}
+          auditData={audit}
+          statsData={stats}
+          onExportClass={noop}
+          onExportRoom={noop}
+          onExportMaster={noop}
+        />,
+      );
+      expect((screen.getByRole('button', { name: /班级课表/ }) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.queryByRole('button', { name: /正在生成/ })).toBeNull();
+    });
+  });
 });
