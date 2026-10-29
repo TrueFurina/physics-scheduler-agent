@@ -44,7 +44,19 @@ the data audit and standard-timetable export):
 
 - Python 3.10+
 - Node.js 18+
-- Environment variables: `JIYUAN_LVDONG_BASE_URL`, `JIYUAN_LVDONG_API_KEY` (LLM credentials)
+- **LLM credentials** (pick one; auto-detected in this order):
+
+| Priority | Env var | Note |
+|---:|---|---|
+| 1 | `ZHIPU_API_KEY` | Free & unlimited (primary) |
+| 2 | `MODELSCOPE_API_KEY` | Free 2000/day |
+| 3 | `TOKENHUB_API_KEY` | Trial pack, 402 when exhausted |
+| 4 | `DEEPSEEK_API_KEY` | Paid |
+| 5 | `AMD_API_KEY` / `XFYUN_API_KEY` | Free tier, rate-limited |
+| — | `JIYUAN_LVDONG_API_KEY` | **Deprecated: 402 exhausted, do not use** |
+
+> LLM is **optional** — the rule engine handles all scheduling logic.
+> Without it, intent parsing falls back to rules (set `LLM_DISABLED=1` to disable explicitly).
 
 ### Backend
 
@@ -84,7 +96,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **486 backend tests + 101 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **488 backend tests + 101 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -102,7 +114,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 486 pytest tests
+│   └── tests/                      # 488 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
