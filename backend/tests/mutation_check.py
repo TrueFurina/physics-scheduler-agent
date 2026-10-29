@@ -58,6 +58,7 @@ FILES = {
     "M25": ["tests/test_event_loop_blocking.py"],
     "M26": ["tests/test_event_loop_blocking.py"],
     "M27": ["tests/test_event_loop_blocking.py"],
+    "M28": ["tests/test_event_loop_blocking.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -163,7 +164,7 @@ MUTANTS = [
         "M14", "上传时非原子替换（暴露空表中间态）",
         "app/api/reschedule.py",
         """        new_db = ScheduleDatabase()
-        new_db.load_from_excel(save_path)""",
+        new_db.load_from_excel(save_path)      # 225ms，锁外做，不占写锁""",
         """        new_db = ScheduleDatabase()
         globals()["_db"] = new_db  # MUTANT
         new_db.load_from_excel(save_path)""",
@@ -277,6 +278,27 @@ MUTANTS = [
         "    def _locked_apply():\n        with _DB_WRITE_LOCK:\n            return _apply_reschedule(record, True, req.key or \"\")",
         "    def _locked_apply():\n        return _apply_reschedule(record, True, req.key or \"\")",
         "holds_write_lock",
+    ),
+    (
+        "M28", "换表不持写锁（幽灵落地记录）",
+        "app/api/reschedule.py",
+        """        with _DB_WRITE_LOCK:
+            _db = new_db
+            # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
+            _schedule_fp = _ms.schedule_fingerprint(save_path)
+            _master_data.__init__()      # 回到未初始化态，下次访问按新表反推
+            _master_tasks.clear()
+            _ms.clear()
+            # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
+            # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
+            discarded = _landings().clear()""",
+        """        _db = new_db  # MUTANT: 整段脱锁
+        _schedule_fp = _ms.schedule_fingerprint(save_path)
+        _master_data.__init__()
+        _master_tasks.clear()
+        _ms.clear()
+        discarded = _landings().clear()""",
+        "swap_section or share_a_lock",
     ),
 ]
 
