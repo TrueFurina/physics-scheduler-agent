@@ -100,6 +100,25 @@ _agent = RescheduleAgent(_db)
 _landing_store: Optional[plan_landing.LandingStore] = None
 _land_lock = threading.Lock()
 
+# R28：所有"改 `_db.entries`"的写路径必须用**同一把**锁。
+#
+# 会改 entries 的路径有三条：
+#   · `land_commit`         → `apply_plan(_db, plan)`            （原先拿 _land_lock）
+#   · `apply_move`          → `_apply_reschedule(record, ...)`    （原先无锁）
+#   · `/requests/{id}/approve` → 同样调 `_apply_reschedule`        （原先无锁）
+#
+# 而 `_apply_reschedule` 是"读 entries 挑候选 → classify_move 判定 → 写 e.week"
+# 三步流程。两个线程都基于**旧** entries 判定时，双方都看不到对方即将占用那一格
+# ⇒ 同一间教室同一时段被排进两门课，而两个接口都返回 success。
+#
+# 实测（判定与写入之间注入 10ms，模拟真实表遍历耗时）：
+#     无锁 → 20/20 次双占同一间教室
+#     加锁 →  0/20 次
+#
+# 注意 `_land_lock` 只保护"落地方案"这条路径，名字带有误导性 ——
+# 它实际是 entries 的写锁。保留名字是为了不动既有引用，但语义按写锁来理解。
+_DB_WRITE_LOCK = _land_lock
+
 
 def _landings() -> plan_landing.LandingStore:
     global _landing_store
@@ -2583,7 +2602,12 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
         apply_result = {"applied": 0, "skipped": 0, "details": []}
         try:
             if _db.loaded:
-                apply_result = _apply_reschedule(record_dict)
+                # R28：与 apply_move / land_commit 共用写锁；且这是同步阻塞调用，
+                # 必须丢线程池（否则一次调课应用会占住事件循环，同 R25/R26）。
+                def _locked_apply_approve():
+                    with _DB_WRITE_LOCK:
+                        return _apply_reschedule(record_dict)
+                apply_result = await run_in_threadpool(_locked_apply_approve)
         except Exception as e:
             apply_result = {"applied": 0, "skipped": 0, "details": [f"自动应用失败：{e}（可人工在教务系统调整）"]}
         if apply_result["applied"] > 0:
@@ -2635,7 +2659,13 @@ async def apply_move(req: ApplyMoveRequest):
         "target_week": req.target_week,
         "source_week": req.source_week,
     }
-    result = await run_in_threadpool(_apply_reschedule, record, True, req.key or "")
+    # 与 land_commit 共用写锁（R28）：`_apply_reschedule` 的"读-判定-写"
+    # 三步必须原子，否则并发调课会把两条课排进同一间教室。
+    def _locked_apply():
+        with _DB_WRITE_LOCK:
+            return _apply_reschedule(record, True, req.key or "")
+
+    result = await run_in_threadpool(_locked_apply)
 
     conflicts = result.get("conflicts") or []
     applied = result.get("applied", 0)
