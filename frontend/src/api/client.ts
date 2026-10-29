@@ -3,8 +3,20 @@ import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, 
 
 const API_BASE = '/api';
 
-const api = axios.create({
+// 全局超时。**必须有值**：axios 默认 `timeout: 0` 表示"永不超时"，而
+// `utils/apiError.ts` 里那条 `ECONNABORTED / timeout of …` 的中文分支正是按
+// "60s 会超时"写的（文档与探针注释也这么写）。没有这一行时那个分支在真实浏览器里
+// **基本不可达** —— 网关挂着时用户看到的是无限转圈，而不是"请求超时，请稍后重试"。
+// 与 R-25 同族：一段看起来在防护的代码，实际从不生效。
+//
+// 取值 60s 的依据：本地/线上实测最慢的合法请求是全校园一键排课（满载 16.6s）与
+// `/chat` 的 LLM 解析（7.6s）；60s 留出 3 倍余量，正常演示永远碰不到，
+// 只兜住"服务被回收、连接挂死"这类真正该给用户一句话的情况。
+export const API_TIMEOUT_MS = 60_000;
+
+export const api = axios.create({
   baseURL: API_BASE,
+  timeout: API_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -302,6 +314,10 @@ export const rescheduleApi = {
 
   parallelExport: (className: string, schedule: Array<{ project: string; group: string; week: number; weekday: string; time_slot: string; room: string; teacher: string }>) =>
     api.post('/reschedule/parallel/export', { class_name: className, schedule }, { responseType: 'blob' }),
+
+  // 调课申请记录导出 Excel（审批留档；status 为空 = 全部）
+  exportRequests: (status = '') =>
+    api.get('/reschedule/requests/export', { params: { status }, responseType: 'blob' }),
 
   // 教务两类标准课表（基于**现有安排表**，不是新排的方案）：
   // 班级课表 = 每班一页；场地课表 = 每间实验室一页。传空 = 全部。

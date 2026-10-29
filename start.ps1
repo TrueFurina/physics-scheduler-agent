@@ -53,14 +53,18 @@ if ($NpmCmd) {
 }
 
 # 1. Check backend
-$backendRunning = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+$backendRunning = Get-NetTCPConnection -LocalPort 9000 -State Listen -ErrorAction SilentlyContinue
 if ($backendRunning) {
-    Write-Host "[OK] Backend already running (8000)" -ForegroundColor Green
+    Write-Host "[OK] Backend already running (9000)" -ForegroundColor Green
 } else {
-    Write-Host "[..] Starting backend (FastAPI :8000)..." -ForegroundColor Yellow
+    Write-Host "[..] Starting backend (FastAPI :9000)..." -ForegroundColor Yellow
+    # Demo credentials: env vars take precedence over .env (load_dotenv override=False),
+    # keeping admin/admin123 working for local demo (pitch + prepare_demo convention).
+    $env:DEMO_MODE = "1"
+    $env:ADMIN_PASS = "admin123"
     if ($PythonExe) {
         Start-Process -FilePath $PythonExe `
-            -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000" `
+            -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000" `
             -WorkingDirectory "$RepoRoot\backend" -WindowStyle Hidden
         Start-Sleep -Seconds 5
         Write-Host "[OK] Backend started" -ForegroundColor Green
@@ -89,8 +93,8 @@ if ($frontendRunning) {
 # 3. Verify
 Start-Sleep -Seconds 2
 try {
-    $backendOk = Invoke-WebRequest -Uri "http://localhost:8000/health" -TimeoutSec 3 -UseBasicParsing
-    if ($backendOk.StatusCode -eq 200) { Write-Host "[OK] Backend http://localhost:8000 ready" -ForegroundColor Green }
+    $backendOk = Invoke-WebRequest -Uri "http://localhost:9000/health" -TimeoutSec 3 -UseBasicParsing
+    if ($backendOk.StatusCode -eq 200) { Write-Host "[OK] Backend http://localhost:9000 ready" -ForegroundColor Green }
 } catch { Write-Host "[WARN] Backend not responding" -ForegroundColor Red }
 
 try {

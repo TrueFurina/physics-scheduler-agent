@@ -44,7 +44,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // 2026-10-30：本机 7762-8612 大面积落进 Hyper-V 动态保留段无法 bind，
+        // 临时改用 9000。重启电脑后保留段会重划，届时可改回 8000 并同步 start 脚本。
+        target: 'http://localhost:9000',
         changeOrigin: true,
       },
     },

@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { RescheduleRequest } from '../api/client';
+import { rescheduleApi } from '../api/client';
 
 interface Props {
   requests: RescheduleRequest[];
@@ -9,16 +11,47 @@ interface Props {
 
 /** 页面4：管理员审批台（F6）。 */
 export default function AdminView({ requests, loading, onBack, onApprove }: Props) {
+  const [exporting, setExporting] = useState(false);
+
+  // C：审批记录导出 Excel（留档/归档；admin token 由 axios 拦截器统一附加）
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const r = await rescheduleApi.exportRequests();
+      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '调课申请记录.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('导出失败：' + (err instanceof Error ? err.message : '未知错误'));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-semibold text-gray-900">管理员审批台</h2>
-        <button
-          onClick={onBack}
-          className="text-sm px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200"
-        >
-          ← 返回
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {exporting ? '⏳ 导出中…' : '⬇️ 导出记录'}
+          </button>
+          <button
+            onClick={onBack}
+            className="text-sm px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200"
+          >
+            ← 返回
+          </button>
+        </div>
       </div>
 
       <div className="mb-4 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600">

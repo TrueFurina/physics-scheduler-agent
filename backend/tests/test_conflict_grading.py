@@ -176,14 +176,24 @@ def db(tmp_path, monkeypatch):
 
 
 def test_apply_reports_room_conflict_with_kind(db):
+    """场地冲突 + 目标周有空闲格（A999）→ 自动改签（A，2026-10-30）。
+
+    A 之前的预期行为是"冲突→跳过"（applied=0/skipped=1）；现在是
+    "冲突→自动改签到目标周空闲格"，冲突仍带 kind 上报 —— 审计要能解释换格原因。
+    """
     res = R._apply_reschedule({
         "teacher": "吴琳", "course_name": "扭摆法", "class_name": "本班",
         "original_time": "周二 13:30-15:45", "target_week": 9, "source_week": 0,
     }, persist=False)
-    assert res["applied"] == 0 and res["skipped"] == 1
+    assert res["applied"] == 1 and res["skipped"] == 0 and res["rescheduled"] == 1
     assert {c["kind"] for c in res["conflicts"]} == {"room"}
-    assert "场地被占" in res["details"][0], res["details"]
-    assert "换一间教室" in res["details"][0], res["details"]
+    detail = res["details"][0]
+    assert "场地被占" in detail, detail
+    # 空闲教室按名称序（A504 < A516 < A999），第一个空闲的 A516 被选中
+    assert "已自动改签" in detail and "A516" in detail, detail
+    # 改签落点：表里第9周 A516 恰好只有本组这一条新记录
+    moved = [x for x in db.entries if x.week == 9 and x.room == "A516"]
+    assert len(moved) == 1 and moved[0].group == "本班_1" and moved[0].time_slot == "567"
 
 
 def test_apply_reports_group_conflict_that_used_to_be_invisible(db):

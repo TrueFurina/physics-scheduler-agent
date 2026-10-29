@@ -19,7 +19,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "E:\Program\physics-schedule
 echo.
 echo [2/2] Verifying web access...
 timeout /t 2 /nobreak >nul
-curl -s http://localhost:8000/health >nul 2>nul && echo   [OK] Backend  http://localhost:8000  ready || echo   [WARN] Backend not responding
+curl -s http://localhost:9000/health >nul 2>nul && echo   [OK] Backend  http://localhost:9000  ready || echo   [WARN] Backend not responding
 curl -s http://localhost:5173 >nul 2>nul && echo   [OK] Frontend http://localhost:5173 ready || echo   [WARN] Frontend not responding
 
 echo.
