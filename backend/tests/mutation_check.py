@@ -47,6 +47,9 @@ FILES = {
         "M14": ["tests/test_api_auth.py"],
         "M15": ["tests/test_request_workflow.py"],
         "M16": ["tests/test_request_workflow.py"],
+        "M17": ["tests/test_time_model_edges.py"],
+        "M18": ["tests/test_time_model_edges.py"],
+        "M19": ["tests/test_time_model_edges.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -177,6 +180,33 @@ MUTANTS = [
         """            if False:  # MUTANT: 不自动应用
                 apply_result = _apply_reschedule(record_dict)""",
         "applies_move or reports_conflicts",
+    ),
+    (
+        "M17", "首尾相接也算重叠（会推荐到正在上课的教室）",
+        "app/utils/time_model.py",
+        "    return max(a[0], b[0]) < min(a[1], b[1])",
+        "    return max(a[0], b[0]) <= min(a[1], b[1])  # MUTANT",
+        "adjacent_slots",
+    ),
+    (
+        "M18", "未知时段标签不再保守视为占用",
+        "app/utils/time_model.py",
+        """    ca, cb = CLOCK.get(a), CLOCK.get(b)
+    if ca is None or cb is None:
+        return True""",
+        """    ca, cb = CLOCK.get(a), CLOCK.get(b)
+    if ca is None or cb is None:
+        return False  # MUTANT""",
+        "unknown_label",
+    ),
+    (
+        "M19", "写反的时钟区间照收不误",
+        "app/utils/time_model.py",
+        """    if end <= start:  # 17:00-14:00 这种写反了的，别硬猜
+        return None""",
+        """    if False:  # MUTANT
+        return None""",
+        "rejects_invalid",
     ),
 ]
 
