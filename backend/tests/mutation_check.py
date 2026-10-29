@@ -63,6 +63,7 @@ FILES = {
     "M30": ["tests/test_response_contract.py"],
     "M31": ["tests/test_response_contract.py"],
     "M32": ["tests/test_weekend_coverage.py"],
+    "M33": ["tests/test_scheduler_scope.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -335,6 +336,13 @@ MUTANTS = [
         "WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)  # 保持 周一→周日 的顺序",
         "WEEKDAYS_ALL = tuple(WEEKDAY_OFFSET)[:5]  # MUTANT: 只排工作日",
         "weekend",
+    ),
+    (
+        "M33", "自动排课 note 不声明只排工作日",
+        "app/engine/auto_scheduler.py",
+        'WEEKDAY_ONLY_NOTE = "；**只在工作日（周一至周五）排课，周末不作候选**（周末已有课仍计入占用）"',
+        'WEEKDAY_ONLY_NOTE = ""  # MUTANT',
+        "note_declares or summary_message",
     ),
 ]
 
