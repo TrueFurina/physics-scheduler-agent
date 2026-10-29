@@ -60,6 +60,8 @@ FILES = {
     "M27": ["tests/test_event_loop_blocking.py"],
     "M28": ["tests/test_event_loop_blocking.py"],
     "M29": ["tests/test_api_auth.py"],
+    "M30": ["tests/test_response_contract.py"],
+    "M31": ["tests/test_response_contract.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -307,6 +309,24 @@ MUTANTS = [
         '            "course_unrecognized": result.get("course_unrecognized", False),',
         '            # MUTANT: 不透传',
         "course_fields or unrecognized_course",
+    ),
+    (
+        "M30", "追问分支少返回契约字段",
+        "app/agent/reschedule_agent.py",
+        """            "course_name": parsed.get("course_name"),
+            "course_unrecognized": not parsed.get("course_name"),
+            "ai_plans": [],
+            "total": 0,
+        }""",
+        """        }  # MUTANT: 追问分支退回到 8 键""",
+        "identical_keys or contract_keys",
+    ),
+    (
+        "M31", "course_unrecognized 与 course_name 脱钩",
+        "app/agent/reschedule_agent.py",
+        """            "course_unrecognized": course_unrecognized,""",
+        """            "course_unrecognized": False,  # MUTANT""",
+        "contradicts",
     ),
 ]
 
