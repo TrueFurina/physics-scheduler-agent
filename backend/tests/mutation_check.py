@@ -65,6 +65,7 @@ FILES = {
     "M32": ["tests/test_weekend_coverage.py"],
     "M33": ["tests/test_scheduler_scope.py"],
     "M34": ["tests/test_master_delete.py"],
+    "M35": ["tests/test_master_consistency.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -353,6 +354,15 @@ MUTANTS = [
         """        if False:  # MUTANT: 不拦默认课程
             raise ValueError(""",
         "delete_default_course",
+    ),
+    (
+        "M35", "删教师后不再清理实验里的关联",
+        "app/master_data.py",
+        """        for ex in self.experiments.values():
+            ex.get("teachers", set()).discard(name)
+        self.teachers.pop(name, None)""",
+        """        self.teachers.pop(name, None)  # MUTANT: 不清理实验关联""",
+        "consistency",
     ),
 ]
 
