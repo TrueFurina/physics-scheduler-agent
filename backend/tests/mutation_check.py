@@ -45,6 +45,8 @@ FILES = {
         "M12": ["tests/test_api_auth.py"],
         "M13": ["tests/test_api_auth.py"],
         "M14": ["tests/test_api_auth.py"],
+        "M15": ["tests/test_request_workflow.py"],
+        "M16": ["tests/test_request_workflow.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -155,6 +157,26 @@ MUTANTS = [
         globals()["_db"] = new_db  # MUTANT
         new_db.load_from_excel(save_path)""",
         "blank_db",
+    ),
+    (
+        "M15", "不拦重复审批",
+        "app/api/reschedule.py",
+        """    if row["status"] != "pending":
+        conn.close()
+        raise HTTPException(status_code=400,""",
+        """    if False:  # MUTANT: 不拦重复审批
+        conn.close()
+        raise HTTPException(status_code=400,""",
+        "double_approve",
+    ),
+    (
+        "M16", "审批不自动应用调课",
+        "app/api/reschedule.py",
+        """            if _db.loaded:
+                apply_result = _apply_reschedule(record_dict)""",
+        """            if False:  # MUTANT: 不自动应用
+                apply_result = _apply_reschedule(record_dict)""",
+        "applies_move or reports_conflicts",
     ),
 ]
 
