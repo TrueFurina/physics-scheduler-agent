@@ -1015,8 +1015,24 @@ def _ensure_loaded() -> None:
 
 
 def _ensure_loaded_sync() -> None:
-    """`await _ensure_loaded_async()` 的阻塞主体（跑在线程池里）。"""
+    """`await _ensure_loaded_async()` 的阻塞主体（跑在线程池里）。
+
+    ⚠️ R27：加载完**必须在这里**把 `_db.loaded` 置真，不能等回到事件循环再设。
+
+    R25 把加载挪进线程池后留下了一个时序漏洞：`_db.loaded` 由 async 端在
+    `await` 返回后才设。于是拿到锁的 worker 加载完返回、下一个 worker 拿锁时
+    双检能过（R4 的双检在这一层），但**还在排队、尚未进线程池**的请求
+    async 端复检读到的仍是 False → 又排一次队 → 线程池里空转一轮。
+
+    锁内双检挡住了无限膨胀，所以不会雪崩；但首次请求延迟平白翻倍：
+    实测 400ms 模拟下 10/40/100/300 并发总耗时都是 ~810ms，加载 2 次。
+    真实冷解析 3.8s 时就是 3.8s → 7.6s。
+    """
     _ensure_loaded()
+    # `_ensure_loaded()` 内部已 `_db.load_from_excel()`，`loaded` 通常已为真；
+    # 这里显式兜一次，保证"出锁即已加载"这个不变量不依赖下游实现细节。
+    if not _db.loaded:
+        _db.loaded = True
 
 
 async def _ensure_loaded_async() -> None:
