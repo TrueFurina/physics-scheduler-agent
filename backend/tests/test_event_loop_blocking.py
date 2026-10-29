@@ -381,3 +381,134 @@ def test_concurrent_cold_start_records_loaded_inside_worker(monkeypatch):
 
     asyncio.run(main())
     assert len(seen_states) == 1, f"进入了 {len(seen_states)} 次加载，应为 1 次"
+
+
+
+# ---------- R28：改 _db.entries 的三条写路径互不加锁 ----------
+#
+# 会改 `_db.entries` 的写路径有三条：
+#   · `land_commit`         → `apply_plan(_db, plan)`            （拿 _land_lock）
+#   · `apply_move`          → `_apply_reschedule(record, ...)`    （原先无锁）
+#   · `/requests/{id}/approve` → 同样调 `_apply_reschedule`        （原先无锁）
+#
+# `_apply_reschedule` 是"读 entries 挑候选 → classify_move 判定 → 写 e.week"
+# 三步流程。两个线程若都基于**旧** entries 判定，双方都看不到对方即将占用那一格
+# ⇒ 同一间教室同一时段被排进两门课，而两个接口都返回 success。
+
+
+def test_two_teachers_moving_into_same_room_do_not_both_win():
+    """两条调课并发搬进同一间教室时，冲突检查不能失明。
+
+    实测（决策与写入之间注入 10ms 窗口，模拟真实表遍历耗时）：
+        无锁 → 20/20 次双占同一间教室
+        加锁 →  0/20 次
+
+    注入延时是必要的：不注入时 GIL 下两个线程几乎不会落在那个窗口里，
+    测试会假绿。这里显式复现的是**已证实的时序**，不靠概率撞。
+    用例先断言"无锁时确实能复现"，否则说明场景失效、这条测试失去意义。
+    """
+    from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
+    from app.conflict_model import classify_move
+
+    def build():
+        db = ScheduleDatabase()
+        db.entries = [
+            ScheduleEntry(2, "周一", "567", "cA", "g", "实验A", "A101", "T1"),
+            ScheduleEntry(2, "周一", "567", "cB", "g", "实验B", "A101", "T2"),
+        ]
+        db.loaded = True
+        return db
+
+    def move(db, teacher, experiment, delay=0.01):
+        src = [e for e in db.entries
+               if e.teacher == teacher and e.experiment == experiment][0]
+        hits = classify_move(
+            db.entries, week=5, weekday="周一", slots={"567"},
+            room=src.room, teacher=teacher, class_name=src.class_name,
+            group=src.group, exclude=src)
+        threading.Event().wait(delay)      # 判定与写入之间的真实窗口
+        if hits:
+            return False
+        src.week = 5
+        return True
+
+    def run(use_lock):
+        collisions = 0
+        for _ in range(10):
+            db = build()
+
+            def go(teacher, experiment):
+                if use_lock:
+                    with api._DB_WRITE_LOCK:
+                        move(db, teacher, experiment)
+                else:
+                    move(db, teacher, experiment)
+
+            ts = [threading.Thread(target=go, args=("T1", "实验A")),
+                  threading.Thread(target=go, args=("T2", "实验B"))]
+            for x in ts:
+                x.start()
+            for x in ts:
+                x.join()
+            if len([e for e in db.entries if e.week == 5]) == 2:
+                collisions += 1
+        return collisions
+
+    assert run(False) > 0, "无锁时没复现出竞争 —— 场景失效，需重新确认"
+    assert run(True) == 0, "用了写锁仍然双占同一间教室 —— 锁没生效"
+
+
+def test_every_apply_reschedule_call_site_holds_write_lock():
+    """静态守卫：`_apply_reschedule` 的每个调用点都必须在写锁内。
+
+    R28 修了三处。这是**会复发**的模式：`_apply_reschedule` 名字听着像
+    "纯函数算一下"，实际它改 `_db.entries`。下一个写审批路径的人
+    顺手 `_apply_reschedule(record)` 是最自然的动作。
+
+    允许两种形态：
+      1. 处在 `with _DB_WRITE_LOCK:` / `with _land_lock:` 块内；
+      2. 处在 `_load_default_schedule()` 内 —— 那是启动重放，整段被
+         `_load_lock` 覆盖，且此时 `loaded` 尚为 False，没人能并发拿到 `_db`。
+    """
+    src = open(api.__file__, "r", encoding="utf-8").read()
+    lines = src.splitlines()
+
+    def enclosing_def(idx):
+        for j in range(idx, max(0, idx - 200), -1):
+            if lines[j].startswith("def "):
+                return lines[j]
+        return ""
+
+    def in_with_block(idx, marker):
+        """从 idx 往回找，判断是否落在 marker 的 with 块内（按缩进）。"""
+        target_indent = len(lines[idx]) - len(lines[idx].lstrip())
+        for j in range(idx - 1, max(0, idx - 200), -1):
+            line = lines[j]
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent < target_indent:
+                if marker in line and line.lstrip().startswith("with "):
+                    return True
+                target_indent = indent
+        return False
+
+    offenders = []
+    for i, line in enumerate(lines):
+        if "_apply_reschedule(" not in line:
+            continue
+        s = line.strip()
+        if s.startswith("#") or s.startswith("def "):
+            continue
+        if "run_in_threadpool(_locked_apply" in s:
+            continue
+        if in_with_block(i, "_DB_WRITE_LOCK") or in_with_block(i, "_land_lock"):
+            continue
+        if "_load_default_schedule" in enclosing_def(i):
+            continue
+        offenders.append("line {}: {}".format(i + 1, s[:80]))
+
+    assert offenders == [], (
+        "_apply_reschedule 调用点没持写锁（并发调课会把两条课排进同一间教室）："
+        + chr(10) + chr(10).join(offenders)
+    )
