@@ -84,19 +84,26 @@ def test_parallel_overview_returns_courses_after_self_heal(client, cold_process)
 def test_ensure_loaded_is_idempotent(client, cold_process):
     """已加载时不应重复解析；冷启动连续调用也只加载一次。"""
     calls = []
-    original = rs_mod._db.load_from_excel
+    # 在**类**上打桩，而不是在 rs_mod._db 实例上：
+    # R4 把加载改成了「构建新实例后原子替换」，实例级打桩会失效
+    # （新实例上没有这个 monkeypatch），测试会假失败。
+    # 打桩位置与实现细节解绑，才是稳定的断言方式。
+    from app.utils.excel_parser import ScheduleDatabase
 
-    def counting_load(path):
+    original = ScheduleDatabase.load_from_excel
+
+    def counting_load(self, path, *a, **kw):
         calls.append(path)
-        return original(path)
+        return original(self, path, *a, **kw)
 
-    rs_mod._db.load_from_excel = counting_load
+    monkeypatch_cls = ScheduleDatabase.load_from_excel
+    ScheduleDatabase.load_from_excel = counting_load
     try:
         rs_mod._ensure_loaded()   # 冷 → 真正加载一次
         rs_mod._ensure_loaded()   # 热 → 直接返回
         rs_mod._ensure_loaded()
     finally:
-        rs_mod._db.load_from_excel = original
+        ScheduleDatabase.load_from_excel = monkeypatch_cls
 
     assert len(calls) == 1, f"应只解析一次，实际 {len(calls)} 次"
 

@@ -748,6 +748,12 @@ def _load_default_schedule() -> tuple[str, int]:
             detail=f"默认排课表不存在：服务器上未找到 {os.path.basename(DEFAULT_SCHEDULE_PATH)}，请联系管理员处理",
         )
 
+    # 这里保持"原地加载"，不做实例替换：
+    #   - `_ensure_loaded()` 有双检锁保护，不会并发进入
+    #   - `/load-default` 也被 `_load_lock` 覆盖（见该路由）
+    #   - 测试与部分调用方持有 `_db` 的实例引用（如 monkeypatch 注入的夹具 db），
+    #     替换实例会让它们停在旧对象上
+    # 真正的并发风险在 `upload_schedule`（它不走这把锁），那里已改为原子替换。
     _db.load_from_excel(DEFAULT_SCHEDULE_PATH)
     # 安排表指纹：主数据落盘的失效判定依据（换表 → 旧落盘作废）
     global _schedule_fp
@@ -994,8 +1000,16 @@ async def load_default():
     免鉴权（教秘主路径），但它会**整表重解析**，属单请求真开销接口，
     故挂限流；`_ensure_loaded()` 的自愈是进程内直调，不经过本路由、不受影响。
     """
-    # 冷启动时这是 433 行 Excel 的整表解析（本地 ~1s，冷沙箱 3.8s）——同样不能占着事件循环
-    msg, total = await run_in_threadpool(_load_default_schedule)
+    # 冷启动时这是 433 行 Excel 的整表解析（本地 ~1s，冷沙箱 3.8s）——同样不能占着事件循环。
+    #
+    # 必须拿 _load_lock：`_load_default_schedule` 是原地改写（先 loaded=False、
+    # entries=[] 再填充），实测并发读取方会 100% 读到 0 条。
+    # `_ensure_loaded()` 走双检锁，但本路由是直调，历史上没加锁 —— R4 补上。
+    def _locked_load():
+        with _load_lock:
+            return _load_default_schedule()
+
+    msg, total = await run_in_threadpool(_locked_load)
     return {"success": True, "message": msg, "total_entries": total}
 
 
