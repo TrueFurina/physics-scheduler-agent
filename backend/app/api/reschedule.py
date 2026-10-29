@@ -727,6 +727,14 @@ async def get_status():
         "rooms": _db.get_all_rooms() if _db.loaded else [],
         "teachers": _db.get_all_teachers() if _db.loaded else [],
         "week_range": list(_db.get_week_range()) if _db.loaded else [],
+        # 冷启动时 loaded=false 是**正常**的：本接口只查状态、不触发加载。
+        # 首次访问数据端点（如 /teachers、/parallel/overview）时 `_ensure_loaded()`
+        # 才自愈加载。没有这句话时，新部署者看到 loaded=false 会以为服务出问题了。
+        "loaded_hint": (
+            "已加载"
+            if _db.loaded
+            else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
+        ),
         "ai": parser.describe() if parser is not None else {"configured": False},
     }
 
