@@ -59,6 +59,7 @@ FILES = {
     "M26": ["tests/test_event_loop_blocking.py"],
     "M27": ["tests/test_event_loop_blocking.py"],
     "M28": ["tests/test_event_loop_blocking.py"],
+    "M29": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -299,6 +300,13 @@ MUTANTS = [
         _ms.clear()
         discarded = _landings().clear()""",
         "swap_section or share_a_lock",
+    ),
+    (
+        "M29", "API 层不透传 course_unrecognized",
+        "app/api/reschedule.py",
+        '            "course_unrecognized": result.get("course_unrecognized", False),',
+        '            # MUTANT: 不透传',
+        "course_fields or unrecognized_course",
     ),
 ]
 
