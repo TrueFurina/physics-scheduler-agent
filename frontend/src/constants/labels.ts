@@ -6,6 +6,15 @@ export const weekdayLabels: Record<string, string> = {
 };
 
 export const timeSlotLabels: Record<string, string> = {
+  // R35：`MORNING` 一直缺着。后端 `time_model.CLOCK` 里它是标准节次之一
+  // （09:00-11:15），真实数据 433 条里有 4 条上午课。
+  //
+  // 各视图都写 `timeSlotLabels[x] || x`，所以缺映射不会崩 ——
+  // 界面直接显示 `MORNING` 这串英文。**兜底掩盖了映射缺失。**
+  //
+  // 这份映射必须与后端 CLOCK 的键保持一致，由
+  // `constants/__tests__/labels.test.ts` 直接读后端源码比对。
+  'MORNING': '09:00-11:15',
   '567': '13:30-15:45',
   '678': '15:45-18:00',
   '91011': '18:30-20:45',
