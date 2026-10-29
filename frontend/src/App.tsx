@@ -827,7 +827,18 @@ function App() {
         setRequestStatus('');
         setAiPlans([]);
         setPlansLoading(false);
-        setNlMsg(`✅ ${r.data.message.split('\n')[0]}`);
+        // 只取首行，是给这条灰字摘要用的（明细在沙盘页里）。
+        //
+        // ⚠️ R33：但「课程没认出来」的警告**也**在 message 里，位置在末尾
+        // （实测 35 行，警告在第 34 行）。只取首行 ⇒ 教秘一个字都看不到，
+        // 屏幕上只有一句 ✅，而他对“要调哪门课”其实一无所知。
+        // R21 写的是“只把这件事说出口”，但出口在 message 尾部，
+        // 前端从不展示 message 全文 —— 提示从来没有真正到达用户。
+        let summary = '✅ ' + r.data.message.split(String.fromCharCode(10))[0];
+        if (data.course_unrecognized) {
+          summary += '｜⚠️ 没认出是哪门课，请在下方「选择课程」里确认';
+        }
+        setNlMsg(summary);
         setView('reschedule');
         // 课程识别不出来（同名跨班/没提课程）时沙盘照常打开，由教秘在下拉里补选
         if (course && ctx.target_week) scheduleAiPlans(course, ctx.target_week);
