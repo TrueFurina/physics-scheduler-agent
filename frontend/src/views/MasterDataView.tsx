@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { rescheduleApi } from '../api/client';
 import type { MasterOverview } from '../types';
 import ImportWizard, { type ImportKind } from '../components/ImportWizard';
+import { describeApiError } from '../utils/apiError';
 
 /**
  * 主数据管理（导师座谈一号行动项「基于教学大纲梳理实验课程属性、重构数据库」）。
@@ -56,7 +57,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       const r = await rescheduleApi.masterOverview();
       setData(r.data.data);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '加载主数据失败');
+      setError(describeApiError(err, '加载主数据失败'));
     } finally {
       setLoading(false);
     }
@@ -80,7 +81,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       refresh(r.data.data);
       setShowForm(false);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '反推失败');
+      setError(describeApiError(err, '反推失败'));
     } finally {
       setBusy(false);
     }
@@ -96,7 +97,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '导出台账失败');
+      setError(describeApiError(err, '导出台账失败'));
     }
   };
 
@@ -112,7 +113,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
         : rescheduleApi.masterDeleteCourse(name));
       refresh(r.data.data);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '删除失败');
+      setError(describeApiError(err, '删除失败'));
     } finally {
       setBusy(false);
     }
@@ -158,7 +159,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       setShowForm(false);
       setForm({});
     } catch (err: any) {
-      setError(err?.response?.data?.detail || '保存失败');
+      setError(describeApiError(err, '保存失败'));
     } finally {
       setBusy(false);
     }
