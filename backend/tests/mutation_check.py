@@ -50,6 +50,7 @@ FILES = {
         "M17": ["tests/test_time_model_edges.py"],
         "M18": ["tests/test_time_model_edges.py"],
         "M19": ["tests/test_time_model_edges.py"],
+        "M20": ["tests/test_api_auth.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -207,6 +208,17 @@ MUTANTS = [
         """    if False:  # MUTANT
         return None""",
         "rejects_invalid",
+    ),
+    (
+        "M20", "移除 /status 的懒加载提示",
+        "app/api/reschedule.py",
+        """        "loaded_hint": (
+            "已加载"
+            if _db.loaded
+            else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
+        ),""",
+        """        "loaded_hint": "已加载" if _db.loaded else "",""",
+        "status_hint",
     ),
 ]
 
