@@ -33,7 +33,7 @@ the data audit and standard-timetable export):
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python FastAPI + openpyxl + python-constraint |
+| Backend | Python FastAPI + openpyxl + **OR-Tools CP-SAT** (`ortools`) |
 | Frontend | React + Vite + TypeScript + Tailwind CSS |
 | LLM | TokenRhythm (OpenAI-compatible) / replaceable via env vars |
 | Data | Excel schedule (433 entries) + five-table master data (no student data) |
@@ -84,7 +84,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **408 backend tests + 89 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **482 backend tests + 101 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -102,7 +102,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 408 pytest tests
+│   └── tests/                      # 482 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
