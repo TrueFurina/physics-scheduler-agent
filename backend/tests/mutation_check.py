@@ -53,6 +53,7 @@ FILES = {
         "M20": ["tests/test_api_auth.py"],
         "M21": ["tests/test_teacher_name_parse.py"],
     "M22": ["tests/test_teacher_name_parse.py"],
+    "M23": ["tests/test_week_bounds.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -235,6 +236,13 @@ MUTANTS = [
         "        for c in sorted(self.db.get_all_classes(), key=len, reverse=True):",
         "        for c in sorted(self.db.get_all_classes()):",
         "class_name_prefers_longest",
+    ),
+    (
+        "M23", "「这周」不参照源周（原地打转）",
+        "app/agent/reschedule_agent.py",
+        "            target_week = base - 1 if source_week else base",
+        "            target_week = source_week if source_week else current_week",
+        "this_week",
     ),
 ]
 
