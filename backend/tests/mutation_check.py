@@ -52,6 +52,7 @@ FILES = {
         "M19": ["tests/test_time_model_edges.py"],
         "M20": ["tests/test_api_auth.py"],
         "M21": ["tests/test_teacher_name_parse.py"],
+    "M22": ["tests/test_teacher_name_parse.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -227,6 +228,13 @@ MUTANTS = [
         '        course_unrecognized = not parsed.get("course_name")',
         '        course_unrecognized = False  # MUTANT',
         "unrecognized_course",
+    ),
+    (
+        "M22", "班级名改回字典序（非长名优先）",
+        "app/agent/reschedule_agent.py",
+        "        for c in sorted(self.db.get_all_classes(), key=len, reverse=True):",
+        "        for c in sorted(self.db.get_all_classes()):",
+        "class_name_prefers_longest",
     ),
 ]
 
