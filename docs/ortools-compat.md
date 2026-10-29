@@ -122,3 +122,11 @@ python -c "from ortools.sat.python import cp_model; m=cp_model.CpModel(); x=m.Ne
 | `test_warmup` | 3 passed |
 
 42 个 skip 的来源：需要真实浏览器（`test_web_serving` 16）、需要特定数据文件（`test_demo_schedule` 10）、条件跳过（其余），均属设计内跳过。
+
+---
+
+## 附：推送通道说明（2026-10-29 补充）
+
+本机访问 github.com:443 会被重置，因此无法使用 `git push`。
+改用 **Git Data API**（blob → tree → commit → update ref）提交，效果等价。
+脚本：`gh_push.py`。
