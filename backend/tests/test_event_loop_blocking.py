@@ -133,3 +133,88 @@ def test_auto_schedule_off_event_loop(monkeypatch):
     assert "定位说明" in resp["message"]
     assert "summary" in resp["message"]
     assert seen["thread"] is not loop_thread, "自动排课求解跑在事件循环线程上"
+
+
+# ---------- R25：懒加载自愈也是同步重活 ----------
+#
+# `_ensure_loaded()` 在冷启动时（进程被平台回收后重启、或缓存文件不在）要
+# **整表重解析 + 重放已审批调课**。实测真实表 433 行：
+#
+#     冷解析 193 ms（本地热盘）  冷沙箱约 3.8 s（已在 /load-default 的注释里记录）
+#
+# 而它在 27 个 `async def` 路由里被**直接同步调用**。只在首次访问时发生，
+# 但那一次会把整个事件循环按住 —— 包括 `/health` 探活。
+#
+# `/load-default` 自己早就改成 run_in_threadpool 了，`_ensure_loaded()` 漏了：
+# 它在代码里位置更靠上（辅助函数），看起来"不算业务接口"。
+
+def _fake_load_default(monkeypatch, seen):
+    def fake():
+        seen["thread"] = threading.current_thread()
+        return ("已加载 433 条", 433)
+    monkeypatch.setattr(api, "_load_default_schedule", fake)
+    monkeypatch.setattr(api._db, "loaded", False, raising=False)
+    # entries 也清掉：模拟真实冷启动，不只是翻一个开关
+    monkeypatch.setattr(api._db, "entries", [], raising=False)
+
+
+def test_ensure_loaded_runs_off_event_loop(monkeypatch):
+    """懒加载自愈必须在线程池里跑，不能在事件循环线程上重解析整表。"""
+    seen = {}
+    _fake_load_default(monkeypatch, seen)
+
+    async def main():
+        await api._ensure_loaded_async()
+
+    asyncio.run(main())
+
+    assert "thread" in seen, "冷启动时没触发加载"
+    # 事件循环线程在 asyncio.run 里是主线程；加载跑在别处才算合格
+    assert seen["thread"] is not threading.main_thread(), (
+        "懒加载在事件循环线程上重解析整表（冷启动 193ms~3.8s）—— "
+        "那一次会让全站卡住，连 /health 都不响应"
+    )
+
+
+def test_ensure_loaded_is_noop_when_already_loaded(monkeypatch):
+    """已加载时必须是零开销直接返回：不能每来一个请求就排一次线程池。"""
+    calls = []
+    monkeypatch.setattr(api, "_load_default_schedule",
+                        lambda: calls.append(1) or ("ok", 0))
+    monkeypatch.setattr(api._db, "loaded", True, raising=False)
+
+    async def main():
+        for _ in range(3):
+            await api._ensure_loaded_async()
+
+    asyncio.run(main())
+    assert calls == [], "已加载还在重复加载"
+
+
+def test_no_async_route_calls_ensure_loaded_directly():
+    """静态守卫：async 路由里不许再出现裸 `_ensure_loaded()`。
+
+    R25 修复了 28 处，但这是个**会复发**的模式 —— 下次谁新增一个数据端点，
+    顺手写 `_ensure_loaded()` 是最自然的动作（它就在文件里、名字最直观）。
+    而后果只在冷启动那一次出现，本地常驻 uvicorn 复现不到。
+
+    这组用例前四条也都是"锁住已修好的事实"，但它们是运行时断言，
+    只能覆盖**已存在的**路由。这条扫源码，覆盖**将来新增的**。
+    """
+    import re
+
+    src = open(api.__file__, "r", encoding="utf-8").read()
+    offenders = []
+    cur = None
+    for i, line in enumerate(src.splitlines(), 1):
+        m = re.match(r"(async )?def (\w+)", line)
+        if m:
+            cur = (m.group(2), bool(m.group(1)))
+        if line.strip() == "_ensure_loaded()" and cur and cur[1]:
+            offenders.append(f"{cur[0]}:{i}")
+
+    assert offenders == [], (
+        "async 路由直接同步调用了 _ensure_loaded()（冷启动整表重解析会冻住事件循环）：\n"
+        + "\n".join(offenders)
+        + "\n应改为 `await _ensure_loaded_async()`"
+    )
