@@ -51,6 +51,7 @@ FILES = {
         "M18": ["tests/test_time_model_edges.py"],
         "M19": ["tests/test_time_model_edges.py"],
         "M20": ["tests/test_api_auth.py"],
+        "M21": ["tests/test_teacher_name_parse.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -219,6 +220,13 @@ MUTANTS = [
         ),""",
         """        "loaded_hint": "已加载" if _db.loaded else "",""",
         "status_hint",
+    ),
+    (
+        "M21", "课程名未识别时不做提示",
+        "app/agent/reschedule_agent.py",
+        '        course_unrecognized = not parsed.get("course_name")',
+        '        course_unrecognized = False  # MUTANT',
+        "unrecognized_course",
     ),
 ]
 
