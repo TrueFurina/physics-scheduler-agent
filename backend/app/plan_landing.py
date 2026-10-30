@@ -447,16 +447,28 @@ class LandingStore:
                 " ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
             out = []
             for r in rows:
+                # R63：坏 JSON 不能算成"0 行"。
+                #
+                # `plan_rows: 0` 有两个完全不同的含义：
+                #   · 方案确实 0 行（正常）
+                #   · 记录本身坏了（要查为什么）
+                # 而它们的处置相反 —— 合并成 0 等于把"要查的问题"
+                # 报成"没事"。
+                #
+                # 与 R50/R51/R60 同族：把"未知"塌缩成看起来正常的值。
+                corrupt = False
                 try:
                     n_rows = len(json.loads(r["plan_json"]))
                 except Exception:
-                    n_rows = 0
+                    n_rows = None       # JSON null，界面显示「无法解析」
+                    corrupt = True
                 out.append({
                     "id": r["id"],
                     "landed_at": r["landed_at"],
                     "actor": r["actor"] or "",
                     "note": r["note"] or "",
                     "plan_rows": n_rows,
+                    "plan_json_corrupt": corrupt,
                     "after_entries": r["after_entries"],
                     "revoked": bool((r["revoked_at"] or "").strip()),
                     "revoked_at": r["revoked_at"] or "",
