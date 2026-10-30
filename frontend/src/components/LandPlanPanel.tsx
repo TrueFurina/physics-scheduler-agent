@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { rescheduleApi } from '../api/client';
 import { describeApiError } from '../utils/apiError';
-import type { LandPlanDiff, LandPlanRow, LandStatus } from '../types';
+import type { LandHistory, LandPlanDiff, LandPlanRow, LandStatus } from '../types';
 
 /**
  * 方案落地三步：差异预览（不写入）→ 确认采纳（需管理员）→ 可撤销。
@@ -49,8 +49,16 @@ function isAuthError(err: any): boolean {
   return err?.response?.status === 401 || err?.response?.status === 403;
 }
 
+/** `2026-10-31T01:30:12.123456` → `10-31 01:30`（历史列表只需要到分钟） */
+function fmtTime(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || '');
+  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : (iso || '');
+}
+
 export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, onMsg }: Props) {
   const [status, setStatus] = useState<LandStatus | null>(null);
+  const [history, setHistory] = useState<LandHistory | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
   const [diff, setDiff] = useState<LandPlanDiff | null>(null);
   const [busy, setBusy] = useState<Busy>('');
   const [error, setError] = useState('');
@@ -63,6 +71,14 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       setStatus(r.data);
     } catch {
       // 状态只是决定"要不要显示撤销入口"，取不到不打扰用户
+    }
+    // 落地历史（R56）：只读补充信息。未登录管理员 / 旧后端没有这个接口时
+    // 一律静默 —— 不能因为"看不到历史"就让整个落地面板报错。
+    try {
+      const h = await rescheduleApi.landHistory(8);
+      setHistory(h.data);
+    } catch {
+      setHistory(null);
     }
   };
 
@@ -186,8 +202,45 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       </div>
       {status?.landed && !d && (
         <p className="mt-1.5 text-xs text-emerald-600">
-          当前安排表已是落地方案（{status.landed_at}，{status.plan_rows} 行{status.note ? `，备注：${status.note}` : ''}）
+          当前安排表已是落地方案（{status.landed_at}，{status.plan_rows} 行
+          {status.landed_by ? `，由 ${status.landed_by} 落地` : ''}
+          {status.note ? `，备注：${status.note}` : ''}）
         </p>
+      )}
+
+      {/* 落地历史（R56）：撤销不再删记录之后，"谁落过、后来撤没撤"才答得上来。
+          管理员以外看不到（接口要管理员），取不到就整块不渲染 —— 不打扰教秘。 */}
+      {history && history.total > 0 && (
+        <div className="mt-2">
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            className="text-xs text-gray-500 hover:underline"
+            title="每次落地与被撤销的记录都会留着，便于事后核对"
+          >
+            📜 落地历史 {history.total} 次
+            {history.revoked > 0 ? `（其中 ${history.revoked} 次已撤销）` : ''}
+            {showHistory ? ' ▴' : ' ▾'}
+          </button>
+          {showHistory && (
+            <ul className="mt-1.5 space-y-1" data-testid="land-history">
+              {history.history.map((h) => (
+                <li key={h.id} className="text-xs text-gray-600 flex items-center gap-2 flex-wrap">
+                  <span className="text-gray-400">{fmtTime(h.landed_at)}</span>
+                  <span>{h.actor || '（未记录操作者）'}</span>
+                  <span>{h.plan_rows} 行</span>
+                  {h.note && <span className="text-gray-400">备注：{h.note}</span>}
+                  {h.revoked ? (
+                    <span className="text-amber-600">
+                      已撤销{fmtTime(h.revoked_at) ? `（${fmtTime(h.revoked_at)}${h.revoked_by ? ` · ${h.revoked_by}` : ''}）` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-emerald-600">生效中</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       {error && (

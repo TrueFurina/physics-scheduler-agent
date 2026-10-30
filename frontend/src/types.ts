@@ -350,6 +350,35 @@ export interface LandStatus {
   plan_rows?: number;
   after_entries?: number;
   note?: string;
+  /** 落地操作者（R55 起后端记录） */
+  landed_by?: string;
+}
+
+/**
+ * `/parallel/land/history` 的一行：一次落地（**含已被撤销的**）。
+ *
+ * 为什么要有它：`/land/status` 只回答"现在有没有落地方案"，回答不了
+ * "上周谁落过、后来又撤了没有"。撤销改成"打标记不删行"之后（R55），
+ * 这个问题才有答案。
+ */
+export interface LandHistoryRow {
+  id: number;
+  landed_at: string;
+  actor: string;
+  note: string;
+  plan_rows: number;
+  after_entries: number;
+  revoked: boolean;
+  revoked_at: string;
+  revoked_by: string;
+}
+
+export interface LandHistory {
+  success: boolean;
+  total: number;
+  active: number;
+  revoked: number;
+  history: LandHistoryRow[];
 }
 
 /** `/parallel/land/undo`：撤销结果。 */
