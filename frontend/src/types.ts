@@ -366,7 +366,15 @@ export interface LandHistoryRow {
   landed_at: string;
   actor: string;
   note: string;
-  plan_rows: number;
+  /**
+   * 方案行数。**`null` = 记录损坏（plan_json 解析失败）**，不是 0 行。
+   *
+   * R63：后端原来把解析失败也算成 0，于是"坏记录"和"方案确实 0 行"
+   * 无法区分 —— 前者要查为什么坏，后者不用管。
+   * 现在坏记录给 `null` 并置 `plan_json_corrupt`。
+   */
+  plan_rows: number | null;
+  plan_json_corrupt?: boolean;
   after_entries: number;
   revoked: boolean;
   revoked_at: string;
