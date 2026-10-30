@@ -91,8 +91,23 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args(argv)
 
+    # R61：token 为空时必须**立刻停**，不能带着 "Bearer " 去撞 401。
+    #
+    # 原来的写法是 `"Bearer " + _token()` —— 拿不到时拼出 `"Bearer "`，
+    # 于是每个文件都返回 401，输出变成一屏"推送失败"。
+    # 读的人会先怀疑 token 权限、再怀疑网络，而真相是最简单的那一条：
+    # **根本没取到 token**。
+    #
+    # 这与 R60 同族：把"前置条件不满足"和"操作失败"混成同一个现象。
+    token = _token()
+    if not token:
+        print("❌ 拿不到 GITHUB_TOKEN：环境变量为空，且从用户环境读取也失败。")
+        print("   未发出任何请求。设置后重试：")
+        print("     $env:GITHUB_TOKEN='...'   (PowerShell)")
+        return 2
+
     global HEADERS
-    HEADERS = {"Authorization": "Bearer " + _token(), "User-Agent": "safe-push",
+    HEADERS = {"Authorization": "Bearer " + token, "User-Agent": "safe-push",
                "Accept": "application/vnd.github+json",
                "Content-Type": "application/json", "Connection": "close"}
 
@@ -130,6 +145,11 @@ def main(argv=None):
         s2, r2 = api("PUT", p, body)
         if s2 in (200, 201):
             print("  %-50s -> %s %s" % (p, s2, r2["commit"]["sha"][:10]))
+        elif s2 in (401, 403):
+            # 鉴权失败和"这个文件推不上去"是两件事。整批都 401 时，
+            # 说清是凭据问题，别让人去查文件内容。
+            print("  %-50s -> %s 鉴权失败（token 无效或无权限）" % (p, s2))
+            failed += 1
         else:
             print("  %-50s -> %s %s" % (p, s2, r2))
             failed += 1
