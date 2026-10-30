@@ -112,3 +112,27 @@ describe('RescheduleView · 影响分析明细（R47）', () => {
     expect(text).not.toMatch(/冲突明细/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R64：规则降级候选不能显示成「🤖 AI 推荐」
+//
+// 后端在 LLM 不可用时会规则降级给 3 个候选（好事：不该没候选），
+// 但 `ai_plans_source` 是 `rule` 时，标题必须是「系统推荐」而不是「AI 推荐」。
+// 否则教秘以为这是分析过的结果 —— 而这块恰好最容易被拿给评审看。
+// ---------------------------------------------------------------------------
+describe('RescheduleView · 候选来源标注（R64）', () => {
+  const plan = { weekday: '周一', time_slot: '567', room: 'A101', reason: '该时段教室空闲' };
+
+  it('source=rule 时标题写明「AI 暂不可用」', () => {
+    render(<RescheduleView {...base} impact={null} aiPlans={[plan]} aiPlansSource="rule" />);
+    const text = document.body.textContent || '';
+    expect(text).toContain('系统推荐');
+    expect(text).toMatch(/AI 暂不可用|暂不可用/);
+    expect(text).not.toContain('🤖 AI 推荐候选方案');
+  });
+
+  it('source=llm 时才是「🤖 AI 推荐候选方案」', () => {
+    render(<RescheduleView {...base} impact={null} aiPlans={[plan]} aiPlansSource="llm" />);
+    expect(document.body.textContent || '').toContain('AI 推荐候选方案');
+  });
+});
