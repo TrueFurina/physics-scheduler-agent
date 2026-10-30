@@ -248,7 +248,10 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
                 <li key={h.id} className="text-xs text-gray-600 flex items-center gap-2 flex-wrap">
                   <span className="text-gray-400">{fmtTime(h.landed_at)}</span>
                   <span>{h.actor || '（未记录操作者）'}</span>
-                  <span>{h.plan_rows} 行</span>
+                  {/* R63：null = 记录损坏，不能显示成「0 行」（那会被读成"没改动"） */}
+                  <span className={h.plan_rows === null ? 'text-red-600' : ''}>
+                    {h.plan_rows === null ? '⚠️ 行数无法解析' : `${h.plan_rows} 行`}
+                  </span>
                   {h.note && <span className="text-gray-400">备注：{h.note}</span>}
                   {h.revoked ? (
                     <span className="text-amber-600">
