@@ -113,13 +113,15 @@ def test_auto_schedule_off_event_loop(monkeypatch):
 
         def solve(self, max_sections=30):
             seen["thread"] = threading.current_thread()
-            return {"summary_text": "ok", "scheduled": 12}
+            # R65：路由现在会先判 success，成功路径必须显式给 True
+            return {"success": True, "summary_text": "ok", "scheduled": 12}
 
         # 默认走全表分片（R-59）：假求解器也要有这个入口，否则测的就不是线程池
         def solve_all(self, chunk_size=60):
             seen["thread"] = threading.current_thread()
-            return {"summary_text": "ok", "solved": 171, "total_sections": 171,
-                    "total_sections_all": 171, "schedule": [], "conflicts": []}
+            return {"success": True, "summary_text": "ok", "solved": 171,
+                    "total_sections": 171, "total_sections_all": 171,
+                    "schedule": [], "conflicts": []}
 
         def summary(self, result):
             return "summary"
