@@ -409,6 +409,13 @@ MUTANTS = [
         'pass  # MUTANT: 不注入',
         "env_order or test_admin_pass_is_set",
     ),
+    (
+        "M42", "片间不回填班级占用（新方案撞绪论课）",
+        "app/engine/auto_scheduler.py",
+        "                extra_class_busy=class_busy,",
+        "                extra_class_busy=None,  # MUTANT: 不回填班级",
+        "chunked_schedule or chunk_report",
+    ),
 ]
 
 
