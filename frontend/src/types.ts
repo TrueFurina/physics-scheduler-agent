@@ -130,7 +130,22 @@ export interface ImpactResult {
     class_name: string;
     experiment: string;
   }>;
-  conflict_slots: any[];
+  /**
+   * 冲突明细（最多 10 条，`conflict_count` 是总数）。
+   *
+   * R47：后端一直返回它，前端此前完全没有渲染
+   * （`grep -c conflict_slots RescheduleView.tsx` 曾为 0）。
+   * 类型原本是 `any[]` —— 那等于告诉 TypeScript「这里没有结构」，
+   * 于是"没人用"这件事永远不会被类型检查提醒。这里补全字段。
+   */
+  conflict_slots: Array<{
+    weekday: string;
+    time_slot: string;
+    room: string;
+    date: string;
+    reason_type: string;
+    reason: string;
+  }>;
 }
 
 /** `/chat`（fast=false）返回的 AI 候选方案。沙盘与它并行加载，互不阻塞。 */
@@ -201,34 +216,22 @@ export interface ParallelSolveResult {
 /** 全校一键排课（逐班·按天，组级）的单班结果 */
 export interface SchoolClassResult {
   class_name: string;
-  /** 历史口径：**有产出**（2/31 也算 true）。判"排满"要看 complete。 */
   success: boolean;
-  /** 是否排满（scheduled ≥ total_units）。R-76：满载下曾出现 2/31 却 success=true。 */
-  complete?: boolean;
   status: string;
   weekdays: string[];
   scheduled: number;
   total_units: number;
-  missing_units?: number;
   error?: string | null;
-  days?: Array<{ day: string; units: number; scheduled: number;
-                status: string; retried?: boolean }>;
+  days?: Array<{ day: string; units: number; scheduled: number; status: string }>;
 }
 
 export interface SchoolPlanResult {
   success: boolean;
   classes_total: number;
-  /** 有产出的班级数（含排不满的）。 */
   classes_ok: number;
-  /** 排满的班级数（旧服务端没有此字段）。 */
-  classes_complete?: number;
   classes_failed: Array<{ class_name: string; error?: string | null }>;
   scheduled: number;
   units: number;
-  units_expected?: number;
-  units_scheduled?: number;
-  /** 未排上的组课时数；>0 表示方案不完整（旧服务端没有此字段）。 */
-  units_missing?: number;
   elapsed_s: number;
   per_class: SchoolClassResult[];
   schedule: ParallelSession[];
