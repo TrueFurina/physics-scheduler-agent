@@ -37,11 +37,31 @@ def main():
     offline = "--offline" in sys.argv
 
     # 1. git 工作区干净
-    st = subprocess.run(["git", "status", "--short"], cwd=ROOT,
-                        capture_output=True, text=True).stdout.strip()
-    head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=ROOT,
-                          capture_output=True, text=True).stdout.strip()
-    check("git 工作区", not st, f"{head}" + (f"｜未提交：{st[:80]}" if st else "｜干净"))
+    # R60：**必须看 returncode**。
+    #
+    # `git status` 失败时 stdout 是空字符串，而 `not ""` 为真 ——
+    # 于是"查不了"被判成"干净"。实测：本工作目录不是 git 仓库时，
+    # 输出是 `✅ git 工作区：｜干净`（连提交号都是空的）。
+    #
+    # 发布前检查里最不该说谎的就是这条："未提交改动会被打进发布包"
+    # 是真实风险，而检查器在根本查不了时给了绿勾。
+    _st = subprocess.run(["git", "status", "--short"], cwd=ROOT,
+                         capture_output=True, text=True)
+    _head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=ROOT,
+                           capture_output=True, text=True)
+    st = _st.stdout.strip()
+    head = _head.stdout.strip()
+
+    if _st.returncode != 0 or _head.returncode != 0:
+        # 不阻塞：codeload 解包的工作副本本来就不是 git 仓库，
+        # 发布走的是目录内容。但必须说清楚这条**没生效**。
+        check("git 工作区", True,
+              "**不是 git 仓库，未检查**（发布走目录内容，不依赖 git 状态）",
+              blocking=False)
+    else:
+        shown = head or "（无提交号）"
+        check("git 工作区", not st,
+              f"{shown}" + (f"｜未提交：{st[:80]}" if st else "｜干净"))
 
     # 2. webui/index.html 引用的资源全存在
     html_path = os.path.join(WEBUI, "index.html")
@@ -108,8 +128,20 @@ def main():
     #       依赖它随包上传（docs/安全风险清单 v4 记录）；线上不可下载已实测。
     #       按 D-6 当作"可轮换的演示 key"管理 —— 警告级，不拦截。
     xlsx = os.path.join(ROOT, "schedule.xlsx")
+    # R56：`schedule.xlsx` 不在仓库根，**不等于线上没有数据源**。
+    #
+    # 实测（2026-10-31）：本地没有 schedule.xlsx，但线上 `/load-default` 能加载
+    # 433 条、13 位教师、第 1–16 周 —— 数据是**上一次发布时随包带上去的**，
+    # 之后从仓库里移走了（含 17 个手机号，本来就不该在仓库里）。
+    #
+    # 原判断 "不存在 -> 线上会没有数据源" 是个不成立的推论：
+    # 线上状态取决于**上次发布了什么**，不取决于本地现在有什么。
+    # 这条改成：本地没有 -> 不阻塞，但提示"确认线上数据源"。
     if not os.path.exists(xlsx):
-        check("上传面·排课表手机号", False, "schedule.xlsx 不存在：线上会没有数据源")
+        check("上传面·排课表手机号", True,
+              "本地无 schedule.xlsx（不随包则无泄露面）｜"
+              "但需确认线上数据源仍在：GET /api/reschedule/status 应 loaded=true",
+              blocking=False)
     else:
         import re as _re
         phone = _re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
@@ -154,6 +186,37 @@ def main():
           "发现 %s（智谱 key 明文随包上传；线上 LLM 依赖它，按 D-6 当作可轮换"
           "演示 key，建议发布前轮换）" % ", ".join(env_files) if env_files else "无",
           blocking=False)
+
+    # 4c. 前端产物是否由当前源码构建（R59）
+    #
+    # R57 的教训：源码改了、webui/ 没重建 —— **测试全绿、探针全绿**，
+    # 只有用户会看到旧功能。这条把"产物新鲜"变成发布前置条件。
+    try:
+        import json as _json
+        fr = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "check_webui_fresh.py"), "--json"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
+        wf = _json.loads(fr.stdout or "{}")
+        if wf.get("ok"):
+            check("前端产物新鲜度", True,
+                  "产物与源码一致（%s）" % wf.get("main", "?"))
+        else:
+            miss = wf.get("missing_markers") or []
+            probs = wf.get("problems") or []
+            detail = ("缺少源码标记：%s" % "、".join(miss)) if miss else "；".join(probs[:2])
+            check("前端产物新鲜度", False,
+                  f"{detail}｜先跑 cd frontend && npx vite build --outDir webui --emptyOutDir")
+    except Exception as e:  # noqa: BLE001
+        # ⚠️ 这一条**不能降级成 True**。
+        #
+        # 它是 R59 立的阻塞项：产物过期 = 用户会看到旧功能，而所有测试都绿。
+        # 如果"检查脚本自己跑挂了"就放行，那等于给了一个可以绕过它的口子 ——
+        # 把脚本弄坏（或删掉）比修产物容易得多。
+        #
+        # 与 git 那条不同：git 查不了是因为"这里本来就不是仓库"，
+        # 属环境正常形态；而产物新鲜度检查跑挂了是**异常**，必须拦。
+        check("前端产物新鲜度", False,
+              f"检查本身失败（{e}）—— 不能确认产物是否新鲜，按不通过处理")
 
     # 5. cache 状态（发布前建议清；信息项）
     cache = os.path.join(ROOT, "backend", "app", "data", "cache")

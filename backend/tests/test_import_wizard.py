@@ -394,3 +394,95 @@ def test_preview_endpoints_reject_non_excel(api_env):
                  "/api/reschedule/master/tasks-preview"):
         r = _post_file(TestClient(app), path, b"not an excel", _admin_headers())
         assert r.status_code == 400, path
+
+
+# ---------------------------------------------------------------------------
+# R42：导入"只增补不删除"时，新增的实体必须点名
+#
+# 语义本身是对的：`/master/import` 只做新增与补充，不做删除
+# （"Excel 里的空可能是没填，也可能就是没变"）。
+#
+# 实测（把教师页「教师C」改成「教师C改」再导入）：
+#     13 人 → 14 人，「教师C」还在，「教师C改」也在
+#     message = "✅ 已导入 66 行（新建实体 1 个）"
+#
+# **"改名 = 新增"是这套语义的必然结果，不是缺陷。**
+# 缺陷在说明：教秘改了一行，期待"改好了"，实际"多了一个人"，
+# 而系统只说"新建 1 个"—— 不说是什么。他没有任何东西能把
+# "新建的 1 个"和自己改的那行对上。
+#
+# 下面用**自建台账**测（不依赖真实表），因为要精确控制"改名"这一行。
+# ---------------------------------------------------------------------------
+
+
+def _teacher_sheet_workbook(names):
+    """造一份只含「教师」页的最小台账。"""
+    import openpyxl
+    from app.master_workbook import MASTER_WORKBOOK_TAG  # noqa: F401
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "教师"
+    ws.append(["教师", "可授项目"])
+    for n in names:
+        ws.append([n, ""])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_import_names_newly_created_entities(api_env):
+    """新增实体必须在 message 里点名。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    first = _teacher_sheet_workbook(["张三"])
+    r = _post_file(client, "/api/reschedule/master/import", first, _admin_headers())
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["stats"]["teachers"]["added"] >= 1
+
+    # 换一个名字再导入 → 是"新增"，不是"改名"
+    second = _teacher_sheet_workbook(["张三改"])
+    r2 = _post_file(client, "/api/reschedule/master/import", second, _admin_headers())
+    d = r2.json()
+    assert d["stats"]["teachers"]["added"] == 1, "前提：改名会新增 1 个实体"
+
+    msg = d.get("message") or ""
+    assert "张三改" in msg, (
+        "导入结果只说了「新建实体 1 个」，没点名 —— "
+        f"教秘无法判断新建的是不是自己改的那行。实际 message：{msg!r}"
+    )
+    assert "改名" in msg or "名称" in msg, (
+        "没有解释「为什么改名会变成新增」 —— 教秘会以为自己改成功了"
+    )
+
+
+def test_import_report_carries_added_names(api_env):
+    """结构化字段里也要有名字（前端不必从 message 正则反解）。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    _post_file(client, "/api/reschedule/master/import",
+               _teacher_sheet_workbook(["李四"]), _admin_headers())
+    r = _post_file(client, "/api/reschedule/master/import",
+                   _teacher_sheet_workbook(["李四改"]), _admin_headers())
+    d = r.json()
+    added = (d.get("report") or {}).get("added_names") or {}
+    flat = [n for v in added.values() for n in (v or [])]
+    assert "李四改" in flat, f"report.added_names 里没有新增实体名字，实际：{added}"
+
+
+def test_no_new_entities_keeps_message_plain(api_env):
+    """没有新增时不该硬塞一段"新增了：无"。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    same = _teacher_sheet_workbook(["王五"])
+    _post_file(client, "/api/reschedule/master/import", same, _admin_headers())
+    r = _post_file(client, "/api/reschedule/master/import", same, _admin_headers())
+    d = r.json()
+    assert d["stats"]["teachers"]["added"] == 0
+    assert "本次新建" not in (d.get("message") or ""), "没有新增却加了「本次新建」段落"

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { AiPlan, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext, ScheduleGrid, ImportWorkbookPreview, ImportTasksPreview } from '../types';
+import type { AiPlan, LandHistory, LandPlanDiff, LandStatus, LandUndoResult, MasterOverview, NlSlotContext, ScheduleGrid, ImportWorkbookPreview, ImportTasksPreview } from '../types';
 
 const API_BASE = '/api';
 
@@ -134,6 +134,14 @@ export interface TeacherCourse {
   total_slots: number;
   adjustable: boolean;
   adjustable_reason: string;
+  // ---- R50：真实课程归属（后端 R50 起返回；旧后端没有这几个字段，故全部可选）----
+  // `course_name` 一直是**实验项目名**（调课申请按它匹配），真实课程名在这里。
+  // 同一项目跨两门课时，`course` 用「、」并列，`course_ambiguous` 为 true。
+  course?: string;
+  courses?: string[];
+  course_ambiguous?: boolean;
+  // 真实周次列表（`week_range` 是人读的文案，连续才写成区间）
+  weeks?: number[];
 }
 
 export interface ExcludedSlot {
@@ -314,6 +322,11 @@ export const rescheduleApi = {
     api.post<LandUndoResult>('/reschedule/parallel/land/undo'),
   landStatus: () =>
     api.get<LandStatus>('/reschedule/parallel/land/status'),
+
+  // 落地历史（含已撤销，需管理员）。撤销改成"打标记不删行"之后，
+  // "上周谁落过方案、后来又撤了没有"才答得上来（R55/R56）。
+  landHistory: (limit = 20) =>
+    api.get<LandHistory>('/reschedule/parallel/land/history', { params: { limit } }),
 
   // 周课表网格：把某一周的安排表重排成 星期×时段 全景（R-62）。
   // 读路径免鉴权（与 dataAudit/stats 同族）。班级/场地传空串＝不过滤。

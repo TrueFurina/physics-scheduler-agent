@@ -96,7 +96,7 @@ Open **http://localhost:5173**
 - ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
 - ✅ **Multi-turn follow-up**: system asks for missing info
 - ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **620 backend tests + 126 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_restart_replay`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **725 backend tests + 122 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
 
 ## Project Structure
 
@@ -114,7 +114,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 620 pytest tests
+│   └── tests/                      # 725 pytest tests
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -183,7 +183,6 @@ python scripts/verify_graybox.py        # lexical/coverage/internal-collision au
 python scripts/verify_school_plan.py    # independent re-solve of the whole-school plan
 python scripts/audit_conflicts.py       # openpyxl + real-clock conflict scan
 python scripts/probe_approval_chain.py  # reschedule write path (API level, --restore)
-python scripts/probe_restart_replay.py  # write → kill process → cold restart: is the change still there?
 python scripts/probe_land_plan.py       # plan-landing write path (API level, undoes by default)
 python scripts/probe_import_wizard.py   # import wizard: read-only preview + commit + self-cleanup
 python scripts/probe_schedule_grid.py   # weekly grid vs independent openpyxl re-count (all 16 weeks)
@@ -261,12 +260,6 @@ Publish parameters:
   real teacher names (e.g. 吴琳) — expected behavior, not a leak. Teacher contact info
   (phone / e-mail columns of 教师联系表) is never parsed into any API response; locked by
   `backend/tests/test_privacy_export.py`.
-- Live check: `GET /api/reschedule/status` returns real teacher names (product decision R-09);
-  seeing aliases like `教师A…` means it fell back to the sanitized table (real table missing).
-- Read-interface data boundary (what an anonymous caller can see): teacher **names**, class
-  **names**, rooms, week / weekday / slot, experiment project names. Never: teacher phone or
-  e-mail, and no student-level data (student timetables are not served by any public endpoint).
-  `/master-status` may include class names in its unscheduled-sample list — no student PII.
 - Cloud capabilities (auth / database / LLM) are gated by **exact server-side Origin match**:
   only the published domain is allowed, other origins get 403. So `localhost` can only verify the
   public data plane — WeChat login must be verified on the live domain.

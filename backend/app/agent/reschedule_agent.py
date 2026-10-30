@@ -127,8 +127,20 @@ class RescheduleAgent:
         text = text.lower()
         import re
 
-        week_range = self.db.get_week_range()
-        current_week = week_range[0] if week_range else 1
+        # R51：`current_week` 必须是"真的知道当前是第几周"，而不是"猜一个"。
+        #
+        # `get_week_range()` 空表时返回 `(0, 0)` —— 元组是**真值**，
+        # 于是 `week_range[0] if week_range else 1` 取到 **0**。
+        # 0 又是假值，下游 `if not parsed["target_week"]` 就把它当成
+        # "用户没说周次"，追问"要把课调到第几周" —— 而用户明明说了「这周」。
+        #
+        # 更糟的是「下周」：0+1 = 1，得到一个**看起来合理、实则凭空猜的**第 1 周。
+        #
+        # 数据没加载时，"当前周"根本无从得知。相对表达（这周/下周/下下周）
+        # 在没有基准时不该成立 —— 让 current_week 为 None，
+        # 由下面的分支自然落到"没算出目标周"，交给统一的范围校验去追问。
+        bounds_now = self.week_bounds()
+        current_week = bounds_now[0] if bounds_now else None
 
         # 1. 解析源周次：文本中出现的"第N周"（含中文数字）
         source_week = None
@@ -141,13 +153,15 @@ class RescheduleAgent:
         # "下下周" 必须先判：它包含子串 "下周"，顺序反了会让 "下下周" 命中 +1 分支，
         # 于是 +2 那条分支永远不可达（原来的顺序就是这个 bug）。
         target_week = None
+        # 相对表达的基准：优先源周，其次"当前周"。两者都没有（空表）时为 None，
+        # 此时相对表达**不成立** —— 不能凭空算出一个周次（见 current_week 处注释）。
         if "下下周" in text:
-            base = source_week if source_week else current_week
-            target_week = base + 2
+            base = source_week if source_week is not None else current_week
+            target_week = (base + 2) if base is not None else None
         elif "下周" in text:
             # 有源周 → 源周+1；无源周 → 当前周+1
-            base = source_week if source_week else current_week
-            target_week = base + 1
+            base = source_week if source_week is not None else current_week
+            target_week = (base + 1) if base is not None else None
         elif "这周" in text or "本周" in text:
             # 「这周」与「下周」对称：有源周就以源周为基准（−1），无源周才用当前周。
             #
@@ -159,8 +173,11 @@ class RescheduleAgent:
             # 与"下周"的差别只在方向：中文里"这周的课"指**已经发生/正在发生**的那次，
             # 说"要调"就是想往前挪。‑1 落在第 1 周 → 0 周，交给统一范围校验拒绝，
             # 不再静默绕回第 1 周（那同样等于替教秘改口）。
-            base = source_week if source_week else current_week
-            target_week = base - 1 if source_week else base
+            base = source_week if source_week is not None else current_week
+            if base is None:
+                target_week = None          # 无基准 → 不猜
+            else:
+                target_week = base - 1 if source_week is not None else base
         elif source_week is not None:
             # 直接指定"第N周"
             target_week = source_week

@@ -254,8 +254,8 @@ MUTANTS = [
     (
         "M23", "「这周」不参照源周（原地打转）",
         "app/agent/reschedule_agent.py",
-        "            target_week = base - 1 if source_week else base",
-        "            target_week = source_week if source_week else current_week",
+        """            base = source_week if source_week is not None else current_week\n            if base is None:\n                target_week = None          # 无基准 → 不猜\n            else:\n                target_week = base - 1 if source_week is not None else base""",
+        """            base = source_week if source_week is not None else current_week\n            target_week = base  # MUTANT: 原地打转，不往前挪""",
         "this_week",
     ),
     (
@@ -381,6 +381,76 @@ MUTANTS = [
             continue""",
         "intro_and_exam",
     ),
+    (
+        "M38", "导入只报数量不点名新增实体",
+        "app/api/reschedule.py",
+        '        msg += f"\\n🆕 本次新建：{shown}"',
+        """        pass  # MUTANT: 不点名""",
+        "names_newly_created",
+    ),
+    (
+        "M39", "漂移检查只看行数、不看丢了哪些函数",
+        "../scripts/check_remote_drift.py",
+        "    lost = _symbols(remote) - _symbols(local)",
+        "    lost = set()  # MUTANT: 不比对符号",
+        "drift",
+    ),
+    (
+        "M40", "审计模式不比对定义（只比行数）",
+        "../scripts/check_remote_drift.py",
+        "    lost = _symbols(base) - _symbols(head)",
+        "    lost = set()  # MUTANT: 审计模式不比定义",
+        "ref_to_ref",
+    ),
+    (
+        "M41", "conftest 不注入 ADMIN_PASS（口令随机化）",
+        "tests/conftest.py",
+        'os.environ.setdefault("ADMIN_PASS", "admin123")',
+        'pass  # MUTANT: 不注入',
+        "env_order or test_admin_pass_is_set",
+    ),
+    (
+        "M42", "片间不回填班级占用（新方案撞绪论课）",
+        "app/engine/auto_scheduler.py",
+        "                extra_class_busy=class_busy,",
+        "                extra_class_busy=None,  # MUTANT: 不回填班级",
+        "chunked_schedule or chunk_report",
+    ),
+    (
+        "M43", "落盘失败不回滚内存（方案神秘消失）",
+        "app/api/reschedule.py",
+        "            plan_landing.restore(_db, before)",
+        "            pass  # MUTANT: 不回滚",
+        "rolls_back or rollback_restores",
+    ),
+    (
+        "M44", "损坏的落盘不丢弃（永久豁免）",
+        "app/api/reschedule.py",
+        """    if store is None and master_store.consume_corrupt_flag():\n        master_store.clear()""",
+        """    if False:  # MUTANT: 不清理损坏落盘\n        master_store.clear()""",
+        "corrupt_store_file_is_discarded",
+    ),
+    (
+        "M45", "空表时用 (0,0) 当当前周（这周→0，下周→1）",
+        "app/agent/reschedule_agent.py",
+        """        bounds_now = self.week_bounds()\n        current_week = bounds_now[0] if bounds_now else None""",
+        """        week_range = self.db.get_week_range()\n        current_week = week_range[0] if week_range else 1""",
+        "empty_table or week_basis",
+    ),
+    (
+        "M46", "补全时不打标记（假设二次消失）",
+        "app/api/reschedule.py",
+        "                t._teacher_enriched = True",
+        "                pass  # MUTANT: 不打标记",
+        "assumptions_repeat",
+    ),
+    (
+        "M47", "导入不说明「预览之后数据变了」",
+        "app/api/reschedule.py",
+        "    if flat_pre and (added == 0 or flat):",
+        "    if False:  # MUTANT: 不提示已存在项",
+        "reports_drift",
+    ),
 ]
 
 
@@ -398,6 +468,8 @@ def _run_tests(files: list, kexpr: str) -> tuple:
 def main() -> int:
     results = []
     for mid, desc, rel, old, new, kexpr in MUTANTS:
+        # rel 可以是相对 backend/ 的路径，也可以带 ../ 指到仓库其他目录
+        # （如 scripts/ 下的工具脚本）—— 它们同样需要变异守护。
         path = os.path.join(BACKEND, rel)
         if not os.path.isfile(path):
             results.append((mid, desc, "SKIP", "文件缺失"))

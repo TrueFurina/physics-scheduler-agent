@@ -84,7 +84,43 @@ def load(store_path: Optional[str] = None) -> Optional[dict]:
         return d
     except (OSError, ValueError) as e:
         print(f"⚠️ 主数据落盘文件读取失败（回退反推基线）：{e}")
+        # R50：**读坏了要标记出来**，否则调用方无法区分"没有落盘"和"落盘坏了"。
+        #
+        # 两者都不恢复，但处置不同：前者什么都不做，后者应该丢弃 ——
+        # 否则坏文件会永久留在那里，每次启动都读一遍、失败一遍。
+        # 用模块级标记而不是改返回值类型，是为了不动现有调用方
+        # （`store = load(); if store: ...` 的写法保持有效）。
+        _mark_corrupt(store_path)
         return None
+
+
+# 最近一次 `load()` 是否因为**文件损坏**而失败（区别于"文件不存在"）。
+#
+# 只记一个路径而不是集合：调用方全部是单进程单落盘，`load()` 之后立刻处理，
+# 不需要支持历史查询。这样也不会随重启/换表而累积。
+_LAST_CORRUPT: Optional[str] = None
+
+
+def _mark_corrupt(store_path: str) -> None:
+    global _LAST_CORRUPT
+    _LAST_CORRUPT = os.path.abspath(store_path)
+
+
+def last_load_was_corrupt(store_path: Optional[str] = None) -> bool:
+    """上一次 `load()` 是否命中了损坏文件（随后应 `clear()`）。"""
+    if _LAST_CORRUPT is None:
+        return False
+    if store_path is None:
+        return True
+    return _LAST_CORRUPT == os.path.abspath(store_path)
+
+
+def consume_corrupt_flag() -> bool:
+    """读一次并复位 —— 避免同一个标记影响后续无关的 load。"""
+    global _LAST_CORRUPT
+    hit = _LAST_CORRUPT is not None
+    _LAST_CORRUPT = None
+    return hit
 
 
 def clear(store_path: Optional[str] = None) -> None:

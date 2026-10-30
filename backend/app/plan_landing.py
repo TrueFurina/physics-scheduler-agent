@@ -333,14 +333,30 @@ class LandingStore:
                     plan_json TEXT NOT NULL,
                     before_json TEXT NOT NULL,
                     after_entries INTEGER DEFAULT 0,
-                    note TEXT DEFAULT ''
+                    note TEXT DEFAULT '',
+                    actor TEXT DEFAULT '',
+                    revoked_at TEXT DEFAULT '',
+                    revoked_by TEXT DEFAULT ''
                 )
             """)
+            # 老库迁移（R55）：`CREATE TABLE IF NOT EXISTS` **不会**给已存在的表补列。
+            # 线上/本地的 requests.db 里可能已经有一张六个列的老表，直接 INSERT 新列
+            # 会报 "table landed_plans has no column named actor" —— 而且是在**落地**
+            # 那一刻报，教秘刚点完"采纳"。
+            have = {r["name"] for r in
+                    conn.execute("PRAGMA table_info(landed_plans)").fetchall()}
+            for col, decl in (("actor", "TEXT DEFAULT ''"),
+                              ("revoked_at", "TEXT DEFAULT ''"),
+                              ("revoked_by", "TEXT DEFAULT ''")):
+                if col not in have:
+                    # 列名是硬编码常量，不来自外部输入
+                    conn.execute(f"ALTER TABLE landed_plans ADD COLUMN {col} {decl}")
             conn.commit()
         finally:
             conn.close()
 
-    def save(self, plan_rows: List[dict], before: dict, note: str = "") -> dict:
+    def save(self, plan_rows: List[dict], before: dict, note: str = "",
+             actor: str = "") -> dict:
         from datetime import datetime
         # 微秒精度（与 applied_moves.applied_at 一致）：重启重放按时间戳混排，
         # 秒级精度会让同一秒内的落地与调课无法区分先后。
@@ -348,11 +364,12 @@ class LandingStore:
         conn = self._conn()
         try:
             cur = conn.execute(
-                "INSERT INTO landed_plans (landed_at, plan_json, before_json, after_entries, note)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO landed_plans"
+                " (landed_at, plan_json, before_json, after_entries, note, actor)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (landed_at, json.dumps(plan_rows, ensure_ascii=False),
                  json.dumps(before, ensure_ascii=False), len(before.get("entries") or []),
-                 note or ""))
+                 note or "", actor or ""))
             conn.commit()
             return {"id": cur.lastrowid, "landed_at": landed_at,
                     "after_entries": len(before.get("entries") or [])}
@@ -360,38 +377,94 @@ class LandingStore:
             conn.close()
 
     def all(self) -> List[dict]:
-        """全部落地记录（重启重放用，按 id 顺序）。"""
+        """当前**有效**的落地记录（重启重放用，按 id 顺序）。
+
+        R55：必须排除已撤销的。撤销改成"打标记"而不是删行之后，如果重放还把
+        已撤销的方案算进去，就会出现最糟的一种重启行为：**教秘撤销过的方案在
+        重启后自己回来了**，而且没人点过任何按钮。
+        """
         self.init_schema()
         conn = self._conn()
         try:
             rows = conn.execute(
-                "SELECT id, landed_at, plan_json FROM landed_plans ORDER BY id").fetchall()
+                "SELECT id, landed_at, plan_json FROM landed_plans"
+                " WHERE COALESCE(revoked_at, '') = '' ORDER BY id").fetchall()
             return [{"id": r["id"], "landed_at": r["landed_at"],
                      "plan": json.loads(r["plan_json"])} for r in rows]
         finally:
             conn.close()
 
     def latest(self) -> Optional[dict]:
+        """最后一条**未撤销**的落地（"当前是否已落地"的唯一判据）。"""
         self.init_schema()
         conn = self._conn()
         try:
             r = conn.execute(
-                "SELECT * FROM landed_plans ORDER BY id DESC LIMIT 1").fetchone()
+                "SELECT * FROM landed_plans WHERE COALESCE(revoked_at, '') = ''"
+                " ORDER BY id DESC LIMIT 1").fetchone()
             return dict(r) if r else None
         finally:
             conn.close()
 
+    def revoke(self, rec_id: int, actor: str = "") -> dict:
+        """撤销：打时间戳，**不删行**（R55）。
+
+        为什么不再 DELETE：删掉之后"这里曾经落过一次方案、谁落的、影响了多少条"
+        就永久消失了。教秘点撤销的**本意是"把课表恢复"**，不是"把这件事从历史里
+        抹掉"。审计和一个能 pop 的栈，在前台看起来一样，出事时差别是"有据可查"
+        与"什么都没有"。
+        """
+        from datetime import datetime
+        revoked_at = datetime.now().isoformat(timespec="microseconds")
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "UPDATE landed_plans SET revoked_at = ?, revoked_by = ?"
+                " WHERE id = ? AND COALESCE(revoked_at, '') = ''",
+                (revoked_at, actor or "", rec_id))
+            conn.commit()
+            return {"id": rec_id, "revoked_at": revoked_at,
+                    "updated": cur.rowcount}
+        finally:
+            conn.close()
+
     def pop_latest(self) -> Optional[dict]:
-        """弹出最后一条（撤销）。返回被弹出的记录。"""
+        """**已废弃**：旧语义是"弹出并删除"。保留只为不破坏外部调用，
+        新代码请用 `revoke()` —— 撤销不能再抹掉历史。"""
         rec = self.latest()
         if rec:
-            conn = self._conn()
-            try:
-                conn.execute("DELETE FROM landed_plans WHERE id = ?", (rec["id"],))
-                conn.commit()
-            finally:
-                conn.close()
+            self.revoke(rec["id"])
         return rec
+
+    def history(self, limit: int = 50) -> List[dict]:
+        """全部落地记录（**含已撤销**），新的在前。给排查用。"""
+        self.init_schema()
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, landed_at, actor, note, after_entries, revoked_at,"
+                "       revoked_by, plan_json FROM landed_plans"
+                " ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+            out = []
+            for r in rows:
+                try:
+                    n_rows = len(json.loads(r["plan_json"]))
+                except Exception:
+                    n_rows = 0
+                out.append({
+                    "id": r["id"],
+                    "landed_at": r["landed_at"],
+                    "actor": r["actor"] or "",
+                    "note": r["note"] or "",
+                    "plan_rows": n_rows,
+                    "after_entries": r["after_entries"],
+                    "revoked": bool((r["revoked_at"] or "").strip()),
+                    "revoked_at": r["revoked_at"] or "",
+                    "revoked_by": r["revoked_by"] or "",
+                })
+            return out
+        finally:
+            conn.close()
 
     def moves_after(self, ts: str) -> int:
         """落地时间戳之后生效的审批调课条数（撤销时要如实告知会一起回滚）。"""
@@ -426,22 +499,30 @@ class LandingStore:
 # 撤销
 # ---------------------------------------------------------------------------
 
-def undo(db, store: LandingStore) -> dict:
-    """撤销最后一次落地：恢复 before 快照 + 弹出记录。
+def undo(db, store: LandingStore, actor: str = "") -> dict:
+    """撤销最后一次落地：恢复 before 快照 + **标记**该记录已撤销（不删）。
 
     落地之后又生效的调课会随快照一起回滚 —— 不静默吞，计数报出来。
+
+    R55：以前这里是 `store.pop_latest()`（DELETE）。删掉之后，这次落地在库里
+    一根毛都不剩 —— "上周三下午谁落过一次方案、影响多少条"从此无从查起。
+    撤销的语义是"把课表恢复"，不是"把这件事抹掉"。
     """
     rec = store.latest()
     if not rec:
         return {"success": False, "error": "当前没有可撤销的落地方案"}
     before = json.loads(rec["before_json"])
     restore(db, before)
-    store.pop_latest()
+    mark = store.revoke(rec["id"], actor=actor)
     return {
         "success": True,
         "landed_at": rec["landed_at"],
+        "landed_actor": rec.get("actor") or "",
         "restored_entries": len(db.entries),
         "rolled_back_moves": store.moves_after(rec["landed_at"]),
+        "revoked_id": rec["id"],
+        "revoked_at": mark["revoked_at"],
+        "revoked_by": actor or "",
     }
 
 

@@ -284,6 +284,41 @@ export default function RescheduleView({
                 <div className="text-sm text-purple-600">{impact.affected_teachers.join('、')}</div>
               </div>
             )}
+            {/*
+              R47：冲突**明细**。
+              上面三块是聚合名单（哪些班 / 哪些教室 / 哪些人），
+              但教秘真正要判断的是"具体撞了哪一节、撞的是哪门课"。
+              聚合给不了这个答案 —— 他知道影响了 13 个班，
+              却不知道周一 567 的 A412-2 撞的是谁的伏安法。
+
+              后端 `conflict_slots` 早就返回了这些明细（含 weekday/time_slot/
+              room/reason），前端此前一条都没渲染
+              （`grep -c conflict_slots RescheduleView.tsx` 曾为 0）。
+              和后端同族的问题在 R33 出现过：给了数据没人展示 = 用户不知道。
+            */}
+            {(impact.conflict_slots?.length ?? 0) > 0 && (
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                <div className="text-xs font-medium text-gray-700 mb-1">
+                  📋 冲突明细（{impact.conflict_slots!.length} 条
+                  {impact.conflict_count > impact.conflict_slots!.length
+                    ? `，共 ${impact.conflict_count} 处，仅显示前 ${impact.conflict_slots!.length} 条`
+                    : ''}）
+                </div>
+                <div className="text-xs text-gray-600 space-y-1 max-h-56 overflow-y-auto">
+                  {impact.conflict_slots!.map((c, i) => (
+                    <div key={i} className="leading-relaxed">
+                      <span className="text-gray-500">
+                        {weekdayLabels[c.weekday] || c.weekday}
+                        {' '}{timeSlotLabels[c.time_slot] || c.time_slot}
+                      </span>
+                      {c.room && <span className="text-gray-700"> · {c.room}</span>}
+                      {c.date && <span className="text-gray-400">（{c.date}）</span>}
+                      <span className="text-gray-600"> — {c.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

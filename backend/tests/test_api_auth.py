@@ -267,8 +267,13 @@ def test_upload_name_neutralised(evil):
     assert name.endswith(".xlsx") or name.endswith(".xls")
 
     target = _upload_target(evil, _EXCEL_SUFFIXES)
-    # 落盘路径必须真的在 data 目录里，而不是只靠字符串看起来安全
-    assert os.path.dirname(os.path.abspath(target)) == os.path.abspath(_DATA_DIR)
+    # 落盘路径必须真的在 data 目录里，而不是只靠字符串看起来安全。
+    #
+    # ⚠️ 必须读**模块属性**而不是模块级导入的 `_DATA_DIR` 常量：
+    # conftest 的 `_isolate_data_dir` 在用例开始时 monkeypatch 了模块属性，
+    # 而 `from ... import _DATA_DIR` 拿到的是**导入那一刻**的旧值。
+    from app.api import reschedule as _rs
+    assert os.path.dirname(os.path.abspath(target)) == os.path.abspath(_rs._DATA_DIR)
 
 
 @pytest.mark.parametrize("bad", ["evil.exe", "x.xlsx.exe", "noext", ""])

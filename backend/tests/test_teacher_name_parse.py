@@ -123,9 +123,14 @@ class _FakeDb:
     def __init__(self, classes):
         self._classes = classes
         self.entries = []
+        # R51：`parse_request` 现在通过 `week_bounds()` 取当前周，
+        # 而那个方法要求 `loaded` 为真 —— 替身必须提供这个属性，
+        # 否则等于在测一个"永不加载"的库。
+        self.loaded = True
+        self._week_range = (1, 16)
 
     def get_week_range(self):
-        return (1, 16)
+        return self._week_range
 
     def get_all_teachers(self):
         return []

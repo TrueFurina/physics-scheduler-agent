@@ -795,6 +795,15 @@ async def master_import(file: UploadFile = File(...)):
 
     await _ensure_loaded_async()
     _ensure_master_data()
+    # R54：先记下"导入前主数据有哪些名字"，用于判断"预览之后变了什么"。
+    #
+    # 导入是两阶段（预览 → 确认），中间可能隔几分钟。这期间别人可能已建出
+    # 同名实体 —— 于是预览说"新增1个"、提交说"新增0个"。**两个数字都对**，
+    # 但它们描述的不是同一件事；教秘看到 added=0 会以为导入失败。
+    names_before = {
+        k: set(getattr(_master_data, k)) for k in
+        ("courses", "experiments", "teachers", "rooms", "classes")
+    }
     try:
         stats = apply_tables(_master_data, tables)
     except ValueError as e:
@@ -808,6 +817,59 @@ async def master_import(file: UploadFile = File(...)):
                + ("；".join(report["warnings"]) or "请确认文件里有「实验项目/教师/场地/班级/课程」页且有表头"))
     else:
         msg = f"✅ 已导入 {total} 行（新建实体 {added} 个）；导入只增补，不删除已有实体"
+
+    # R42：新增实体必须**点名**。
+    #
+    # 教秘把「教师C」改成「教师C改」再导入，得到的正是"新建实体 1 个" ——
+    # 而他想的是"改好了"。不点名的话，他无处判断这 1 个是不是自己那行。
+    # 等下次排课发现"教师C改"没有课、"教师C"还有 116 条课，已经过去很久。
+    added_names = {k: v.get("added_names") or [] for k, v in stats.items()}
+    flat = [(k, n) for k, names in added_names.items() for n in names]
+    if flat:
+        label = {"courses": "课程", "experiments": "实验项目",
+                 "teachers": "教师", "rooms": "场地", "classes": "班级"}
+        shown = "、".join(f"{label.get(k, k)}「{n}」" for k, n in flat[:8])
+        msg += f"\n🆕 本次新建：{shown}"
+        if len(flat) > 8:
+            msg += f" 等 {len(flat)} 个"
+        msg += "\n（导入按**名称**识别实体：改名会被当成「新增一个」，原名称仍然保留。要改名请在界面上操作）"
+
+    # R54：文件里有、但**导入前主数据里已经存在**的实体 —— 它们不会被算作"新增"，
+    # 因为 `apply_tables` 只补不改。若其中有"预览时还不存在"的，说明这期间
+    # 数据被别人改过：必须说出来，否则教秘会把"新增 0 个"读成"导入没生效"。
+    label_all = {"courses": "课程", "experiments": "实验项目",
+                 "teachers": "教师", "rooms": "场地", "classes": "班级"}
+    preexisting = {}
+    for key, rows in tables.items():
+        if key not in names_before:
+            continue
+        want = {str(r.get("name") or "").strip() for r in (rows or [])}
+        want.discard("")
+        hit = sorted(want & names_before[key])
+        if hit:
+            preexisting[key] = hit
+    # R54：什么时候该提示"这些实体导入前就已存在"？
+    #
+    # 判据不是"有没有已存在项"（那太常见：重复导入同一份文件会命中 66 个），
+    # 而是**教秘会不会因此误解**：
+    #
+    #   added == 0 且文件里确实有内容 → 很可能是"预览说会新增、实际没有"，
+    #                                   或"重复导入"。必须说明，否则读成"导入失败"
+    #   added > 0 且也有已存在项      → 预览可能只看到一部分，也要说明
+    #   added > 0 且全是新增          → 无歧义，不提示
+    #
+    # 实测反例（不加这个分支时）：预览说新增 1 个，中间被别人建出来，
+    # 提交得到 added=0、message 只有"新建实体 0 个" —— 教秘以为导入没生效。
+    flat_pre = [(k, n) for k, names in preexisting.items() for n in names]
+    if flat_pre and (added == 0 or flat):
+        shown_pre = "、".join(f"{label_all.get(k, k)}「{n}」" for k, n in flat_pre[:6])
+        if len(flat_pre) > 6:
+            shown_pre += f" 等 {len(flat_pre)} 个"
+        msg += (f"\nℹ️ 其中 {len(flat_pre)} 个在导入前就已存在（只补充、不重复创建）：{shown_pre}")
+        msg += ("\n  ⚠️ 若与预览时看到的不一致，说明这期间台账已被别处修改 ——"
+                " 以上面的**实际结果**为准。")
+
+    report["added_names"] = added_names
 
     return {"success": total > 0, "message": msg,
             "data": _master_data.overview(), "stats": stats, "report": report}
@@ -1033,6 +1095,12 @@ def _ensure_master_data_locked() -> None:
     from app import master_store
 
     store = master_store.load()
+    # R50：`load()` 用 `None` 表示三种情况 —— 文件不存在 / JSON 损坏 / 版本过旧。
+    # 三者都不恢复，但**损坏的那份要丢弃**：否则它永久留在磁盘上，
+    # 每次启动都读一遍、失败一遍。把它和"没有落盘"混在一起，
+    # 就等于让坏文件获得了永久豁免。
+    if store is None and master_store.consume_corrupt_flag():
+        master_store.clear()
     if store and _schedule_fp and store.get("schedule_fingerprint") == _schedule_fp:
         try:
             _master_data.from_dict(store.get("master") or {})
@@ -1616,7 +1684,7 @@ async def land_preview(req: LandPlanRequest):
 
 @router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
              dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
-async def land_commit(req: LandPlanRequest):
+async def land_commit(req: LandPlanRequest, land_by: str = Depends(require_admin)):
     """写入安排表并落盘（landed_plans 表）。落盘失败回滚内存改动。
 
     为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
@@ -1630,27 +1698,55 @@ async def land_commit(req: LandPlanRequest):
         before = plan_landing.snapshot(_db)
         applied = plan_landing.apply_plan(_db, plan)
         try:
-            rec = _landings().save(plan, before, note=req.note or "")
+            rec = _landings().save(plan, before, note=req.note or "",
+                                   actor=land_by or "")
         except Exception as e:
             plan_landing.restore(_db, before)
             raise HTTPException(
                 status_code=500,
                 detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
     diff.update({"success": True, "landed_at": rec["landed_at"],
-                 "after_entries": applied["total"]})
+                 "after_entries": applied["total"],
+                 # R58：谁落的 —— 撤销/历史面板要能对上人
+                 "landed_by": rec.get("actor") or land_by or ""})
     return diff
 
 
 @router.post("/parallel/land/undo", summary="撤销最后一次落地（需管理员）",
              dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
-async def land_undo():
-    """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
+async def land_undo(actor: str = Depends(require_admin)):
+    """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。
+
+    `actor` 由 `require_admin` 依赖注入（它返回管理员账号）——
+    撤销是一条**要追责的写操作**，不记"谁撤的"就等于没留痕。
+    """
     await _ensure_loaded_async()
     with _land_lock:
-        out = plan_landing.undo(_db, _landings())
+        out = plan_landing.undo(_db, _landings(), actor=actor or "")
     if not out.get("success"):
         raise HTTPException(status_code=404, detail=out["error"])
     return out
+
+
+@router.get("/parallel/land/history", summary="落地历史（含已撤销，需管理员）",
+            dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land-status"))])
+async def land_history(limit: int = 20):
+    """最近的落地记录，**含已被撤销的**。
+
+    为什么单独开这个接口：`/land/status` 只回答"现在有没有落地方案"。
+    排查时要回答的是另一类问题 —— "上周谁落过方案、后来又撤了没有"。
+    撤销不再删记录之后（R55），这两个问题的答案分别来自 `latest()` 和 `history()`。
+
+    ⚠️ 这个端点曾被并发会话的一次推送整段删掉（对方拿着旧的 reschedule.py 覆盖），
+    表现为前端历史面板**静默消失**（面板对 404 做了降级）—— 又是一个"没有报错的
+    功能消失"。恢复时按"远端原文 + 补丁"重建，见 R58 台账。
+    """
+    await _ensure_loaded_async()
+    rows = _landings().history(limit=limit)
+    return {"success": True, "total": len(rows),
+            "active": sum(1 for r in rows if not r["revoked"]),
+            "revoked": sum(1 for r in rows if r["revoked"]),
+            "history": rows}
 
 
 @router.get("/parallel/land/status", summary="当前落地状态（供界面显示撤销入口）",
@@ -1663,7 +1759,9 @@ async def land_status():
         return {"landed": False}
     return {"landed": True, "landed_at": rec["landed_at"],
             "plan_rows": len(json.loads(rec["plan_json"])),
-            "after_entries": rec["after_entries"], "note": rec["note"]}
+            "after_entries": rec["after_entries"], "note": rec["note"],
+            # R58：界面显示撤销入口时，顺便说清"这是谁落的"
+            "landed_by": rec.get("actor") or ""}
 
 
 # ---------------------------------------------------------------------------
@@ -2639,10 +2737,17 @@ async def get_teachers():
 
 @router.get("/teachers/{teacher_name}/courses", summary="教师课程列表（F2）")
 async def get_teacher_courses(teacher_name: str):
-    """按教师提取课程卡片，标注可调状态（F2）"""
-    await _ensure_loaded_async()
+    """按教师提取课程卡片，标注可调状态（F2）
 
-    courses = _db.get_teacher_courses(teacher_name)
+    R50：课程归属必须真算一遍。此前这张卡片只有实验项目名，教师看不到自己
+    上的是哪门课（`course_bridge.resolve_course` 早就存在，只是没接到这里）。
+    主数据未初始化时先自愈 —— 否则「项目→课程」映射为空，433 条会全部回落
+    默认课程，卡片看起来正常但归属是假的。
+    """
+    await _ensure_loaded_async()
+    _ensure_master_data()
+
+    courses = _db.get_teacher_courses(teacher_name, _master_courses_snapshot())
     if not courses:
         raise HTTPException(status_code=404, detail=f"未找到教师「{teacher_name}」的课程")
 
