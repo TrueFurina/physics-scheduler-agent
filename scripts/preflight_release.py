@@ -108,8 +108,20 @@ def main():
     #       依赖它随包上传（docs/安全风险清单 v4 记录）；线上不可下载已实测。
     #       按 D-6 当作"可轮换的演示 key"管理 —— 警告级，不拦截。
     xlsx = os.path.join(ROOT, "schedule.xlsx")
+    # R56：`schedule.xlsx` 不在仓库根，**不等于线上没有数据源**。
+    #
+    # 实测（2026-10-31）：本地没有 schedule.xlsx，但线上 `/load-default` 能加载
+    # 433 条、13 位教师、第 1–16 周 —— 数据是**上一次发布时随包带上去的**，
+    # 之后从仓库里移走了（含 17 个手机号，本来就不该在仓库里）。
+    #
+    # 原判断 "不存在 -> 线上会没有数据源" 是个不成立的推论：
+    # 线上状态取决于**上次发布了什么**，不取决于本地现在有什么。
+    # 这条改成：本地没有 -> 不阻塞，但提示"确认线上数据源"。
     if not os.path.exists(xlsx):
-        check("上传面·排课表手机号", False, "schedule.xlsx 不存在：线上会没有数据源")
+        check("上传面·排课表手机号", True,
+              "本地无 schedule.xlsx（不随包则无泄露面）｜"
+              "但需确认线上数据源仍在：GET /api/reschedule/status 应 loaded=true",
+              blocking=False)
     else:
         import re as _re
         phone = _re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
