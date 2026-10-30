@@ -134,6 +134,14 @@ export interface TeacherCourse {
   total_slots: number;
   adjustable: boolean;
   adjustable_reason: string;
+  // ---- R50：真实课程归属（后端 R50 起返回；旧后端没有这几个字段，故全部可选）----
+  // `course_name` 一直是**实验项目名**（调课申请按它匹配），真实课程名在这里。
+  // 同一项目跨两门课时，`course` 用「、」并列，`course_ambiguous` 为 true。
+  course?: string;
+  courses?: string[];
+  course_ambiguous?: boolean;
+  // 真实周次列表（`week_range` 是人读的文案，连续才写成区间）
+  weeks?: number[];
 }
 
 export interface ExcludedSlot {

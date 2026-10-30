@@ -56,6 +56,17 @@ export default function CoursesView({
             <div className="flex-1 min-w-0">
               <div className="font-semibold text-gray-900">{c.course_name}</div>
               <div className="text-sm text-gray-500 mt-1">{c.class_name}</div>
+              {/* R50：真实课程归属。以前这里只有实验项目名，教师看不出自己上的是哪门课；
+                  同一项目跨两门课时后端会并列给出，并在界面上点名"横跨多门课"——
+                  归因要说全，不能让第一门课冒充整张卡片。 */}
+              {c.course && (
+                <div className="text-xs text-gray-500 mt-1">
+                  课程：{c.course}
+                  {c.course_ambiguous && (
+                    <span className="ml-1 text-amber-600">（该项目横跨多门课，请按课程核对）</span>
+                  )}
+                </div>
+              )}
               <div className="text-xs text-gray-400 mt-1">
                 {c.original_time} · {c.room} · {c.week_range}
               </div>
