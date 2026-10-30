@@ -446,6 +446,7 @@ class RescheduleAgent:
             "course_name": parsed.get("course_name"),
             "course_unrecognized": not parsed.get("course_name"),
             "ai_plans": [],
+            "ai_plans_source": "none",
             "total": 0,
         }
 
@@ -527,6 +528,7 @@ class RescheduleAgent:
                     "course_name": parsed.get("course_name"),
                     "course_unrecognized": not parsed.get("course_name"),
                     "ai_plans": [],
+                    "ai_plans_source": "none",
                 }
 
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
@@ -558,6 +560,7 @@ class RescheduleAgent:
                 "course_name": parsed.get("course_name"),
                 "course_unrecognized": not parsed.get("course_name"),
                 "ai_plans": [],
+                "ai_plans_source": "none",
                 "total": 0,
                 # R32：补上另两个键 —— 五个分支键集必须一致
                 "need_info": False,
@@ -585,6 +588,7 @@ class RescheduleAgent:
                 "course_name": parsed.get("course_name"),
                 "course_unrecognized": not parsed.get("course_name"),
                 "ai_plans": [],
+                "ai_plans_source": "none",
                 "total": 0,
                 "need_info": False,
                 "followup_questions": [],
@@ -624,6 +628,8 @@ class RescheduleAgent:
                         available_slots=slots,
                     )
                     ai_plans = plans_result.get("plans", [])
+                    for __p in ai_plans:
+                        __p.setdefault("source", "llm")
                 except Exception:
                     ai_plans = []  # LLM 异常时降级
 
@@ -638,6 +644,11 @@ class RescheduleAgent:
                             "time_slot": s["time_slot"],
                             "room": s["room"],
                             "reason": "系统推荐：该时段教室空闲",
+                            # R64：**必须标出来源**。
+                            # 规则降级本身是好事（LLM 挂了不该没候选），
+                            # 但降级产物冒充 AI 产物会让 PRD 的承诺失真 ——
+                            # 而这块恰好是最容易被拿给评审看的部分。
+                            "source": "rule",
                         })
 
         if ai_plans:
@@ -674,6 +685,12 @@ class RescheduleAgent:
             "course_name": parsed.get("course_name"),
             "course_unrecognized": course_unrecognized,
             "ai_plans": ai_plans,
+            # "llm" / "rule" / "none" —— 谁给的候选，界面据此选文案
+            "ai_plans_source": (
+                "none" if not ai_plans
+                else ("llm" if any(p.get("source") == "llm" for p in ai_plans)
+                      else "rule")
+            ),
             "total": total,
             # R32：正常分支原先缺这两个键（只有追问分支才有）。
             # 调用方无法用 `r.get("need_info")` 判断"这次是不是在追问"——
