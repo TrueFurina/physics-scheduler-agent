@@ -412,6 +412,13 @@ def apply_tables(md, tables: Dict[str, List[dict]]) -> dict:
     stats: Dict[str, dict] = {}
     before = {k: len(getattr(md, k)) for k in ("courses", "experiments", "teachers",
                                                "rooms", "classes")}
+    # R42：记下**名字快照**，用于算出"新增了谁"。
+    #
+    # 只报"新建实体 1 个"是不够的。教秘把「教师C」改成「教师C改」再导入，
+    # 得到的就是"新增 1 个" —— 而他想的是"改好了"。没有人能在
+    # "新建实体 1 个"和"我改的那一行"之间建立联系。
+    # 名字必须点名，否则他无从判断这是不是自己要的结果。
+    before_names = {k: set(getattr(md, k)) for k in before}
 
     stats["courses"] = _apply_courses(md, tables.get("courses") or [])
     stats["experiments"] = _apply_experiments(md, tables.get("experiments") or [])
@@ -424,6 +431,8 @@ def apply_tables(md, tables: Dict[str, List[dict]]) -> dict:
         stats[k]["before"] = before.get(k, 0)
         stats[k]["after"] = after.get(k, 0)
         stats[k]["added"] = max(0, after.get(k, 0) - before.get(k, 0))
+        # 新增实体的名字（差集）。集合无序 → 排序保证输出稳定。
+        stats[k]["added_names"] = sorted(set(getattr(md, k)) - before_names[k])
 
     # ⚠️ 导入即"已初始化"：否则 `_ensure_master_data()` 看到 initialized=False
     # 会用安排表反推基线把刚导入的实体整个覆盖掉 —— 导入了个寂寞。
