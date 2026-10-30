@@ -1633,12 +1633,15 @@ async def land_preview(req: LandPlanRequest):
 
 
 @router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
-             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
-async def land_commit(req: LandPlanRequest):
+             dependencies=[Depends(rate_limit("parallel-land"))])
+async def land_commit(req: LandPlanRequest, actor: str = Depends(require_admin)):
     """写入安排表并落盘（landed_plans 表）。落盘失败回滚内存改动。
 
     为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
     看到方案神秘消失 —— 与 R-36「审批通过课表一个字节没变」同族的不实。
+
+    R55：`actor` 由 `require_admin` 返回并写进落地记录。以前这张表只有
+    `note`（调用方可留空），"谁点的采纳"从来没记过 —— 出问题时只能问人。
     """
     await _ensure_loaded_async()
     plan = _land_plan_or_400(req)
@@ -1648,27 +1651,45 @@ async def land_commit(req: LandPlanRequest):
         before = plan_landing.snapshot(_db)
         applied = plan_landing.apply_plan(_db, plan)
         try:
-            rec = _landings().save(plan, before, note=req.note or "")
+            rec = _landings().save(plan, before, note=req.note or "", actor=actor or "")
         except Exception as e:
             plan_landing.restore(_db, before)
             raise HTTPException(
                 status_code=500,
                 detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
     diff.update({"success": True, "landed_at": rec["landed_at"],
+                 "landed_by": actor or "",
                  "after_entries": applied["total"]})
     return diff
 
 
 @router.post("/parallel/land/undo", summary="撤销最后一次落地（需管理员）",
-             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
-async def land_undo():
-    """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
+             dependencies=[Depends(rate_limit("parallel-land"))])
+async def land_undo(actor: str = Depends(require_admin)):
+    """恢复落地前快照并**标记**该记录已撤销（不删行）。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
     await _ensure_loaded_async()
     with _land_lock:
-        out = plan_landing.undo(_db, _landings())
+        out = plan_landing.undo(_db, _landings(), actor=actor or "")
     if not out.get("success"):
         raise HTTPException(status_code=404, detail=out["error"])
     return out
+
+
+@router.get("/parallel/land/history", summary="落地历史（含已撤销，需管理员）",
+            dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land-status"))])
+async def land_history(limit: int = 20):
+    """最近的落地记录，**含已被撤销的**。
+
+    为什么单独开这个接口：`/land/status` 只回答"现在有没有落地方案"。
+    排查时要回答的是另一类问题 —— "上周谁落过方案、后来又撤了没有"。
+    撤销不再删记录之后，这两个问题的答案分别来自 `latest()` 和 `history()`。
+    """
+    await _ensure_loaded_async()
+    rows = _landings().history(limit=limit)
+    return {"success": True, "total": len(rows),
+            "active": sum(1 for r in rows if not r["revoked"]),
+            "revoked": sum(1 for r in rows if r["revoked"]),
+            "history": rows}
 
 
 @router.get("/parallel/land/status", summary="当前落地状态（供界面显示撤销入口）",
@@ -1681,7 +1702,9 @@ async def land_status():
         return {"landed": False}
     return {"landed": True, "landed_at": rec["landed_at"],
             "plan_rows": len(json.loads(rec["plan_json"])),
-            "after_entries": rec["after_entries"], "note": rec["note"]}
+            "after_entries": rec["after_entries"], "note": rec["note"],
+            # R55：界面显示撤销入口时，顺便说清"这是谁落的"
+            "landed_by": rec.get("actor") or ""}
 
 
 # ---------------------------------------------------------------------------
