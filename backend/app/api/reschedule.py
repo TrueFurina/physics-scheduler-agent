@@ -2657,10 +2657,17 @@ async def get_teachers():
 
 @router.get("/teachers/{teacher_name}/courses", summary="教师课程列表（F2）")
 async def get_teacher_courses(teacher_name: str):
-    """按教师提取课程卡片，标注可调状态（F2）"""
-    await _ensure_loaded_async()
+    """按教师提取课程卡片，标注可调状态（F2）
 
-    courses = _db.get_teacher_courses(teacher_name)
+    R50：课程归属必须真算一遍。此前这张卡片只有实验项目名，教师看不到自己
+    上的是哪门课（`course_bridge.resolve_course` 早就存在，只是没接到这里）。
+    主数据未初始化时先自愈 —— 否则「项目→课程」映射为空，433 条会全部回落
+    默认课程，卡片看起来正常但归属是假的。
+    """
+    await _ensure_loaded_async()
+    _ensure_master_data()
+
+    courses = _db.get_teacher_courses(teacher_name, _master_courses_snapshot())
     if not courses:
         raise HTTPException(status_code=404, detail=f"未找到教师「{teacher_name}」的课程")
 

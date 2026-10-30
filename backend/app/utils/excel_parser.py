@@ -628,6 +628,30 @@ def commit_entries(db, entries, pending=None) -> None:
              stage._by_time, stage._by_room, stage._by_teacher, stage._by_class)
 
 
+def format_week_span(weeks) -> str:
+    """把一组周次写成人能读的形式，**绝不许多报**（R50）。
+
+    物理实验最常见的排法是单双周轮换（第 3、5、9、11 周）。旧实现一律写
+    `f"{min}-{max}周"`，上面那组就变成 "3-11周" —— 教师读到它会理解成
+    "每周都有课"（凭空多 5 次），或"连续 9 周"（同样多 5 次）。
+    没有报错、没有空值，只是一个看起来正常的数字，属于最难发现的一类错。
+
+    规则（宁可啰嗦，不可含糊）：
+        []            → ""              （没有周次，不给假区间）
+        [7]           → "7周"            （不写 "7-7周"）
+        [3, 4, 5]     → "3-5周"          （真连续才配用区间）
+        [3, 5, 9, 11] → "3、5、9、11周"  （不连续就逐周列出）
+    """
+    ws = sorted({int(w) for w in weeks})
+    if not ws:
+        return ""
+    if len(ws) == 1:
+        return f"{ws[0]}周"
+    if ws[-1] - ws[0] + 1 == len(ws):
+        return f"{ws[0]}-{ws[-1]}周"
+    return "、".join(str(w) for w in ws) + "周"
+
+
 class ScheduleDatabase:
     """排课数据内存数据库"""
 
@@ -1011,11 +1035,28 @@ class ScheduleDatabase:
             })
         return parsed
 
-    def get_teacher_courses(self, teacher_name: str) -> List[Dict]:
+    def get_teacher_courses(self, teacher_name: str,
+                            courses: Optional[Dict[str, str]] = None) -> List[Dict]:
         """
         按教师提取课程卡片（F2）
-        将同一教师 + 同一课程名 + 同一班级的排课记录合并为一张课程卡片
+        将同一教师 + 同一实验项目 + 同一班级的排课记录合并为一张课程卡片
+
+        R50：卡片新增「真实课程归属」——R-66 起 `ScheduleEntry` 有显式 `course`
+        外键，产品决策 B 把真实表逐行归到三门课，但这条路径此前一个字都没用，
+        教师永远看不到自己上的是哪门课。
+
+        `courses` = 「项目名 → 课程名」映射（`course_bridge.project_courses`）。
+        调用方应在**锁内**取快照再传进来，理由同 `group_by_course`：边改边遍历
+        `master.experiments` 会抛 "dictionary changed size during iteration"。
+        不传时只有条目自带的 `course` 外键可用，其余回落默认课程。
+
+        分组键**不含**课程：同一项目跨两门课时合并成一张卡片，但用
+        `courses` 列表 + `course_ambiguous` 把"这张卡片横跨两门课"说出来 ——
+        归因要说全，不能让第一门课冒充整张卡片。
         """
+        # 局部导入：`course_bridge` → `master_data`，模块级互相导入容易成环
+        from app.course_bridge import resolve_course
+
         # 时间段友好显示映射
         TIME_DISPLAY = {
             "567": "13:30-15:45", "678": "15:45-18:00",
@@ -1046,7 +1087,10 @@ class ScheduleDatabase:
                     "class_name": key[1],
                     "slots": [],  # 所有上课时段
                     "weeks": set(),
+                    # 这张卡片横跨哪些课程（逐条 resolve，口径与冲突判定同一份）
+                    "courses": set(),
                 }
+            groups[key]["courses"].add(resolve_course(e, courses))
             groups[key]["slots"].append({
                 "week": e.week,
                 "weekday": e.weekday,
@@ -1059,28 +1103,39 @@ class ScheduleDatabase:
             groups[key]["weeks"].add(e.week)
 
         # 转输出结构
-        courses = []
+        # ⚠️ 变量名不能叫 `courses` —— 那是入参（项目→课程映射），覆写它会让
+        # 后续若有人在这段里再 resolve 一次就静默拿到列表，排查成本极高。
+        cards = []
         for info in groups.values():
             slots = info["slots"]
             # 排序取最早一周作为"原上课时间"代表
             slots_sorted = sorted(slots, key=lambda s: (s["week"], s["weekday"], s["time_slot"]))
             first = slots_sorted[0]
             weeks_sorted = sorted(info["weeks"])
+            course_list = sorted(info["courses"])
             # 时间友好显示：周四 567 → 周四 13:30-15:45；
             # 跨节次记录按原表写法显示（如 14:00-17:00），见 slots[].time_text
             time_display = first.get("time_text") or TIME_DISPLAY.get(first["time_slot"], first["time_slot"])
-            courses.append({
-                "course_name": info["course_name"],
+            cards.append({
+                "course_name": info["course_name"],  # 实验项目名（apply-move 按它匹配，勿改语义）
                 "class_name": info["class_name"],
+                # 真实课程归属（R50）：单门课给准确名字，多门课用「、」并列
+                "course": "、".join(course_list),
+                "courses": course_list,
+                # 横跨多门课 ⇒ True。教师据此知道"这张卡片不是一门课"，
+                # 而不是被第一门课的名字骗过去。
+                "course_ambiguous": len(course_list) > 1,
                 "original_time": f"{first['weekday']} {time_display}",
                 "room": first["room"],
-                "week_range": f"{weeks_sorted[0]}-{weeks_sorted[-1]}周",
+                # 周次：连续才写区间，不连续逐周列出（见 format_week_span）
+                "week_range": format_week_span(weeks_sorted),
+                "weeks": weeks_sorted,  # 机器可读的真实周次
                 "total_slots": len(slots),
                 # 可调状态：实验轮次固定课程默认可调（由前端/后续规则细化）
                 "adjustable": True,
                 "adjustable_reason": "",
             })
-        return courses
+        return cards
 
     def get_all_classes(self) -> List[str]:
         return sorted(set(e.class_name for e in self.entries if e.class_name))
