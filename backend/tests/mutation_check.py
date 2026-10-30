@@ -388,6 +388,13 @@ MUTANTS = [
         """        pass  # MUTANT: 不点名""",
         "names_newly_created",
     ),
+    (
+        "M39", "漂移检查只看行数、不看丢了哪些函数",
+        "../scripts/check_remote_drift.py",
+        "    lost = _symbols(remote) - _symbols(local)",
+        "    lost = set()  # MUTANT: 不比对符号",
+        "drift",
+    ),
 ]
 
 
@@ -405,6 +412,8 @@ def _run_tests(files: list, kexpr: str) -> tuple:
 def main() -> int:
     results = []
     for mid, desc, rel, old, new, kexpr in MUTANTS:
+        # rel 可以是相对 backend/ 的路径，也可以带 ../ 指到仓库其他目录
+        # （如 scripts/ 下的工具脚本）—— 它们同样需要变异守护。
         path = os.path.join(BACKEND, rel)
         if not os.path.isfile(path):
             results.append((mid, desc, "SKIP", "文件缺失"))
