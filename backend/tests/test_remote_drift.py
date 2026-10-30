@@ -128,3 +128,55 @@ def test_check_flags_local_missing_file(tmp_path, monkeypatch):
     r = crd.check_one("nope.py", token="x")
     assert r["bad"] is True
     assert r["status"] == "local_missing"
+
+
+# ---------------------------------------------------------------------------
+# 审计模式：比较两个提交（不看本地）
+#
+# 用途是**事后审计**。R43 那次事故就是这样确认"到底丢了什么"的：
+# 拿接手前的提交做基线，逐个文件看有没有定义消失。
+# ---------------------------------------------------------------------------
+
+def test_ref_to_ref_detects_lost_definition(tmp_path, monkeypatch):
+    """基线有、现在没有的定义 → 报丢失。"""
+    crd = _load()
+    base_src = chr(34)*3 + chr(10) + "def a():" + chr(10) + "    pass" + chr(10) + chr(10) + "def b():" + chr(10) + "    pass" + chr(10) + chr(34)*3
+    head_src = chr(34)*3 + chr(10) + "def a():" + chr(10) + "    pass" + chr(10) + chr(34)*3
+
+    def fake_get(path, token, ref=None):
+        return base_src if ref == "BASE" else head_src
+
+    monkeypatch.setattr(crd, "_get", fake_get)
+    r = crd.check_ref_to_ref("m.py", token="x", base_ref="BASE")
+    assert r["bad"] is True
+    assert r["status"] == "lost"
+    assert "b" in r["detail"]
+
+
+def test_ref_to_ref_clean_when_only_added(tmp_path, monkeypatch):
+    """只有新增 → 不算丢失。"""
+    crd = _load()
+    base_src = chr(34)*3 + chr(10) + "def a():" + chr(10) + "    pass" + chr(10) + chr(34)*3
+    head_src = (chr(34)*3 + chr(10) + "def a():" + chr(10) + "    pass" + chr(10) + chr(10)
+                + "def new_one():" + chr(10) + "    pass" + chr(10) + chr(34)*3)
+
+    def fake_get(path, token, ref=None):
+        return base_src if ref == "BASE" else head_src
+
+    monkeypatch.setattr(crd, "_get", fake_get)
+    r = crd.check_ref_to_ref("m.py", token="x", base_ref="BASE")
+    assert r["bad"] is False
+
+
+def test_ref_to_ref_flags_deleted_file(tmp_path, monkeypatch):
+    """基线有、现在文件整个没了 → 报丢失（那是最大的损失）。"""
+    crd = _load()
+
+    def fake_get(path, token, ref=None):
+        return (chr(34)*3 + chr(10) + "def a():" + chr(10) + "    pass" + chr(10) + chr(34)*3
+                if ref == "BASE" else None)
+
+    monkeypatch.setattr(crd, "_get", fake_get)
+    r = crd.check_ref_to_ref("m.py", token="x", base_ref="BASE")
+    assert r["bad"] is True
+    assert r["status"] == "head_missing"
