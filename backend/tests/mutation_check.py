@@ -437,6 +437,13 @@ MUTANTS = [
         """        week_range = self.db.get_week_range()\n        current_week = week_range[0] if week_range else 1""",
         "empty_table or week_basis",
     ),
+    (
+        "M46", "补全时不打标记（假设二次消失）",
+        "app/api/reschedule.py",
+        "                t._teacher_enriched = True",
+        "                pass  # MUTANT: 不打标记",
+        "assumptions_repeat",
+    ),
 ]
 
 
