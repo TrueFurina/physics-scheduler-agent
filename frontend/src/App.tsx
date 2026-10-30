@@ -106,6 +106,8 @@ function App() {
   // AI 候选方案（B3/F9）：与沙盘分开加载——沙盘要立刻出现，候选方案可以后到。
   // PRD 验收标准与演示脚本都承诺"显示 AI 候选方案"，但历史上前端从未渲染过它。
   const [aiPlans, setAiPlans] = useState<AiPlan[]>([]);
+  // R64：候选来源。规则降级产物不能冒充 AI 产物。
+  const [aiPlansSource, setAiPlansSource] = useState<'llm' | 'rule' | 'none'>('none');
   const [plansLoading, setPlansLoading] = useState(false);
   const plansSeqRef = useRef(0);      // 请求序号：旧响应晚到就丢弃，避免切周次后串台
   const plansTimerRef = useRef<number | null>(null);  // 切周次的防抖（连点只发最后一次）
@@ -687,6 +689,7 @@ function App() {
       );
       if (seq !== plansSeqRef.current) return;  // 已被更晚的选择取代
       setAiPlans(r.data.data.ai_plans || []);
+      setAiPlansSource((r.data.data as any).ai_plans_source || 'none');
     } catch {
       if (seq === plansSeqRef.current) setAiPlans([]);
     } finally {
@@ -1346,6 +1349,7 @@ function App() {
               requestStatus={requestStatus}
               loading={loading}
               aiPlans={aiPlans}
+              aiPlansSource={aiPlansSource}
               planLoading={plansLoading}
               onBack={() => setView('courses')}
               onTargetWeekChange={handleTargetWeekChange}
