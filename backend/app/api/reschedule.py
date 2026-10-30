@@ -2585,6 +2585,32 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
     total_all = result.get("total_sections_all", 0)
     in_scope = result.get("total_sections", 0)
     solved = result.get("solved", 0)
+
+    # R65：失败时**直接返回原因**，不拼定位说明。
+    #
+    # `solve()` / `solve_all()` 的空前置分支只返回 `{success: False, error: ...}`
+    # （如"没有可排课的教学任务"/"没有可用教室"）。而这里原本**不区分成败**，
+    # 无条件拼出一整段定位说明 + summary()，于是教秘看到的是一份
+    # 结构完整、术语专业、语气肯定的文档，只是数字全是 0，
+    # 真正的原因一个字都没出现 —— 他会怀疑数据没加载，然后反复重试。
+    #
+    # 与 R64（降级产物标来源）同族：说清楚发生了什么，别给一份看起来正常的产物。
+    if not result.get("success"):
+        return {
+            "success": False,
+            "message": result.get("error") or "排课失败（求解器未给出原因）",
+            "data": {
+                "total_sections": in_scope,
+                "total_sections_all": total_all,
+                "solved": solved,
+                "solved_groups": result.get("solved_groups", solved),
+                "total_groups": result.get("total_groups", total_all),
+                "truncated": truncated,
+                "chunks": result.get("chunks", []),
+                "conflicts": result.get("conflicts") or [],
+                "weeks": result.get("weeks", []),
+            },
+        }
     # 组课时口径（R-72）：段是求解单位，组课时才是交付单位。
     # 旧版把两者混成 `solved/total_all`，等于用"压扁后的段"冒充"全部学生组"。
     solved_groups = result.get("solved_groups", solved)
