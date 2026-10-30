@@ -37,6 +37,24 @@ os.environ.setdefault("SCHEDULE_WARMUP", "0")
 # 测试用演示口令登审批台，所以测试进程统一按演示模式跑。
 os.environ.setdefault("DEMO_MODE", "1")
 
+# ⚠️ ADMIN_PASS 必须在这里设，不能只放在 test_api_auth.py 里。
+#
+# `security.py` 在**模块导入时**就把 `ADMIN_PASS` 读进模块级常量
+# （`_ADMIN_PASS_RAW = os.getenv("ADMIN_PASS")`）。谁先导入 `app.security`，
+# 谁就决定了这个常量。
+#
+# 实测全量跑时的失败：pytest 按文件名排序，`test_admin_password_guard.py`
+# 排在 `test_api_auth.py` 之前，它 `import app.security` →
+# 此时 ADMIN_PASS 还没设 → 走 ephemeral 分支生成随机口令（22 字符）→
+# 之后 `test_api_auth.py` 的 `setdefault` 已无意义，它自己读到的
+# `os.environ["ADMIN_PASS"]` 是 admin123，而 security 里是随机串
+# ⇒ 登录必然 401。
+#
+# 表现是"单独跑绿、全量跑红"，而且换个文件名排前/排后就会变 ——
+# 典型的**导入顺序耦合**。conftest.py 是所有测试最早加载的文件，
+# 把环境变量钉在这里，顺序就无关了。
+os.environ.setdefault("ADMIN_PASS", "admin123")
+
 # 解析缓存写到系统临时目录：否则测试会把 schedule-*.json 落进仓库
 # `backend/app/data/cache/`（而该目录会随发布包上传）。
 os.environ.setdefault(
