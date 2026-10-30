@@ -37,11 +37,31 @@ def main():
     offline = "--offline" in sys.argv
 
     # 1. git 工作区干净
-    st = subprocess.run(["git", "status", "--short"], cwd=ROOT,
-                        capture_output=True, text=True).stdout.strip()
-    head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=ROOT,
-                          capture_output=True, text=True).stdout.strip()
-    check("git 工作区", not st, f"{head}" + (f"｜未提交：{st[:80]}" if st else "｜干净"))
+    # R60：**必须看 returncode**。
+    #
+    # `git status` 失败时 stdout 是空字符串，而 `not ""` 为真 ——
+    # 于是"查不了"被判成"干净"。实测：本工作目录不是 git 仓库时，
+    # 输出是 `✅ git 工作区：｜干净`（连提交号都是空的）。
+    #
+    # 发布前检查里最不该说谎的就是这条："未提交改动会被打进发布包"
+    # 是真实风险，而检查器在根本查不了时给了绿勾。
+    _st = subprocess.run(["git", "status", "--short"], cwd=ROOT,
+                         capture_output=True, text=True)
+    _head = subprocess.run(["git", "log", "--oneline", "-1"], cwd=ROOT,
+                           capture_output=True, text=True)
+    st = _st.stdout.strip()
+    head = _head.stdout.strip()
+
+    if _st.returncode != 0 or _head.returncode != 0:
+        # 不阻塞：codeload 解包的工作副本本来就不是 git 仓库，
+        # 发布走的是目录内容。但必须说清楚这条**没生效**。
+        check("git 工作区", True,
+              "**不是 git 仓库，未检查**（发布走目录内容，不依赖 git 状态）",
+              blocking=False)
+    else:
+        shown = head or "（无提交号）"
+        check("git 工作区", not st,
+              f"{shown}" + (f"｜未提交：{st[:80]}" if st else "｜干净"))
 
     # 2. webui/index.html 引用的资源全存在
     html_path = os.path.join(WEBUI, "index.html")
@@ -187,7 +207,16 @@ def main():
             check("前端产物新鲜度", False,
                   f"{detail}｜先跑 cd frontend && npx vite build --outDir webui --emptyOutDir")
     except Exception as e:  # noqa: BLE001
-        check("前端产物新鲜度", True, f"检查跳过（{e}）", blocking=False)
+        # ⚠️ 这一条**不能降级成 True**。
+        #
+        # 它是 R59 立的阻塞项：产物过期 = 用户会看到旧功能，而所有测试都绿。
+        # 如果"检查脚本自己跑挂了"就放行，那等于给了一个可以绕过它的口子 ——
+        # 把脚本弄坏（或删掉）比修产物容易得多。
+        #
+        # 与 git 那条不同：git 查不了是因为"这里本来就不是仓库"，
+        # 属环境正常形态；而产物新鲜度检查跑挂了是**异常**，必须拦。
+        check("前端产物新鲜度", False,
+              f"检查本身失败（{e}）—— 不能确认产物是否新鲜，按不通过处理")
 
     # 5. cache 状态（发布前建议清；信息项）
     cache = os.path.join(ROOT, "backend", "app", "data", "cache")
