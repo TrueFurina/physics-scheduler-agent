@@ -402,6 +402,13 @@ MUTANTS = [
         "    lost = set()  # MUTANT: 审计模式不比定义",
         "ref_to_ref",
     ),
+    (
+        "M41", "conftest 不注入 ADMIN_PASS（口令随机化）",
+        "tests/conftest.py",
+        'os.environ.setdefault("ADMIN_PASS", "admin123")',
+        'pass  # MUTANT: 不注入',
+        "env_order or test_admin_pass_is_set",
+    ),
 ]
 
 
