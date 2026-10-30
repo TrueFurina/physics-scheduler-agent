@@ -9,10 +9,11 @@
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -34,10 +35,28 @@ _STARTED_AT = time.time()
 _COUNTERS = {"requests": 0, "errors": 0, "slow": 0, "throttled": 0}
 _SLOW_MS = int(os.getenv("SLOW_REQUEST_MS", "1000") or 1000)
 _http_log = logging.getLogger("app.http")
+_error_log = logging.getLogger("app.error")
+
+# 请求编号长度：8 位十六进制（uuid4 的前 8 位）。够用且好念 ——
+# 用户报"错误编号 a1b2c3d4"时能一次 grep 到，不需要复制 32 位。
+_RID_LEN = 8
 
 
 class _ObserveMiddleware:
-    """记录耗时与状态码；只对**慢请求和 4xx/5xx** 打日志，避免正常访问刷屏。"""
+    """记录耗时/状态码/请求编号；只对**慢请求、4xx/5xx、未捕获异常**打日志。
+
+    R53：异常路径此前是**完全隐形**的。`await self.app(...)` 抛异常时，
+    后面那段计数与日志代码根本不会执行。实测一个 500 请求：
+
+        计数器   requests 0→0 / errors 0→0      （一个都不动）
+        日志     （一行都没有）
+        响应头   没有 x-response-time-ms
+        响应体   text/plain "Internal Server Error"（没有异常类型、没有栈、没有编号）
+
+    运维侧看到的是"什么都没发生"，用户看到的是"点了没反应" —— 两边的信息都断了。
+    所以计数与日志必须放进 `finally`：**请求失败时更需要留痕，而不是更容易被跳过。**
+    异常本身**不吞**，原样抛给上层的 ServerErrorMiddleware（它负责出 500 响应）。
+    """
 
     def __init__(self, app):
         self.app = app
@@ -48,6 +67,10 @@ class _ObserveMiddleware:
             return
 
         started = time.perf_counter()
+        rid = uuid.uuid4().hex[:_RID_LEN]
+        # 同一个编号必须能被下游（异常处理器）拿到：前端报"编号"，服务端凭它
+        # 一条 grep 就能把这一个请求的全部痕迹捞出来。
+        scope.setdefault("state", {})["request_id"] = rid
         info = {"status": 500}
 
         async def send_wrapper(message):
@@ -56,25 +79,32 @@ class _ObserveMiddleware:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 message.setdefault("headers", [])
                 message["headers"].append((b"x-response-time-ms", str(elapsed_ms).encode()))
+                message["headers"].append((b"x-request-id", rid.encode()))
             await send(message)
 
-        await self.app(scope, receive, send_wrapper)
+        failed = False
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            status = info["status"]
+            _COUNTERS["requests"] += 1
+            if status >= 400 or failed:
+                _COUNTERS["errors"] += 1
+            if status == 429:
+                _COUNTERS["throttled"] += 1
+            if elapsed_ms >= _SLOW_MS:
+                _COUNTERS["slow"] += 1
 
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        status = info["status"]
-        _COUNTERS["requests"] += 1
-        if status >= 400:
-            _COUNTERS["errors"] += 1
-        if status == 429:
-            _COUNTERS["throttled"] += 1
-        if elapsed_ms >= _SLOW_MS:
-            _COUNTERS["slow"] += 1
-
-        if status >= 400 or elapsed_ms >= _SLOW_MS:
-            _http_log.warning(
-                '{"method":"%s","path":"%s","status":%d,"ms":%d}',
-                scope.get("method", ""), scope.get("path", ""), status, elapsed_ms,
-            )
+            if failed or status >= 400 or elapsed_ms >= _SLOW_MS:
+                _http_log.warning(
+                    '{"rid":"%s","method":"%s","path":"%s","status":%d,"ms":%d,"exception":%s}',
+                    rid, scope.get("method", ""), scope.get("path", ""),
+                    status, elapsed_ms, "true" if failed else "false",
+                )
 
 
 def metrics() -> dict:
@@ -145,6 +175,42 @@ app.add_middleware(
 
 # 只注册调课相关的路由
 app.include_router(reschedule.router, prefix="/api/reschedule", tags=["调课管理"])
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request: Request, exc: Exception):
+    """未捕获异常：留住栈，并把请求编号交给调用方（R53）。
+
+    修复前这里什么都没有：全仓 `exception_handler` / `add_exception_handler` **0 处**，
+    `logger.exception` / `exc_info` **0 处**。于是一个 500 请求的实际痕迹是：
+
+        响应体  text/plain "Internal Server Error"
+        日志    （一行都没有）
+        编号    没有
+
+    "出错了"能知道（如果恰好有人看屏幕），"为什么错"完全不知道。
+
+    两个刻意的选择：
+    1. **显式传 `exc_info=(type, exc, tb)`**：`logger.exception` 依赖
+       `sys.exc_info()`，而这里是在 ServerErrorMiddleware 的 except 块之外被回调的，
+       栈上下文不保证还在 —— 不显式传就可能打出一行没有栈的"ERROR"。
+    2. **对外只给编号，不给栈**：栈里有文件路径、变量值、SQL，属于内部信息；
+       给一个 8 位编号让人能报给我们，比把栈糊到用户脸上更安全也更好排查。
+    """
+    rid = getattr(request.state, "request_id", "") or uuid.uuid4().hex[:_RID_LEN]
+    _error_log.error(
+        '{"rid":"%s","method":"%s","path":"%s","exc":"%s"}',
+        rid, request.method, request.url.path, type(exc).__name__,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "服务器内部错误。请把错误编号（error_id）提供给管理员，便于定位。",
+            "error_id": rid,
+        },
+        headers={"x-request-id": rid},
+    )
 
 
 @app.get("/health")
