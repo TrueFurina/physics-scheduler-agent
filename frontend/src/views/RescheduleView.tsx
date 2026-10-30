@@ -25,6 +25,13 @@ interface Props {
   loading: boolean;
   /** AI 候选方案（后台加载）：到达前 planLoading 为真，显示"正在挑"占位 */
   aiPlans?: AiPlan[];
+  /**
+   * 候选来源：`llm` / `rule` / `none`。
+   *
+   * R64：LLM 不可用时后端会规则降级给 3 个候选 —— 那是好事，
+   * 但**不能显示成「🤖 AI 推荐」**，否则教秘以为这是分析过的结果。
+   */
+  aiPlansSource?: 'llm' | 'rule' | 'none';
   planLoading?: boolean;
   onBack: () => void;
   onTargetWeekChange: (week: number) => void;
@@ -38,6 +45,7 @@ export default function RescheduleView({
   selectedCourse, courseOptions = [], onSelectCourse,
   currentTeacher, targetWeek, available, excluded, showAllAvail,
   impact, impactLoading, requestStatus, loading, aiPlans = [], planLoading = false,
+  aiPlansSource = 'none',
   onBack, onTargetWeekChange, onToggleShowAll, onImpactAnalysis, onSubmit,
 }: Props) {
   const courseLabel = selectedCourse ? selectedCourse.course_name : '未指定课程';
@@ -191,7 +199,9 @@ export default function RescheduleView({
       {/* AI 候选方案（F9）—— 后台加载，通常晚于沙盘 5 秒以上，故有独立占位 */}
       {(planLoading || aiPlans.length > 0) && (
         <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
-          <h3 className="font-medium text-indigo-800 mb-1">🤖 AI 推荐候选方案</h3>
+          <h3 className="font-medium text-indigo-800 mb-1">
+            {aiPlansSource === 'rule' ? '📋 系统推荐候选（AI 暂不可用）' : '🤖 AI 推荐候选方案'}
+          </h3>
           <p className="text-xs text-gray-400 mb-3">
             从 {available.length} 个可用时段里挑几个更合适的 —— 只是建议，上面所有可用时段都能选
           </p>
