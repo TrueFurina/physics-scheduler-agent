@@ -936,6 +936,9 @@ async def reschedule_chat(req: ChatRequest):
             "available_slots": result.get("available_slots", []),
             "excluded_slots": result.get("excluded_slots", []),
             "ai_plans": result.get("ai_plans", []),
+            # R64：候选来源（llm / rule / none）。前端据此选文案 ——
+            # 规则产物不能显示成「🤖 AI 推荐」。
+            "ai_plans_source": result.get("ai_plans_source", "none"),
             "total": result.get("total", 0),
             "need_info": result.get("need_info", False),
             "followup_questions": result.get("followup_questions", []),
