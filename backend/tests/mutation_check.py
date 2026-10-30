@@ -416,6 +416,13 @@ MUTANTS = [
         "                extra_class_busy=None,  # MUTANT: 不回填班级",
         "chunked_schedule or chunk_report",
     ),
+    (
+        "M43", "落盘失败不回滚内存（方案神秘消失）",
+        "app/api/reschedule.py",
+        "            plan_landing.restore(_db, before)",
+        "            pass  # MUTANT: 不回滚",
+        "rolls_back or rollback_restores",
+    ),
 ]
 
 
