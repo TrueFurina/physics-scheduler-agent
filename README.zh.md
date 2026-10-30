@@ -95,7 +95,7 @@ npm run dev
 - ✅ **自然语言调课**："我是吴琳，第六周的课上不了，调到下周"
 - ✅ **多轮追问**：信息缺失时系统主动补全
 - ✅ **SQLite 持久化**：调课申请重启不丢
-- ✅ **后端 620 个测试 + 前端 126 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_restart_replay`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
+- ✅ **后端 639 个测试 + 前端 119 个测试**，另有独立审计器（`audit_conflicts`/`verify_graybox`/`verify_master_roundtrip`/`verify_intro_filter`/`probe_approval_chain`/`probe_land_plan`/`probe_schedule_grid`/`probe_import_wizard`/`probe_ui_newviews`，用独立解析器从原始 Excel 重算一切）
 - ✅ **方案落地**：全校一键方案先看四类差异账，管理员采纳后写回安排表，可随时撤销恢复快照；重启自动重放（sqlite 账本）
 
 ## 项目结构
@@ -114,7 +114,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # 调课智能体、LLM 意图解析
 │   │   ├── engine/                 # 约束求解自动排课（CP-SAT）
 │   │   └── utils/                  # Excel 解析器 / 时间模型
-│   └── tests/                      # 620 个 pytest 测试
+│   └── tests/                      # 639 个 pytest 测试
 ├── frontend/
 │   └── src/                        # React 界面（看板/主数据/并行排课/沙盘等）
 ├── scripts/                        # 独立审计器 + 发布预检
@@ -225,7 +225,6 @@ python run.py
 
 - 默认数据源是存在时的**真实表** `schedule.xlsx`（产品决策 R-09：真实教师姓名是教秘演示的业务主体数据），仅在真实表缺失时兜底脱敏表 `schedule.demo.xlsx`（由 `scripts/make_demo_schedule.py` 生成，教师为 `教师A…`，无手机号）。因此线上显示的是真实教师姓名（如吴琳）——**这是预期行为，不是泄露**。教师联系方式（「教师联系表」的手机号/邮箱列）从不进入任何 API 响应，由 `backend/tests/test_privacy_export.py` 锁死。
 - 线上核验：`GET /api/reschedule/status` 返回的教师为真实姓名（R-09 产品决策）；若看到化名 `教师A…`，说明回退到了脱敏表（真实表缺失）。
-- 读接口数据边界（匿名调用方能看到什么）：教师**姓名**、班级**名称**、场地、周次/星期/时段、实验项目名。永远看不到：教师手机号/邮箱，以及任何学生个体数据（学生课表不对外提供）。`/master-status` 的未排样本列表里可能出现班级名 —— 不含学生 PII。
 - 云端能力（登录 / 数据 / 大模型）受**服务端 Origin 精确匹配**约束：只有发布域名被放行，其他来源 403。故本地 `localhost` 只能验证公网调用，微信登录须在线上域名下验证。
 
 > 重新发布须由用户明确要求「发布 / 上线」（发布同意不跨轮次延续）。
