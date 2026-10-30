@@ -444,6 +444,13 @@ MUTANTS = [
         "                pass  # MUTANT: 不打标记",
         "assumptions_repeat",
     ),
+    (
+        "M47", "导入不说明「预览之后数据变了」",
+        "app/api/reschedule.py",
+        "    if flat_pre and (added == 0 or flat):",
+        "    if False:  # MUTANT: 不提示已存在项",
+        "reports_drift",
+    ),
 ]
 
 
