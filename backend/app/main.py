@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import reschedule
@@ -213,6 +213,22 @@ if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").is_file():
 
         路径穿越防护：解析后的路径必须仍在 dist 目录内，否则一律回落。
         """
+        # /api/** 的未知路径**绝不**回落到 index.html（R52）。
+        #
+        # 兜底路由会接住任何一个 GET。于是 GET 一个拼错的接口 —— 或者 GET 一个
+        # 只支持 POST 的写接口 —— 拿到的是 200 + text/html。后果有三层：
+        #   1. 前端 `r.json()` 抛 "Unexpected token '<'"：排查方向被引到"JSON 解析"，
+        #      而真相是"这个接口不存在"；
+        #   2. 日志里 status=200、`errors` 计数器不增 ⇒ 监控看不到这批请求，
+        #      与 R35/R39「静默成功」同族；
+        #   3. `GET /master/init`、`GET /upload` 这类写接口回 200，会让人误以为
+        #      已经执行成功（实际什么都没做）。
+        # API 命名空间里的响应必须是 JSON，不是前端页面 —— 这一条没有例外。
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"接口不存在：/{full_path}"},
+            )
         if full_path:
             candidate = (_DIST_ROOT / full_path).resolve()
             try:
