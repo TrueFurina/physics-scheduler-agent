@@ -59,6 +59,23 @@ function maxUploadBytes(headers: Record<string, unknown> | undefined): number {
 }
 
 /**
+ * 取服务端的请求编号（R53 起每个响应都带 `x-request-id`，500 的响应体里还有
+ * `error_id`）。取不到返回空串。
+ *
+ * 为什么两个来源都试：`error_id` 是**给人念的**（在 JSON 里，8 位），
+ * `x-request-id` 是**给日志用的**（在头上，同一个值）。任一可用即可，
+ * 但头可能被中间层剥掉、体可能被网关换成 HTML —— 所以两个都读。
+ */
+function pickErrorId(data: unknown, headers: Record<string, unknown> | undefined): string {
+  if (data && typeof data === 'object') {
+    const id = (data as { error_id?: unknown }).error_id;
+    if (typeof id === 'string' && id.trim()) return id.trim();
+  }
+  const raw = headers?.['x-request-id'] ?? headers?.['X-Request-Id'];
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/**
  * 从后端响应体里取一句话。
  * - `{ detail: "中文原因" }`        → 原样用（后端文案比前端猜得准）
  * - `{ detail: [{msg: "..."}] }`    → FastAPI 422 校验错误，拼成一句
@@ -110,6 +127,19 @@ export function describeApiError(err: unknown, fallback = '请求失败，请稍
       const cap = maxUploadBytes(res.headers);
       const capText = cap ? `（上限 ${Math.round(cap / (1024 * 1024))} MB）` : '';
       return `文件太大${capText}，请压缩表格或拆分成多个文件后重试。`;
+    }
+
+    // 5xx 且服务端给了编号（R53）：这句话的全部价值都在编号上。
+    //
+    // 修之前这里走的是 `if (detail)` 或 `if (status >= 500)` 两条兜底 ——
+    // 后端明明在响应体里给了 `error_id`，界面上却一个字都不显示，用户只能说
+    // "报错了"，而这四个字对排查毫无用处。编号是**唯一**能把用户和日志对上的东西。
+    //
+    // 也刻意**不**追加"请稍后重试"：500 是代码 bug，重试一百次也一样，
+    // 只会让用户以为是自己运气不好。
+    const errorId = pickErrorId(res.data, res.headers);
+    if (status >= 500 && errorId) {
+      return `服务端出错（HTTP ${status}），错误编号 ${errorId}，请提供给管理员排查。`;
     }
 
     if (detail) return ensureHint(detail);
