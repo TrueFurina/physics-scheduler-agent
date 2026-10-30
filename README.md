@@ -277,7 +277,7 @@ Publish parameters:
 ## Documentation
 
 - [中文 README (Chinese)](README.zh.md)
-- [PRD V1.0 (Chinese)](docs/PRD-V1.0.md)
+- [PRD V1.0 (Chinese)](docs/PRD-v1.0.md)
 - [Technical Architecture V1.0 (Chinese)](docs/技术架构设计文档-V1.0.md)
 - [User Guide (Chinese)](docs/产品使用指南.md)
 - [Project Reflection (Chinese)](docs/项目总结与反思.md)
