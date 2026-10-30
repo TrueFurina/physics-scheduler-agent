@@ -299,9 +299,9 @@ async function fullyInViewport(page, selector) {
       // L1：全校求解出方案（LandPlanPanel 的 schedule 来源；单班结果不进该面板）
       const tS = Date.now();
       await page.getByRole('button', { name: /一键排全校/ }).first().click();
-      await waitForText(page, /全校一键排课 · \d+\/\d+ 个班排满/, 240000, 'L1 一键排全校');
+      await waitForText(page, /全校一键排课 · \d+\/\d+ 个班排定/, 240000, 'L1 一键排全校');
       const planTxt = await summaryText(page);
-      const mPlan = planTxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排满/);
+      const mPlan = planTxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排定/);
       rec(!!mPlan && mPlan[1] === mPlan[2], 'L1 一键排全校（方案来源）',
         `${Date.now() - tS}ms，${mPlan ? `${mPlan[1]}/${mPlan[2]} 班` : '未见解'}`);
 
@@ -429,7 +429,7 @@ async function fullyInViewport(page, selector) {
     await p2.getByRole('button', { name: /并行排课/ }).first().click();
     await p2.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
     await p2.getByRole('button', { name: /一键排全校/ }).first().click();
-    await waitForText(p2, /全校一键排课 · \d+\/\d+ 个班排满/, 240000, 'L0 求解');
+    await waitForText(p2, /全校一键排课 · \d+\/\d+ 个班排定/, 240000, 'L0 求解');
     await p2.getByRole('button', { name: /落地为正式安排表/ }).first().click();
     await waitForText(p2, /🔍 落地预览（未写入）/, 60000, 'L0 预览');
     const guardTxt = await p2.evaluate(() => document.body.innerText);
