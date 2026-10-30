@@ -381,6 +381,13 @@ MUTANTS = [
             continue""",
         "intro_and_exam",
     ),
+    (
+        "M38", "导入只报数量不点名新增实体",
+        "app/api/reschedule.py",
+        '        msg += f"\\n🆕 本次新建：{shown}"',
+        """        pass  # MUTANT: 不点名""",
+        "names_newly_created",
+    ),
 ]
 
 
