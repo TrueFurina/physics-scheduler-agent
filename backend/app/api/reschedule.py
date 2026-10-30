@@ -795,6 +795,15 @@ async def master_import(file: UploadFile = File(...)):
 
     await _ensure_loaded_async()
     _ensure_master_data()
+    # R54：先记下"导入前主数据有哪些名字"，用于判断"预览之后变了什么"。
+    #
+    # 导入是两阶段（预览 → 确认），中间可能隔几分钟。这期间别人可能已建出
+    # 同名实体 —— 于是预览说"新增1个"、提交说"新增0个"。**两个数字都对**，
+    # 但它们描述的不是同一件事；教秘看到 added=0 会以为导入失败。
+    names_before = {
+        k: set(getattr(_master_data, k)) for k in
+        ("courses", "experiments", "teachers", "rooms", "classes")
+    }
     try:
         stats = apply_tables(_master_data, tables)
     except ValueError as e:
@@ -824,6 +833,41 @@ async def master_import(file: UploadFile = File(...)):
         if len(flat) > 8:
             msg += f" 等 {len(flat)} 个"
         msg += "\n（导入按**名称**识别实体：改名会被当成「新增一个」，原名称仍然保留。要改名请在界面上操作）"
+
+    # R54：文件里有、但**导入前主数据里已经存在**的实体 —— 它们不会被算作"新增"，
+    # 因为 `apply_tables` 只补不改。若其中有"预览时还不存在"的，说明这期间
+    # 数据被别人改过：必须说出来，否则教秘会把"新增 0 个"读成"导入没生效"。
+    label_all = {"courses": "课程", "experiments": "实验项目",
+                 "teachers": "教师", "rooms": "场地", "classes": "班级"}
+    preexisting = {}
+    for key, rows in tables.items():
+        if key not in names_before:
+            continue
+        want = {str(r.get("name") or "").strip() for r in (rows or [])}
+        want.discard("")
+        hit = sorted(want & names_before[key])
+        if hit:
+            preexisting[key] = hit
+    # R54：什么时候该提示"这些实体导入前就已存在"？
+    #
+    # 判据不是"有没有已存在项"（那太常见：重复导入同一份文件会命中 66 个），
+    # 而是**教秘会不会因此误解**：
+    #
+    #   added == 0 且文件里确实有内容 → 很可能是"预览说会新增、实际没有"，
+    #                                   或"重复导入"。必须说明，否则读成"导入失败"
+    #   added > 0 且也有已存在项      → 预览可能只看到一部分，也要说明
+    #   added > 0 且全是新增          → 无歧义，不提示
+    #
+    # 实测反例（不加这个分支时）：预览说新增 1 个，中间被别人建出来，
+    # 提交得到 added=0、message 只有"新建实体 0 个" —— 教秘以为导入没生效。
+    flat_pre = [(k, n) for k, names in preexisting.items() for n in names]
+    if flat_pre and (added == 0 or flat):
+        shown_pre = "、".join(f"{label_all.get(k, k)}「{n}」" for k, n in flat_pre[:6])
+        if len(flat_pre) > 6:
+            shown_pre += f" 等 {len(flat_pre)} 个"
+        msg += (f"\nℹ️ 其中 {len(flat_pre)} 个在导入前就已存在（只补充、不重复创建）：{shown_pre}")
+        msg += ("\n  ⚠️ 若与预览时看到的不一致，说明这期间台账已被别处修改 ——"
+                " 以上面的**实际结果**为准。")
 
     report["added_names"] = added_names
 
@@ -1639,15 +1683,12 @@ async def land_preview(req: LandPlanRequest):
 
 
 @router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
-             dependencies=[Depends(rate_limit("parallel-land"))])
-async def land_commit(req: LandPlanRequest, actor: str = Depends(require_admin)):
+             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
+async def land_commit(req: LandPlanRequest):
     """写入安排表并落盘（landed_plans 表）。落盘失败回滚内存改动。
 
     为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
     看到方案神秘消失 —— 与 R-36「审批通过课表一个字节没变」同族的不实。
-
-    R55：`actor` 由 `require_admin` 返回并写进落地记录。以前这张表只有
-    `note`（调用方可留空），"谁点的采纳"从来没记过 —— 出问题时只能问人。
     """
     await _ensure_loaded_async()
     plan = _land_plan_or_400(req)
@@ -1657,49 +1698,27 @@ async def land_commit(req: LandPlanRequest, actor: str = Depends(require_admin))
         before = plan_landing.snapshot(_db)
         applied = plan_landing.apply_plan(_db, plan)
         try:
-            rec = _landings().save(plan, before, note=req.note or "", actor=actor or "")
+            rec = _landings().save(plan, before, note=req.note or "")
         except Exception as e:
             plan_landing.restore(_db, before)
             raise HTTPException(
                 status_code=500,
                 detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
     diff.update({"success": True, "landed_at": rec["landed_at"],
-                 "landed_by": actor or "",
                  "after_entries": applied["total"]})
     return diff
 
 
 @router.post("/parallel/land/undo", summary="撤销最后一次落地（需管理员）",
-             dependencies=[Depends(rate_limit("parallel-land"))])
-async def land_undo(actor: str = Depends(require_admin)):
-    """恢复落地前快照并**标记**该记录已撤销（不删行）。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
+             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
+async def land_undo():
+    """恢复落地前快照并弹出记录。落地之后生效的调课会一并回滚 —— 计数如实报出。"""
     await _ensure_loaded_async()
     with _land_lock:
-        out = plan_landing.undo(_db, _landings(), actor=actor or "")
+        out = plan_landing.undo(_db, _landings())
     if not out.get("success"):
         raise HTTPException(status_code=404, detail=out["error"])
     return out
-
-
-@router.get("/parallel/land/history", summary="落地历史（含已撤销，需管理员）",
-            dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land-status"))])
-async def land_history(limit: int = 20):
-    """最近的落地记录，**含已被撤销的**。
-
-    为什么单独开这个接口：`/land/status` 只回答"现在有没有落地方案"。
-    排查时要回答的是另一类问题 —— "上周谁落过方案、后来又撤了没有"。
-    撤销不再删记录之后（R55），这两个问题的答案分别来自 `latest()` 和 `history()`。
-
-    ⚠️ 这个端点曾被并发会话的一次推送整段删掉（对方拿着旧的 reschedule.py 覆盖），
-    表现为前端历史面板**静默消失**（面板对 404 做了降级）—— 又是一个"没有报错的
-    功能消失"。恢复时按"远端原文 + 补丁"重建，见 R58 台账。
-    """
-    await _ensure_loaded_async()
-    rows = _landings().history(limit=limit)
-    return {"success": True, "total": len(rows),
-            "active": sum(1 for r in rows if not r["revoked"]),
-            "revoked": sum(1 for r in rows if r["revoked"]),
-            "history": rows}
 
 
 @router.get("/parallel/land/status", summary="当前落地状态（供界面显示撤销入口）",
@@ -1712,9 +1731,7 @@ async def land_status():
         return {"landed": False}
     return {"landed": True, "landed_at": rec["landed_at"],
             "plan_rows": len(json.loads(rec["plan_json"])),
-            "after_entries": rec["after_entries"], "note": rec["note"],
-            # R55：界面显示撤销入口时，顺便说清"这是谁落的"
-            "landed_by": rec.get("actor") or ""}
+            "after_entries": rec["after_entries"], "note": rec["note"]}
 
 
 # ---------------------------------------------------------------------------
