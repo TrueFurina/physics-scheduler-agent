@@ -395,6 +395,13 @@ MUTANTS = [
         "    lost = set()  # MUTANT: 不比对符号",
         "drift",
     ),
+    (
+        "M40", "审计模式不比对定义（只比行数）",
+        "../scripts/check_remote_drift.py",
+        "    lost = _symbols(base) - _symbols(head)",
+        "    lost = set()  # MUTANT: 审计模式不比定义",
+        "ref_to_ref",
+    ),
 ]
 
 
