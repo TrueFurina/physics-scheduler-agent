@@ -423,6 +423,13 @@ MUTANTS = [
         "            pass  # MUTANT: 不回滚",
         "rolls_back or rollback_restores",
     ),
+    (
+        "M44", "损坏的落盘不丢弃（永久豁免）",
+        "app/api/reschedule.py",
+        """    if store is None and master_store.consume_corrupt_flag():\n        master_store.clear()""",
+        """    if False:  # MUTANT: 不清理损坏落盘\n        master_store.clear()""",
+        "corrupt_store_file_is_discarded",
+    ),
 ]
 
 
