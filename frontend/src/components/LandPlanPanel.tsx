@@ -58,6 +58,7 @@ function fmtTime(iso: string): string {
 export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, onMsg }: Props) {
   const [status, setStatus] = useState<LandStatus | null>(null);
   const [history, setHistory] = useState<LandHistory | null>(null);
+  const [historyNote, setHistoryNote] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [diff, setDiff] = useState<LandPlanDiff | null>(null);
   const [busy, setBusy] = useState<Busy>('');
@@ -74,11 +75,27 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
     }
     // 落地历史（R56）：只读补充信息。未登录管理员 / 旧后端没有这个接口时
     // 一律静默 —— 不能因为"看不到历史"就让整个落地面板报错。
+    //
+    // R58 修正：**取消静默要分情况**。401/403 是预期内的（教秘本来就不是管理员），
+    // 静默是对的；但 404 / 5xx 说明"接口不见了或服务端版本不一致"—— 那是事故，
+    // 不能和"你不是管理员"长得一模一样。这次正是因为两者长得一样，
+    // 一个端点被别的会话整段删掉，面板安静消失，没人发现。
     try {
       const h = await rescheduleApi.landHistory(8);
       setHistory(h.data);
-    } catch {
+      setHistoryNote('');
+    } catch (err: any) {
       setHistory(null);
+      const status = err?.response?.status;
+      if (status && status !== 401 && status !== 403) {
+        setHistoryNote(
+          status === 404
+            ? '落地历史不可用：服务端没有这个接口（版本可能不一致）'
+            : `落地历史加载失败（HTTP ${status}）`,
+        );
+      } else {
+        setHistoryNote('');
+      }
     }
   };
 
@@ -209,7 +226,11 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       )}
 
       {/* 落地历史（R56）：撤销不再删记录之后，"谁落过、后来撤没撤"才答得上来。
-          管理员以外看不到（接口要管理员），取不到就整块不渲染 —— 不打扰教秘。 */}
+          管理员以外看不到（接口要管理员），401/403 就整块不渲染 —— 不打扰教秘。
+          但 404/5xx 必须说出来（R58）：那说明接口没了或版本不一致，是事故不是权限。 */}
+      {historyNote && (
+        <p className="mt-2 text-xs text-amber-600">{historyNote}</p>
+      )}
       {history && history.total > 0 && (
         <div className="mt-2">
           <button

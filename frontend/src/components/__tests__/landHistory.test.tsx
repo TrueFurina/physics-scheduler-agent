@@ -119,4 +119,27 @@ describe('LandPlanPanel · 落地历史', () => {
     expect(screen.queryByText(/落地历史/)).toBeNull();
     expect(screen.queryByTestId('land-history')).toBeNull();
   });
+
+  // R58：静默降级替真实事故打了掩护 —— 端点被别的会话删掉时，面板安静消失，
+  // 和"你不是管理员"长得一模一样。所以降级要分情况：401/403 静默，404 说出来。
+  it('接口 404 时必须说出来（那是版本不一致，不是权限）', async () => {
+    landStatus.mockResolvedValue({ data: { landed: false } });
+    landHistory.mockRejectedValue({ response: { status: 404 } });
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText(/服务端没有这个接口/)).toBeTruthy());
+  });
+
+  it('401 仍然静默（教秘本来就不是管理员，这不算故障）', async () => {
+    landStatus.mockResolvedValue({ data: { landed: false } });
+    landHistory.mockRejectedValue({ response: { status: 401 } });
+
+    renderPanel();
+
+    await waitFor(() => expect(landHistory).toHaveBeenCalled());
+    expect(screen.queryByText(/服务端没有这个接口/)).toBeNull();
+    expect(screen.queryByText(/落地历史加载失败/)).toBeNull();
+  });
 });
