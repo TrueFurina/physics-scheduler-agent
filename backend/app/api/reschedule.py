@@ -1021,6 +1021,11 @@ def _load_default_schedule() -> tuple[str, int]:
     # 有落地记录时按**时间戳顺序**混排：后发生的事件赢 —— 调课不会被落地静默
     # 吞掉，落地也不会被后来的调课静默抹掉。无落地记录时逐字走旧路径。
     replay_applied, replay_skipped, replay_landed = 0, 0, 0
+    # R62：重放失败必须计数并报出来。
+    # 重放的意义是"重启后不丢已审批的调课"；某条重放失败 = 那条调课的效果消失。
+    # 而原来这里是 `except Exception: pass` —— 教秘看到的是"✅ 成功加载"，
+    # 实际有一节课停在旧周次。丢的是**已审批的变更**，比丢原始行更重。
+    replay_failed: list = []
     try:
         conn = _get_db()
         moves = conn.execute(
@@ -1034,8 +1039,8 @@ def _load_default_schedule() -> tuple[str, int]:
                     res = _apply_reschedule(rec, persist=False)
                     replay_applied += res["applied"]
                     replay_skipped += res["skipped"]
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    replay_failed.append(f"#{r['id']}: {type(e).__name__}: {e}")
         else:
             events = [(r["applied_at"] or "0000-00-00", 0, r["id"], "move",
                        r["request_data"]) for r in moves]
@@ -1051,8 +1056,8 @@ def _load_default_schedule() -> tuple[str, int]:
                     else:
                         plan_landing.replay_landing(_db, payload)
                         replay_landed += 1
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    replay_failed.append(f"{kind}#{_i}: {type(e).__name__}: {e}")
     except Exception:
         pass
 
@@ -1061,6 +1066,12 @@ def _load_default_schedule() -> tuple[str, int]:
         msg += f"（已重放 {replay_applied} 条审批通过的调课）"
     if replay_landed:
         msg += f"（已重放落地方案 {replay_landed} 份）"
+    if replay_failed:
+        # 不阻断启动（数据损坏不该让服务起不来），但**绝不静默**。
+        shown = "；".join(replay_failed[:3])
+        msg += (f"；⚠️ {len(replay_failed)} 条已审批记录**重放失败**，"
+                f"它们的调整未生效（{shown}"
+                + ("…" if len(replay_failed) > 3 else "") + "）")
     # 待排/丢弃都必须说出口：静默丢弃是本项目反复踩的坑（R-35、以及缺周次的整行蒸发）
     rep = _db.load_report
     if rep.get("pending"):
