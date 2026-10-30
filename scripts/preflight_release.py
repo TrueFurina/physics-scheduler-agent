@@ -167,6 +167,28 @@ def main():
           "演示 key，建议发布前轮换）" % ", ".join(env_files) if env_files else "无",
           blocking=False)
 
+    # 4c. 前端产物是否由当前源码构建（R59）
+    #
+    # R57 的教训：源码改了、webui/ 没重建 —— **测试全绿、探针全绿**，
+    # 只有用户会看到旧功能。这条把"产物新鲜"变成发布前置条件。
+    try:
+        import json as _json
+        fr = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "check_webui_fresh.py"), "--json"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
+        wf = _json.loads(fr.stdout or "{}")
+        if wf.get("ok"):
+            check("前端产物新鲜度", True,
+                  "产物与源码一致（%s）" % wf.get("main", "?"))
+        else:
+            miss = wf.get("missing_markers") or []
+            probs = wf.get("problems") or []
+            detail = ("缺少源码标记：%s" % "、".join(miss)) if miss else "；".join(probs[:2])
+            check("前端产物新鲜度", False,
+                  f"{detail}｜先跑 cd frontend && npx vite build --outDir webui --emptyOutDir")
+    except Exception as e:  # noqa: BLE001
+        check("前端产物新鲜度", True, f"检查跳过（{e}）", blocking=False)
+
     # 5. cache 状态（发布前建议清；信息项）
     cache = os.path.join(ROOT, "backend", "app", "data", "cache")
     n = len(os.listdir(cache)) if os.path.isdir(cache) else 0
