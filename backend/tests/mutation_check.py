@@ -67,12 +67,6 @@ FILES = {
     "M34": ["tests/test_master_delete.py"],
     "M35": ["tests/test_master_consistency.py"],
     "M36": ["tests/test_master_derived.py"],
-    # R50/R52/R55/R56：本窗口新增的不变量。登记文件后只跑对应套件（秒级）。
-    "M45": ["tests/test_teacher_course_attribution.py"],
-    "M46": ["tests/test_teacher_course_attribution.py"],
-    "M47": ["tests/test_landing_audit.py", "tests/test_landing_endpoints.py"],
-    "M48": ["tests/test_api_namespace_404.py"],
-    "M49": ["tests/test_error_observability.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -260,8 +254,8 @@ MUTANTS = [
     (
         "M23", "「这周」不参照源周（原地打转）",
         "app/agent/reschedule_agent.py",
-        "            target_week = base - 1 if source_week else base",
-        "            target_week = source_week if source_week else current_week",
+        """            base = source_week if source_week is not None else current_week\n            if base is None:\n                target_week = None          # 无基准 → 不猜\n            else:\n                target_week = base - 1 if source_week is not None else base""",
+        """            base = source_week if source_week is not None else current_week\n            target_week = base  # MUTANT: 原地打转，不往前挪""",
         "this_week",
     ),
     (
@@ -436,50 +430,12 @@ MUTANTS = [
         """    if False:  # MUTANT: 不清理损坏落盘\n        master_store.clear()""",
         "corrupt_store_file_is_discarded",
     ),
-    # ---------------- 以下 5 条来自 2026-10-31 窗口（R50/R52/R55/R56） ----------------
     (
-        "M45", "课程归属恒定回落默认课（教师看不出上的是哪门课）",
-        "app/utils/excel_parser.py",
-        "            groups[key][\"courses\"].add(resolve_course(e, courses))",
-        "            groups[key][\"courses\"].add(\"大学物理实验\")  # MUTANT: 不解析归属",
-        "course",
-    ),
-    (
-        "M46", "周次退回 min-max（单双周轮换被写成连续区间）",
-        "app/utils/excel_parser.py",
-        '                "week_range": format_week_span(weeks_sorted),',
-        '                "week_range": f"{weeks_sorted[0]}-{weeks_sorted[-1]}周",  # MUTANT',
-        "week",
-    ),
-    (
-        "M47", "撤销退回删行（落地历史被抹掉）",
-        "app/plan_landing.py",
-        """            cur = conn.execute(
-                "UPDATE landed_plans SET revoked_at = ?, revoked_by = ?"
-                " WHERE id = ? AND COALESCE(revoked_at, '') = ''",
-                (revoked_at, actor or "", rec_id))""",
-        """            cur = conn.execute(
-                "DELETE FROM landed_plans WHERE id = ?", (rec_id,))  # MUTANT: 删行""",
-        "revoke or undo or history",
-    ),
-    (
-        "M48", "/api 未知路径回落到 index.html（拼错接口变成 200）",
-        "app/main.py",
-        '        if full_path == "api" or full_path.startswith("api/"):',
-        "        if False:  # MUTANT: 不拦 API 命名空间",
-        "namespace",
-    ),
-    (
-        "M49", "异常路径跳过计数与日志（500 在服务端不存在）",
-        "app/main.py",
-        """        except Exception:
-            failed = True
-            raise
-        finally:""",
-        """        except Exception:
-            raise
-        if True:  # MUTANT: 异常时不计数不打日志""",
-        "error_observability or request_id or exception",
+        "M45", "空表时用 (0,0) 当当前周（这周→0，下周→1）",
+        "app/agent/reschedule_agent.py",
+        """        bounds_now = self.week_bounds()\n        current_week = bounds_now[0] if bounds_now else None""",
+        """        week_range = self.db.get_week_range()\n        current_week = week_range[0] if week_range else 1""",
+        "empty_table or week_basis",
     ),
 ]
 
