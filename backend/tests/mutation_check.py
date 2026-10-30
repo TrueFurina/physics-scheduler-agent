@@ -67,6 +67,12 @@ FILES = {
     "M34": ["tests/test_master_delete.py"],
     "M35": ["tests/test_master_consistency.py"],
     "M36": ["tests/test_master_derived.py"],
+    # R50/R52/R55/R56：本窗口新增的不变量。登记文件后只跑对应套件（秒级）。
+    "M45": ["tests/test_teacher_course_attribution.py"],
+    "M46": ["tests/test_teacher_course_attribution.py"],
+    "M47": ["tests/test_landing_audit.py", "tests/test_landing_endpoints.py"],
+    "M48": ["tests/test_api_namespace_404.py"],
+    "M49": ["tests/test_error_observability.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -429,6 +435,51 @@ MUTANTS = [
         """    if store is None and master_store.consume_corrupt_flag():\n        master_store.clear()""",
         """    if False:  # MUTANT: 不清理损坏落盘\n        master_store.clear()""",
         "corrupt_store_file_is_discarded",
+    ),
+    # ---------------- 以下 5 条来自 2026-10-31 窗口（R50/R52/R55/R56） ----------------
+    (
+        "M45", "课程归属恒定回落默认课（教师看不出上的是哪门课）",
+        "app/utils/excel_parser.py",
+        "            groups[key][\"courses\"].add(resolve_course(e, courses))",
+        "            groups[key][\"courses\"].add(\"大学物理实验\")  # MUTANT: 不解析归属",
+        "course",
+    ),
+    (
+        "M46", "周次退回 min-max（单双周轮换被写成连续区间）",
+        "app/utils/excel_parser.py",
+        '                "week_range": format_week_span(weeks_sorted),',
+        '                "week_range": f"{weeks_sorted[0]}-{weeks_sorted[-1]}周",  # MUTANT',
+        "week",
+    ),
+    (
+        "M47", "撤销退回删行（落地历史被抹掉）",
+        "app/plan_landing.py",
+        """            cur = conn.execute(
+                "UPDATE landed_plans SET revoked_at = ?, revoked_by = ?"
+                " WHERE id = ? AND COALESCE(revoked_at, '') = ''",
+                (revoked_at, actor or "", rec_id))""",
+        """            cur = conn.execute(
+                "DELETE FROM landed_plans WHERE id = ?", (rec_id,))  # MUTANT: 删行""",
+        "revoke or undo or history",
+    ),
+    (
+        "M48", "/api 未知路径回落到 index.html（拼错接口变成 200）",
+        "app/main.py",
+        '        if full_path == "api" or full_path.startswith("api/"):',
+        "        if False:  # MUTANT: 不拦 API 命名空间",
+        "namespace",
+    ),
+    (
+        "M49", "异常路径跳过计数与日志（500 在服务端不存在）",
+        "app/main.py",
+        """        except Exception:
+            failed = True
+            raise
+        finally:""",
+        """        except Exception:
+            raise
+        if True:  # MUTANT: 异常时不计数不打日志""",
+        "error_observability or request_id or exception",
     ),
 ]
 
