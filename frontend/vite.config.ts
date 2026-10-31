@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
@@ -50,5 +50,14 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  test: {
+    // 串行执行测试文件（关闭文件级并行）。
+    // 根因：vitest 在并行跑多文件时，多个 worker 会并发把 vite 的 transform 缓存写到
+    // TEMP 目录；在受代理文件系统（node-brokered-fs-shim）约束的沙箱里，这些并发
+    // open() 偶发 EPERM，导致个别测试文件被整文件剔除（表现为 Tests 117~123/126
+    // + 1 error + 退出码仍为 0）。这是沙箱环境产物，非产品或测试缺陷。串行后缓存
+    // 写入不再并发，flake 消失；正常（非沙箱）环境下此设置同样安全，不改动任何测试结论。
+    fileParallelism: false,
   },
 })
