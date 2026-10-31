@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,19 +40,19 @@ FILES = {
     "M6": ["tests/test_ratelimit.py"],
     "M7": ["tests/test_web_serving.py"],
     "M8": ["tests/test_api_auth.py"],
-        "M9": ["tests/test_api_auth.py"],
-        "M10": ["tests/test_api_auth.py"],
-        "M11": ["tests/test_api_auth.py"],
-        "M12": ["tests/test_api_auth.py"],
-        "M13": ["tests/test_api_auth.py"],
-        "M14": ["tests/test_api_auth.py"],
-        "M15": ["tests/test_request_workflow.py"],
-        "M16": ["tests/test_request_workflow.py"],
-        "M17": ["tests/test_time_model_edges.py"],
-        "M18": ["tests/test_time_model_edges.py"],
-        "M19": ["tests/test_time_model_edges.py"],
-        "M20": ["tests/test_api_auth.py"],
-        "M21": ["tests/test_teacher_name_parse.py"],
+    "M9": ["tests/test_api_auth.py"],
+    "M10": ["tests/test_api_auth.py"],
+    "M11": ["tests/test_api_auth.py"],
+    "M12": ["tests/test_api_auth.py"],
+    "M13": ["tests/test_api_auth.py"],
+    "M14": ["tests/test_api_auth.py"],
+    "M15": ["tests/test_request_workflow.py"],
+    "M16": ["tests/test_request_workflow.py"],
+    "M17": ["tests/test_time_model_edges.py"],
+    "M18": ["tests/test_time_model_edges.py"],
+    "M19": ["tests/test_time_model_edges.py"],
+    "M20": ["tests/test_api_auth.py"],
+    "M21": ["tests/test_teacher_name_parse.py"],
     "M22": ["tests/test_teacher_name_parse.py"],
     "M23": ["tests/test_week_bounds.py"],
     "M24": ["tests/test_event_loop_blocking.py"],
@@ -67,6 +68,20 @@ FILES = {
     "M34": ["tests/test_master_delete.py"],
     "M35": ["tests/test_master_consistency.py"],
     "M36": ["tests/test_master_derived.py"],
+    # --- R70 补齐：以下 11 个变异体此前没有指定文件，实际是"跑全量 + -k 过滤"，
+    # 慢，而且 -k 匹配不到用例时 pytest 退出码 5 也会被当成"检出"（假阳性）。
+    "M37": ["tests/test_master_derived.py", "tests/test_master_data.py"],
+    "M38": ["tests/test_import_wizard.py"],
+    "M39": ["tests/test_remote_drift.py", "tests/test_safe_push.py"],
+    "M40": ["tests/test_remote_drift.py"],
+    "M41": ["tests/test_env_order.py", "tests/test_admin_password_guard.py"],
+    "M42": ["tests/test_chunk_backfill.py"],
+    "M43": ["tests/test_land_rollback.py"],
+    "M44": ["tests/test_master_store_recovery.py"],
+    "M45": ["tests/test_week_basis.py", "tests/test_schedule_failure_message.py"],
+    "M46": ["tests/test_enrich_graybox.py"],
+    "M47": ["tests/test_import_drift.py"],
+    "M48": ["tests/test_impact_analysis.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -451,18 +466,51 @@ MUTANTS = [
         "    if False:  # MUTANT: 不提示已存在项",
         "reports_drift",
     ),
+    (
+        "M48", "无法识别时段的行按子串判教师（吴琳 命中 吴琳琳）",
+        "app/agent/reschedule_agent.py",
+        "                if teacher_name and te and same_teacher(teacher_name, te):",
+        "                if teacher_name and te and teacher_name in te:  # MUTANT: 退回子串",
+        "unparsed_row_teacher or matches_conflict_model",
+    ),
 ]
 
 
 def _run_tests(files: list, kexpr: str) -> tuple:
+    """返回 (判定, 摘要)，判定 ∈ {检出, 存活, 无效}。
+
+    为什么不能只看 returncode（R70 加固）：
+        pytest 的退出码含义是「非 0 即有事」——
+        5 = 一条用例都没选中（-k 写错/被测用例改名）、
+        2 = 被中断、3 = 内部错误、4 = 用法错误，
+        这些都会让「删掉防护」看起来像「检出」，其实是仪表盘在骗人。
+        另外，注入把模块搞成导入错误时，pytest 报的是 error 不是 failed ——
+        那也不叫"测试抓住了行为"，叫"代码根本跑不起来"。
+    """
     cmd = [PY, "-m", "pytest", "-q", "--no-header",
            "-p", "no:cacheprovider", *files, "-k", kexpr]
     proc = subprocess.run(cmd, cwd=BACKEND, capture_output=True,
                           text=True, timeout=900)
     out = proc.stdout + proc.stderr
     lines = [l.strip() for l in out.splitlines()
-             if "passed" in l or "failed" in l]
-    return proc.returncode != 0, (lines[-1] if lines else "?")
+             if "passed" in l or "failed" in l or "error" in l]
+    summary = lines[-1] if lines else "?"
+
+    failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+    errors = int(m.group(1)) if (m := re.search(r"(\d+) error", out)) else 0
+    passed = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
+
+    if proc.returncode == 5 or "no tests ran" in out:
+        return "无效", f"没选中任何用例（-k 失效）: {summary}"
+    if failed > 0:
+        return "检出", summary
+    if errors > 0:
+        return "无效", f"注入导致报错而非断言失败（{errors} error）: {summary}"
+    if proc.returncode != 0:
+        return "无效", f"pytest 退出码 {proc.returncode}: {summary}"
+    if passed > 0:
+        return "存活", summary
+    return "无效", summary
 
 
 def main() -> int:
@@ -483,8 +531,8 @@ def main() -> int:
         shutil.copy2(path, backup)
         try:
             io.open(path, "w", encoding="utf-8").write(orig.replace(old, new, 1))
-            detected, summary = _run_tests(FILES.get(mid, []), kexpr)
-            results.append((mid, desc, "检出" if detected else "存活", summary[:64]))
+            verdict, summary = _run_tests(FILES.get(mid, []), kexpr)
+            results.append((mid, desc, verdict, summary[:64]))
         except subprocess.TimeoutExpired:
             results.append((mid, desc, "超时", ">900s"))
         finally:
@@ -496,18 +544,25 @@ def main() -> int:
     print(f"{'ID':4s} {'变异体':30s} {'结果':6s} 摘要")
     print("=" * 88)
     for mid, desc, verdict, summary in results:
-        mark = {"检出": "PASS", "存活": "XXXX", "SKIP": "--", "超时": "--"}[verdict]
+        mark = {"检出": "PASS", "存活": "XXXX", "SKIP": "--", "超时": "--",
+                "无效": "????"}[verdict]
         print(f"{mark} {mid:3s} {desc:30s} {verdict:6s} {summary}")
     print("=" * 88)
 
     tested = [r for r in results if r[2] in ("检出", "存活")]
     alive = [r for r in results if r[2] == "存活"]
+    invalid = [r for r in results if r[2] == "无效"]
     if tested:
         print(f"检出 {len(tested) - len(alive)}/{len(tested)}")
     if alive:
         print("\n以下变异体存活 —— 对应防护缺少有效测试：")
         for mid, desc, _, _ in alive:
             print(f"  - {mid} {desc}")
+    if invalid:
+        print("\n以下变异体判定无效 —— 不是防护有效，是这轮根本没测到：")
+        for mid, desc, _, summary in invalid:
+            print(f"  - {mid} {desc}（{summary}）")
+    if alive or invalid:
         return 1
     print("\n全部检出：每个安全防护都有测试真正守着。")
     return 0
