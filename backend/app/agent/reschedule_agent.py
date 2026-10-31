@@ -335,7 +335,15 @@ class RescheduleAgent:
             for ts in time_slots:
                 if rm:
                     occupied_info.setdefault(f"{wd}_{ts}_{rm}", {**info, "unparsed": True})
-                if teacher_name and te and teacher_name in te:
+                # 判"是不是本人"必须走 `same_teacher`，与上面已解析行的分支、
+                # 以及 `conflict_model` 的判据同源（按个体名精确相等，绝不做子串）。
+                #
+                # R43 实测：这里原本写 `teacher_name in te`（子串）。后果是
+                # 「吴琳」会命中无法识别时段行里的「吴琳琳」⇒ 凭空多出 3 处
+                # teacher_busy，文案还写成「您（吴琳琳）当天已有课」——
+                # 影响分析报的冲突数 N 比实际重算多，且把别人的课记到了本人账上。
+                # 这正是 `same_teacher` 文档里点名的那类错误，只是当时漏改了这一处。
+                if teacher_name and te and same_teacher(teacher_name, te):
                     teacher_occupied.setdefault(f"{wd}_{ts}", {**info, "unparsed": True})
 
         available = []
