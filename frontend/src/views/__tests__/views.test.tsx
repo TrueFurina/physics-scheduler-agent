@@ -708,3 +708,71 @@ describe('App.tsx 自然语言调课的零时段回执（R24）', () => {
     expect(clears).toBeGreaterThanOrEqual(2);   // 拒绝 1 次 + 零时段 1 次
   });
 });
+
+// ---------------------------------------------------------------------------
+// R68：「无冲突但有缺口」不能报成绿色「整体健康」
+//
+// 组件注释自己写着：
+//   "无冲突但有缺口"不能报成绿色「整体健康」：那 N 条根本没被检查过。
+//
+// 但这条三态里，只有「有冲突」和「体检失败」被测试覆盖了 ——
+// 中间那态（🟡 未发现资源冲突，但有 N 条没检查）**没有断言**。
+// 而它恰恰是最容易被写错的一态：`healthy` 为真，很自然会写成绿色。
+//
+// 配色在这套界面里是功能（R67）：绿色 = 扫过了、没问题。
+// 有 N 条没扫到就说绿色，等于替那 N 条做了保证。
+// ---------------------------------------------------------------------------
+describe('DashboardView · 有缺口时不能报整体健康（R68）', () => {
+  const stats = {
+    n_weeks: 16, avg_room_utilization: 27.5, avg_teacher_load: 24, teacher_load_balance: 91,
+    busiest_room: { room: 'A410', utilization: 29.2 },
+    top_rooms: [{ room: 'A410', sessions: 70, utilization: 29.2 }],
+    top_teachers: [{ teacher: '吴琳', sessions: 52, experiments: 13 }],
+  };
+
+  const gapAudit = {
+    healthy: true, total_entries: 312, teacher_count: 13, room_count: 8,
+    week_min: 1, week_max: 16, room_conflict_count: 0, teacher_conflict_count: 0,
+    room_conflicts: [], teacher_conflicts: [],
+    missing_room_count: 7,           // ← 7 条没填场地
+    unparsed_slot_count: 0,
+  };
+
+  it('healthy=true 但有缺口时，文案必须说明缺口', () => {
+    render(
+      <DashboardView auditLoading={false} auditData={gapAudit as never}
+                     statsData={stats as never} onRetry={() => {}} />,
+    );
+    const text = document.body.textContent || '';
+    // 不能出现"整体健康"这种无条件保证
+    expect(text).not.toContain('整体健康');
+    // 必须说清有多少条没检查
+    expect(text).toMatch(/没填场地|未填场地|缺口/);
+    expect(text).toContain('7');
+  });
+
+  it('有缺口时三态卡必须是琥珀色，不是绿色', () => {
+    const { container } = render(
+      <DashboardView auditLoading={false} auditData={gapAudit as never}
+                     statsData={stats as never} onRetry={() => {}} />,
+    );
+    // 定位三态卡：它的子元素里含「未发现资源冲突」或「整体健康」
+    const card = Array.from(container.querySelectorAll('div')).find(
+      (d) => /未发现资源冲突|整体健康/.test(d.textContent || '')
+        && /rounded-xl p-4 mb-4/.test(d.className),
+    );
+    expect(card, '找不到三态卡').toBeTruthy();
+    const cls = card!.className;
+    expect(cls).toContain('amber');      // 绿=扫过了没问题；有缺口不能用绿
+    expect(cls).not.toContain('green-50');
+  });
+
+  it('真干净（healthy 且无缺口）才报整体健康', () => {
+    const clean = { ...gapAudit, missing_room_count: 0, unparsed_slot_count: 0 };
+    render(
+      <DashboardView auditLoading={false} auditData={clean as never}
+                     statsData={stats as never} onRetry={() => {}} />,
+    );
+    expect(document.body.textContent || '').toContain('整体健康');
+  });
+});
