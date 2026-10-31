@@ -552,8 +552,23 @@ def main() -> int:
     tested = [r for r in results if r[2] in ("检出", "存活")]
     alive = [r for r in results if r[2] == "存活"]
     invalid = [r for r in results if r[2] == "无效"]
+    skipped = [r for r in results if r[2] == "SKIP"]
+    timeout = [r for r in results if r[2] == "超时"]
     if tested:
-        print(f"检出 {len(tested) - len(alive)}/{len(tested)}")
+        # 分母只放真正跑过的。SKIP/超时**不进分母** —— 一旦混进去，
+        # 「47/47」就会把一个根本没执行的变异体算成通过（R43 实测：M30 锚点已失效，
+        # 脚本照样打印「全部检出」并退出 0）。这里把它们单列出来，让总数对得上。
+        print(f"检出 {len(tested) - len(alive)}/{len(tested)}"
+              f"（另有 {len(skipped)} 个跳过、{len(timeout)} 个超时未计入分母）")
+    if skipped:
+        print("\n以下变异体被跳过 —— 目标文件缺失或锚点失配（通常是代码被重构了），"
+              "这道防护现在是没人在守的：")
+        for mid, desc, _, summary in skipped:
+            print(f"  - {mid} {desc}（{summary}）")
+    if timeout:
+        print("\n以下变异体超时 —— 同上，本轮没有得出任何结论：")
+        for mid, desc, _, _ in timeout:
+            print(f"  - {mid} {desc}")
     if alive:
         print("\n以下变异体存活 —— 对应防护缺少有效测试：")
         for mid, desc, _, _ in alive:
@@ -562,7 +577,12 @@ def main() -> int:
         print("\n以下变异体判定无效 —— 不是防护有效，是这轮根本没测到：")
         for mid, desc, _, summary in invalid:
             print(f"  - {mid} {desc}（{summary}）")
-    if alive or invalid:
+    # 「没被执行」和「执行了但没拦住」同样是失败：
+    # 前者意味着这条防护的守护状态未知，不能算在通过里。
+    if alive or invalid or skipped or timeout:
+        print(f"\n未通过（共 {len(results)} 个变异体）："
+              f"{len(alive)} 个存活、{len(invalid)} 个无效、"
+              f"{len(skipped)} 个跳过、{len(timeout)} 个超时。")
         return 1
     print("\n全部检出：每个安全防护都有测试真正守着。")
     return 0
