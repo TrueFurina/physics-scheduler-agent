@@ -430,6 +430,19 @@ function App() {
     setAutoScheduleMsg('');
     try {
       const r = await rescheduleApi.autoSchedule();
+      // R66：**必须判断 success**。
+      //
+      // R65 之后后端失败时回的是「没有可排课的教学任务」这种中性陈述，
+      // 不带任何失败标记 —— 它把"怎么呈现"交给了前端。
+      // 而这里原来直接 setAutoScheduleMsg(message)，消息区是灰底灰字，
+      // 成功和失败长得完全一样。
+      //
+      // 这套界面里 ❌ 是唯一能区分"这条路走不通"的标记（R24 修过同一处）。
+      if (r.data.success === false) {
+        setAutoScheduleRows([]);   // 旧方案不能和错误提示同时留在屏幕上
+        setAutoScheduleMsg(`❌ ${r.data.message}`);
+        return;
+      }
       setAutoScheduleMsg(r.data.message);
       setAutoScheduleRows((r.data as any)?.data?.schedule || []);
     } catch (err: any) {
