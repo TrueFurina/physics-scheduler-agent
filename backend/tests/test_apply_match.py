@@ -556,6 +556,7 @@ def test_every_data_reading_route_self_heals():
         "/demo-mode": "只读一个环境变量",
         "/status": "它就是用来报告是否已加载的，不能先自愈",
         "/admin-login": "认证与排课数据无关",
+        "/scheduler-login": "认证与排课数据无关（与 /admin-login 同：只校验口令并签发会话）",
         "/requests": "工单 CRUD 走 SQLite",
         "/requests/export": "工单导出走 SQLite，不读排课表",
         "/requests/{request_id}/approve": "同上（应用调课会自查 _db.loaded）",

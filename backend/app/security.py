@@ -31,6 +31,15 @@
 - `ADMIN_PASS`       管理员口令。生产环境必须设置且长度 >= 16，否则启动失败；
                      开发环境未设置则随机生成临时口令（重启失效，不打印明文）。
 - `ADMIN_TOKEN_TTL`  令牌有效期秒数，默认 8 小时
+- `SCHEDULER_USER`   排课人员账号，默认 `scheduler`
+- `SCHEDULER_PASS`   排课人员口令。**未设置即不存在该角色**（默认关闭 = 系统等同纯 admin）；
+                     设置后 `/scheduler-login` 才可用，签发 `role=scheduler` 的会话令牌。
+
+角色（role）
+------------
+令牌载荷里的 `r` 字段表示角色：`admin`（全部能力）⊇ `scheduler`（排课写入能力）。
+**旧令牌没有 `r` 字段**：一律按 `admin` 处理——这是向后兼容的地基，
+改了签发逻辑也不会让既有会话突然 403。
 """
 
 from __future__ import annotations
@@ -181,6 +190,54 @@ _SECRET_IS_EPHEMERAL: bool = not os.getenv("APP_SECRET_KEY", "").strip()
 
 
 # ---------------------------------------------------------------------------
+# 角色（座谈要求第 3 步：指定排课人员、分配权限）
+# ---------------------------------------------------------------------------
+# 为什么要角色：审批台的"管理员口令"此前是**唯一**身份，教秘只想让人上传课表、
+# 导入台账、采纳方案，也不得不把管理员口令交出去——而那个口令同时能清空工单表、
+# 审批调课、撤销落地。职责混在一起的结果是"要么全给，要么谁都不给"。
+#
+# 权限包含关系刻意做成单向超集：`admin ⊇ scheduler`。
+# 新增角色只**放宽**"谁能做排课类写操作"，一个既有管理员令牌的通行范围都不变，
+# 所以这一步不改动任何现有调用方的行为（向后兼容的判据就在这里）。
+ROLE_ADMIN = "admin"
+ROLE_SCHEDULER = "scheduler"
+
+# 排课人员能进的门口角色集合：管理员照旧在内（超集语义）。
+SCHEDULER_ROLES = (ROLE_ADMIN, ROLE_SCHEDULER)
+
+# 排课人员账号/口令。
+#
+# 与 ADMIN_PASS 的关键差别：**默认关闭**。
+# SCHEDULER_PASS 未设置时这个角色根本不存在（`scheduler_enabled()` 为 False，
+# `/scheduler-login` 直接 403），系统等同于纯 admin 形态——加了这套代码，
+# 现网行为一个字节都没变，直到部署方显式注入口令。
+# 反过来给个默认口令，就等于在公网上多开一个人人都知道账号名的入口。
+SCHEDULER_USER_DEFAULT = "scheduler"
+
+
+def scheduler_user() -> str:
+    """排课人员账号名（`SCHEDULER_USER`，默认 `scheduler`）。"""
+    return (os.getenv("SCHEDULER_USER") or "").strip() or SCHEDULER_USER_DEFAULT
+
+
+def scheduler_password() -> str:
+    """排课人员口令（`SCHEDULER_PASS`；未配置则为空串 = 角色不存在）。
+
+    刻意在**调用时**读环境变量，而不是模块载入时冻结成常量：
+    1. 与 `PUBLIC_READONLY` 开关同一取向（见 api/reschedule.py 的 `export_gate`）
+       ——请求时读，测试才能用 monkeypatch 构造"已启用/未启用"两种形态；
+    2. 载入时冻结会让 `import app.security` 早于任何环境准备的调用方拿到空值，
+       那种"看起来配了却不生效"的坑排查成本极高。
+    """
+    return (os.getenv("SCHEDULER_PASS") or "").strip()
+
+
+def scheduler_enabled() -> bool:
+    """排课人员角色是否可用：只有显式配置了 SCHEDULER_PASS 才为真。"""
+    return bool(scheduler_password())
+
+
+# ---------------------------------------------------------------------------
 # 令牌签发 / 校验
 # ---------------------------------------------------------------------------
 
@@ -199,15 +256,20 @@ def _sign(payload_b64: str) -> str:
     return _b64e(mac)
 
 
-def issue_admin_token(username: str, ttl: Optional[int] = None) -> dict:
-    """签发管理员会话令牌。
+def issue_admin_token(username: str, ttl: Optional[int] = None,
+                      role: str = ROLE_ADMIN) -> dict:
+    """签发会话令牌（默认角色 `admin`）。
 
     返回 `{"token": ..., "expires_in": ..., "expires_at": ...}`，
     其中 `expires_at` 为 Unix 秒时间戳，便于前端做倒计时。
+
+    `role` 是后加的第三个参数，**默认值 "admin" 保证既有调用点
+    （`issue_admin_token(u)` / `issue_admin_token(u, ttl=...)`）逐字不变**：
+    不传角色就是管理员令牌，行为与加角色之前完全一致。
     """
     lifetime = TOKEN_TTL_SECONDS if ttl is None else int(ttl)
     expires_at = int(time.time()) + lifetime
-    payload = {"u": username, "exp": expires_at, "n": secrets.token_hex(8)}
+    payload = {"u": username, "exp": expires_at, "n": secrets.token_hex(8), "r": role}
     payload_b64 = _b64e(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     return {
         "token": f"{payload_b64}.{_sign(payload_b64)}",
@@ -216,8 +278,23 @@ def issue_admin_token(username: str, ttl: Optional[int] = None) -> dict:
     }
 
 
-def verify_admin_token(token: str) -> Optional[str]:
-    """校验令牌，有效则返回其中的管理员账号，否则返回 None。
+def issue_scheduler_token(username: str, ttl: Optional[int] = None) -> dict:
+    """签发排课人员令牌（`role="scheduler"`）。
+
+    只是 `issue_admin_token(..., role="scheduler")` 的语义别名：
+    签发/签名/有效期三条逻辑共用一份，避免"两份实现漂移"这类安全审计常见病。
+    """
+    return issue_admin_token(username, ttl=ttl, role=ROLE_SCHEDULER)
+
+
+def _verify_identity(token: str) -> Optional[dict]:
+    """校验令牌，有效则返回 `{"u": 账号, "r": 角色}`，否则 None。
+
+    这是**唯一的验签入口**：`verify_admin_token` / `require_admin` /
+    `require_scheduler` 都走这里，签名与过期校验只有一份实现。
+
+    向后兼容：载荷里没有 `r` 字段（角色机制之前签发的旧令牌）时按 `admin` 处理。
+    不做这个默认，加角色的那一刻所有在线会话都会掉进 403。
 
     任何异常（格式错、签名不符、过期、载荷非法）一律视为无效——
     失效关闭，不给"部分通过"的中间态。
@@ -243,7 +320,27 @@ def verify_admin_token(token: str) -> Optional[str]:
     if not isinstance(exp, int) or exp < int(time.time()):
         return None
     username = payload.get("u")
-    return username if isinstance(username, str) and username else None
+    if not isinstance(username, str) or not username:
+        return None
+    role = payload.get("r")
+    if not isinstance(role, str) or not role:
+        # 旧令牌（无 r）= 管理员。见上面 docstring 的向后兼容说明。
+        role = ROLE_ADMIN
+    return {"u": username, "r": role}
+
+
+def verify_admin_token(token: str) -> Optional[str]:
+    """校验令牌，有效则返回其中的账号，否则返回 None。
+
+    任何异常（格式错、签名不符、过期、载荷非法）一律视为无效——
+    失效关闭，不给"部分通过"的中间态。
+
+    注意：**本函数只验"是不是本服务签发的有效会话"，不判角色**（角色门禁在
+    `require_admin` / `require_scheduler` 里）。保留原签名与返回类型，
+    它仍是既有测试与调用点依赖的公开契约。
+    """
+    ident = _verify_identity(token)
+    return ident["u"] if ident else None
 
 
 def check_admin_credentials(username: str, password: str) -> bool:
@@ -256,6 +353,27 @@ def check_admin_credentials(username: str, password: str) -> bool:
     user_ok = hmac.compare_digest(str(username or ""), ADMIN_USER)
     pass_ok = hmac.compare_digest(str(password or ""), ADMIN_PASS)
     # 两个比较都要执行完，不能短路——短路会让"账号对不对"从耗时上泄漏出去。
+    return user_ok and pass_ok
+
+
+def check_scheduler_credentials(username: str, password: str) -> bool:
+    """校验排课人员账号口令（定时比较，避免计时侧信道）。
+
+    **默认关闭**：`SCHEDULER_PASS` 未配置时恒为 False —— 角色不存在，
+    不引入任何新的可登录面（这与"给个默认口令"是两种安全结论）。
+
+    不短路：账号比较与口令比较都执行完再合并，否则"账号是否存在"会从耗时上
+    泄漏给爆破者（与 `check_admin_credentials` 同一理由）。
+    """
+    secret = scheduler_password()
+    if not secret:
+        return False
+    # 先 encode 再比：`compare_digest` 对含非 ASCII 的 str 会抛 TypeError，
+    # 那会让"输错账号名"变成 500 而不是 401（管理员那条路径沿用原样，不动它）。
+    user_ok = hmac.compare_digest(str(username or "").encode("utf-8"),
+                                  scheduler_user().encode("utf-8"))
+    pass_ok = hmac.compare_digest(str(password or "").encode("utf-8"),
+                                  secret.encode("utf-8"))
     return user_ok and pass_ok
 
 
@@ -300,26 +418,84 @@ def _extract_tokens(request: Request) -> list[str]:
     return [t for t in candidates if not (t in seen or seen.add(t))]
 
 
-async def require_admin(request: Request) -> str:
-    """接口依赖：要求携带有效的管理员会话令牌，否则 401。
+async def _require_roles(request: Request, allowed: tuple, *, missing_detail: str,
+                         invalid_detail: str, forbidden_detail: str) -> str:
+    """角色门禁的唯一实现：在候选令牌里找一个"签名有效 + 角色在 allowed 内"的身份。
 
-    返回值是管理员账号，便于在需要留痕的写接口里记录操作者。
+    为什么要收成一个内部函数，而不是给每个角色复制一遍循环：
+    "候选令牌逐个试"这件事本身是个安全实现（边缘代理会注入垃圾 Authorization，
+    见 `_extract_tokens`），两份副本迟早漂移成两种行为。
+    角色差异只体现在 `allowed` 集合与三段文案上。
+
+    三种失败态分开报错（原样保留加固时的设计）：
+      - 一个候选都没有 → 401 `missing_detail`（"还没登录"）
+      - 有候选但全部验不过 → 401 `invalid_detail`（"令牌过期/伪造"）
+      - 有令牌验过了、但角色不在 allowed 内 → 403 `forbidden_detail`（"越权"）
+        401 与 403 的区分有意义：前者提示重新登录，后者重新登录一万次也没用，
+        该找管理员开权限。
     """
     tokens = _extract_tokens(request)
+    role_mismatch = False
     for token in tokens:
-        username = verify_admin_token(token)
-        if username:
-            return username
+        ident = _verify_identity(token)
+        if not ident:
+            continue
+        if ident["r"] in allowed:
+            return ident["u"]
+        role_mismatch = True
 
-    # 一个都没有 ≠ 有但无效：分开报错，否则排查时会往"令牌过期"上找错方向。
     if not tokens:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="该操作需要管理员会话，请先在审批台完成管理员登录。",
+            detail=missing_detail,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if role_mismatch:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=forbidden_detail,
             headers={"WWW-Authenticate": "Bearer"},
         )
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="管理员会话已失效，请重新登录。",
+        detail=invalid_detail,
         headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def require_admin(request: Request) -> str:
+    """接口依赖：要求携带**角色为 admin** 的有效会话令牌，否则 401 / 越权 403。
+
+    返回值是管理员账号，便于在需要留痕的写接口里记录操作者。
+
+    向后兼容：角色机制之前签发的旧令牌没有 `r` 字段，`_verify_identity` 按
+    `admin` 处理，所以既有管理员会话一个都不会被这一步挡掉。
+    唯一新增的拒绝是"令牌有效但角色是排课人员"——那是本次要实现的隔离本身。
+    """
+    return await _require_roles(
+        request,
+        (ROLE_ADMIN,),
+        missing_detail="该操作需要管理员会话，请先在审批台完成管理员登录。",
+        invalid_detail="管理员会话已失效，请重新登录。",
+        forbidden_detail="权限不足：该操作需要管理员权限（需要管理员会话），排课人员账号无权执行，请联系管理员。",
+    )
+
+
+async def require_scheduler(request: Request) -> str:
+    """接口依赖：要求携带管理员**或排课人员**的有效会话令牌。
+
+    用于"排课类写操作"（上传课表、导入台账、初始化主数据、采纳落地方案）：
+    这些是排课人员日常工作要做的，但不必给到管理员级破坏力
+    （清空工单、审批调课、撤销落地、删实体仍只认 admin）。
+
+    `admin ⊇ scheduler`：管理员令牌在这里照旧放行，所以把某端点从
+    `require_admin` 降挂到 `require_scheduler` **不会改变任何管理员的行为**，
+    只是多授予了排课人员。
+    """
+    return await _require_roles(
+        request,
+        SCHEDULER_ROLES,
+        missing_detail="该操作需要管理员或排课人员会话，请先登录。",
+        invalid_detail="管理员/排课人员会话已失效，请重新登录。",
+        forbidden_detail="权限不足：该操作需要管理员或排课人员会话，当前令牌的角色不被授予。",
     )

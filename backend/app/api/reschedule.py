@@ -25,7 +25,15 @@ from app.utils.excel_parser import (
 from app.agent.reschedule_agent import RescheduleAgent
 from app.master_data import MasterData, is_schedulable_project
 from app.paths import DATA_DIR as _RESOLVED_DATA_DIR
-from app.security import check_admin_credentials, issue_admin_token, require_admin
+from app.security import (
+    check_admin_credentials,
+    check_scheduler_credentials,
+    issue_admin_token,
+    issue_scheduler_token,
+    require_admin,
+    require_scheduler,
+    scheduler_enabled,
+)
 from app.ratelimit import rate_limit
 from app import plan_landing
 
@@ -40,23 +48,36 @@ router = APIRouter()
 # 缺失时回退脱敏表）。
 #
 # 而下列接口挂 `Depends(require_admin)`，因为它们要么能改数据、要么吐真实师生身份：
-#   - /upload                   替换排课表（写）
 #   - GET/POST/DELETE /requests  工单读写与清空（写，DELETE 会清全表）
 #   - /requests/{id}/approve     审批并自动应用调课，直接改排课结果（写）
-#   - POST /parallel/land        把排课方案写回安排表（写，真实排课数据）
-#   - POST /parallel/land/undo   撤销落地（写）
+#   - POST /parallel/land/undo   撤销落地（写，回滚一整批课表改动）
+#   - /master/* 的 DELETE        删实体（不可逆）
+#   - /apply-move                把审批结果落到排课数据
 # （/parallel/land/preview 与 /parallel/land/status 是只读，随 /parallel/** 免鉴权）
 #
+# 座谈第 3 步「指定排课人员、分配权限」引入第二个角色后，边界改成这样：
+# `Depends(require_scheduler)` 放行 admin **与** scheduler（admin ⊇ scheduler），
+# 用于"排课人员日常要做、但不带破坏力"的写操作：
+#   - /upload            上传实验安排表（替换课表数据源）
+#   - /upload-master     上传教学大纲清单（从零排课的输入）
+#   - /master/init       从安排表反推主数据
+#   - /master/import     台账批量导入（只新增与补充，不删实体）
+#   - /parallel/land     采纳落地方案
+# 降挂这些端点**不改变管理员行为**（管理员令牌照旧通过），只是把排课人员从
+# "必须借管理员口令"里解放出来。清工单、审批、撤销落地、删实体仍只认 admin。
+#
 # 注意：这些写接口前端**已不再调用**（调课/审批走云数据库 + RLS），
-# 因此加门禁不影响任何演示流程，只是把"匿名可写"改成"需管理员会话"。
+# 因此加门禁不影响任何演示流程，只是把"匿名可写"改成"需会话"。
 #
 # 第二道边界是**限流**（见 app/ratelimit.py）：免鉴权的演示接口里有几个
 # 带真实资源代价——/chat、/experiment-tutor 会调外部 LLM
 # （烧额度），/auto-schedule、/parallel/solve 是 CP-SAT 求解（单次最多 10 秒 CPU），
-# /admin-login 可被爆破。它们不能加鉴权（会废掉演示），所以按 IP + 全站双维度限流。
+# /admin-login 与 /scheduler-login 可被爆破。它们不能加鉴权（会废掉演示），
+# 所以按 IP + 全站双维度限流。
 # 阈值刻意放宽，真人演示碰不到，脚本刷量会立刻 429。
 # ---------------------------------------------------------------------------
 _ADMIN_ONLY = [Depends(require_admin)]
+_SCHEDULER_ONLY = [Depends(require_scheduler)]
 
 
 # ---------------------------------------------------------------------------
@@ -79,15 +100,21 @@ def _public_readonly_enabled() -> bool:
 
 
 async def export_gate(request: Request):
-    """整表读取/导出门禁：默认放行；PUBLIC_READONLY=0 时要求管理员会话。
+    """整表读取/导出门禁：默认放行；PUBLIC_READONLY=0 时要求会话。
 
     在**请求时**读开关（不是路由定义时）——否则测试里改环境变量不生效，
-    这个开关就没法被自动化验证。收紧态复用 require_admin 的候选令牌逻辑
+    这个开关就没法被自动化验证。收紧态复用 `require_scheduler` 的候选令牌逻辑
     （边缘代理注入 Authorization 的坑已在 security.py 处理）。
+
+    为什么收紧态用 `require_scheduler` 而不是 `require_admin`：
+    整表导出正是**排课人员**每天都要做的事（把课表发给任课教师）。
+    用 `require_scheduler` 的语义是"管理员或排课人员"——`admin ⊇ scheduler`，
+    所以管理员令牌的通行范围一个都没变（`test_api_auth.py` 收紧态那条断言照绿），
+    只是不必再为了导出而把管理员口令交出去。
     """
     if _public_readonly_enabled():
         return None
-    return await require_admin(request)
+    return await require_scheduler(request)
 
 # 全局排课数据库
 _db = ScheduleDatabase()
@@ -269,8 +296,8 @@ class ChatResponse(BaseModel):
 #
 # 修复前的写法是 `os.path.join(data_dir, file.filename)`，**未做任何净化**：
 # 传入 `filename="../../../schedule.demo.xlsx"` 就能从 `backend/app/data`
-# 上溯三层写回仓库根，覆盖演示排课表。而 `dependencies=_ADMIN_ONLY` 之外
-# 还有一层历史问题——该接口原先完全免鉴权。
+# 上溯三层写回仓库根，覆盖演示排课表。而 `dependencies=_SCHEDULER_ONLY`
+# （管理员或排课人员会话）之外，还有一层历史问题——该接口原先完全免鉴权。
 #
 # 这里刻意**不用 `os.path.basename`**：它只认当前平台的分隔符，
 # 在 POSIX 上 `..\..\x.xlsx` 会被当成一个普通文件名原地保留。
@@ -358,9 +385,9 @@ async def _read_upload_limited(file: UploadFile, limit: int | None = None) -> by
     return bytes(buf)
 
 
-@router.post("/upload", summary="上传实验安排表 Excel", dependencies=_ADMIN_ONLY)
+@router.post("/upload", summary="上传实验安排表 Excel", dependencies=_SCHEDULER_ONLY)
 async def upload_schedule(file: UploadFile = File(...)):
-    """上传实验安排表 Excel 文件（需管理员会话）。
+    """上传实验安排表 Excel 文件（需管理员或排课人员会话）。
 
     ⚠️ 整表解析必须在线程池里（2026-10-29 起，R-89）：
     实测 `load_workbook` **343ms**、冷解析整表 **495ms**，而它是 `async def` 里的一次
@@ -456,7 +483,7 @@ def _apply_uploaded_schedule(save_path: str, content: bytes) -> dict:
 
 
 @router.post("/upload-master", summary="上传教学大纲/主数据清单（从零排课的输入）",
-             dependencies=_ADMIN_ONLY)
+             dependencies=_SCHEDULER_ONLY)
 @_master_write
 async def upload_master(file: UploadFile = File(...)):
     """上传「课程 → 实验项目 → 学生组（→ 候选教师/场地）」清单。
@@ -562,7 +589,9 @@ async def master_status():
 # ---------------------------------------------------------------------------
 # 主数据（课程/实验项目/教师/场地/班级）CRUD —— 导师一号行动项「重构数据库」
 #
-# 只读总览免鉴权（它只是把安排表反推成实体，不含学生 PII）；写操作挂 require_admin。
+# 只读总览免鉴权（它只是把安排表反推成实体，不含学生 PII）；写操作挂会话门禁：
+# 五表 CRUD 与删除只认 `require_admin`，`/master/init`、`/master/import`、
+# `/upload-master` 这类排课日常动作降挂 `require_scheduler`（管理员照旧通过）。
 # 每个写接口都先 `_ensure_master_data()`：主数据从安排表反推，教秘的增删改在其上
 # 叠加 —— 若在空主数据上直接增删，会把反推基线整个丢掉。
 # ---------------------------------------------------------------------------
@@ -607,7 +636,7 @@ async def master_overview():
     return {"success": True, "data": _master_data.overview()}
 
 
-@router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_ADMIN_ONLY)
+@router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_SCHEDULER_ONLY)
 @_master_write
 async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
@@ -784,7 +813,7 @@ async def master_tasks_preview(file: UploadFile = File(...)):
 
 
 @router.post("/master/import", summary="导入主数据台账（Excel 批量维护五张表）",
-             dependencies=_ADMIN_ONLY)
+             dependencies=_SCHEDULER_ONLY)
 @_master_write
 async def master_import(file: UploadFile = File(...)):
     """把 `/export/master-workbook` 导出的台账改完传回来，批量写入主数据。
@@ -1428,6 +1457,48 @@ async def admin_login(req: AdminLoginRequest):
     }
 
 
+@router.post("/scheduler-login", summary="排课人员登录（签发 scheduler 会话令牌）",
+             dependencies=[Depends(rate_limit("admin-login"))])
+async def scheduler_login(req: AdminLoginRequest):
+    """排课人员登录：校验口令并签发 `role="scheduler"` 的服务端会话令牌。
+
+    与 `/admin-login` 刻意同构——同一个请求模型、同一套失败文案、同一个限流桶
+    （两个登录口共用一份爆破预算，比各自 30 次/分钟更紧，不是更松）。
+    唯一差别是签发的角色：
+      - 排课人员可做：上传安排表/大纲清单、主数据初始化与台账导入、采纳落地方案、
+        以及 `PUBLIC_READONLY=0` 收紧后的整表导出；
+      - 仍需管理员：清空/审批工单、撤销落地、删除五表实体。
+
+    **默认关闭**：`SCHEDULER_PASS` 未配置时这个角色根本不存在，本端点回 403 说
+    "未启用"，而不是回 401"密码错"——后者会让人以为口令配了只是输错，
+    排查方向整个跑偏。未配置时的现网表现与加这个端点之前完全一致（纯向后兼容）。
+
+    失败文案不区分"账号不存在 / 口令错"：区分就等于告诉爆破者账号名对不对。
+    """
+    if not scheduler_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="排课人员未启用：部署环境未配置 SCHEDULER_PASS。"
+                   "需要单独给排课人员开权限时，请设置 SCHEDULER_PASS"
+                   "（可选 SCHEDULER_USER 指定账号名，默认 scheduler）后重启；"
+                   "否则请使用管理员登录。",
+        )
+    if not check_scheduler_credentials(req.username, req.password):
+        raise HTTPException(
+            status_code=401,
+            detail="用户名或密码错误，请重新输入；多次失败请稍后再试或联系系统管理员。",
+        )
+    ticket = issue_scheduler_token(req.username.strip())
+    return {
+        "success": True,
+        "message": "✅ 排课人员登录成功",
+        "role": "scheduler",
+        "token": ticket["token"],
+        "expires_in": ticket["expires_in"],
+        "expires_at": ticket["expires_at"],
+    }
+
+
 class ParallelSolveRequest(BaseModel):
     """并行排课求解请求"""
     class_name: str
@@ -1588,7 +1659,8 @@ async def parallel_export(req: ParallelExportRequest):
 # 若有审批调课生效，按旧 diff 写入就是偷换（R-36：写路径的不实必须可见）。
 #
 # 鉴权边界：预览/状态只读（随 /parallel/** 免鉴权）；采纳/撤销是写
-# （与 /upload、/apply-move 一致挂 require_admin）。
+# —— 采纳降挂 `require_scheduler`（管理员或排课人员，座谈第 3 步"指定排课人员"），
+#    撤销仍只认 `require_admin`（它一次回滚整批课表改动，破坏力更大）。
 #
 # 粒度说明：只有**班级×项目×学生组**口径的方案（全校一键 / 单班并行排课）
 # 能落地 —— 与安排表同构。首屏「一键自动排课」的初稿是教师×课程口径、
@@ -1630,8 +1702,8 @@ async def land_preview(req: LandPlanRequest):
     return diff
 
 
-@router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
-             dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
+@router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员或排课人员）",
+             dependencies=_SCHEDULER_ONLY + [Depends(rate_limit("parallel-land"))])
 async def land_commit(req: LandPlanRequest):
     """写入安排表并落盘（landed_plans 表）。落盘失败回滚内存改动。
 
