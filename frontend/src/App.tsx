@@ -51,6 +51,18 @@ function App() {
   const [targetWeek, setTargetWeek] = useState(2);  // 模板表单：目标周次
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
+  /**
+   * 横幅色调：按文案前缀判断。
+   * 为什么用前缀而不是多存一个 state：msg 有 20+ 处 setMsg 调用，
+   * 逐处加 tone 参数既容易漏、又多一个可能不同步的状态。
+   * 前缀本来就是这些文案的共同约定（✅/❌/⚠️/已…）。
+   */
+  const msgTone: 'ok' | 'err' | 'neutral' =
+    msg.startsWith('✅') || msg.startsWith('已同意') || msg.startsWith('已驳回')
+      ? 'ok'
+      : msg.startsWith('❌') || msg.startsWith('⚠️') || msg.includes('失败')
+        ? 'err'
+        : 'neutral';
   const [dataLoaded, setDataLoaded] = useState(false);
   // 首屏加载失败的原因。必须单独记：教师列表为空有两种完全不同的原因 ——
   // 「服务端没读到安排表」和「服务端报错了」，空态文案不能都写成"请先加载实验安排表"，
@@ -1161,15 +1173,35 @@ function App() {
         </div>
       </header>
 
+      {/*
+        R67：横幅样式原本**写死红色**，而 msg 的来源里既有失败也有成功：
+          setMsg(`✅ 全校 17 个班全部排定…`)   ← 成功
+          setMsg(`已驳回：大学物理实验`)        ← 正常操作
+          setMsg(`审批失败：…`)                ← 失败
+        于是教秘点「同意」后弹出 `✅ 已移动 3 条` 是**红底红字**，看起来像出错了。
+
+        按文案前缀分三档：
+          ✅ / 已…        → 绿（成功）
+          ❌ / ⚠️ / 失败  → 红（失败）
+          其余            → 中性（正常结果，如「已驳回」）
+      */}
       {msg && (
         <div ref={msgBannerRef} className="max-w-4xl mx-auto px-4 pt-3">
-          <div className="bg-red-50 text-red-600 text-sm px-4 py-2.5 rounded-lg border border-red-200 flex items-start gap-3">
+          <div
+            className={`text-sm px-4 py-2.5 rounded-lg border flex items-start gap-3 ${
+              msgTone === 'ok'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : msgTone === 'err'
+                  ? 'bg-red-50 text-red-600 border-red-200'
+                  : 'bg-gray-50 text-gray-700 border-gray-200'
+            }`}
+          >
             <span className="flex-1 break-words">{msg}</span>
             <button
               type="button"
               onClick={() => setMsg('')}
-              aria-label="关闭提示"
-              className="shrink-0 text-red-400 hover:text-red-600 leading-none"
+              aria-label="关闭消息"
+              className="shrink-0 opacity-60 hover:opacity-100 leading-none"
             >
               ✕
             </button>
