@@ -51,6 +51,18 @@ def _load_config_files() -> List[str]:
     `override=False` 是有意的：真实环境变量代表"更高优先级的注入"，
     不能让一个随包上传的文件把它们顶掉——否则沙箱里想临时改配置就得改文件。
     """
+    # `APP_NO_ENV_FILE=1` ⇒ **完全不读**配置文件，只用进程环境变量。
+    #
+    # 为什么需要（2026-10-29）：`test_api_auth.py` 里有一组"未配置 ADMIN_PASS 时
+    # 应随机生成临时口令"的用例，它们已经在子进程里剔除了 `ADMIN_PASS` 环境变量 ——
+    # 但本模块会**强制**把仓库根 `.env` 灌回来，于是"未配置"这个场景永远构造不出来，
+    # 用例在**任何配了 ADMIN_PASS 的开发机上都必红**（不是代码错，是环境耦合）。
+    #
+    # 这类"测试想构造干净环境，却被应用自己的配置加载破坏"的问题，
+    # 只能由应用提供一个显式开关 —— 靠测试去猜/改文件都不稳。
+    if os.getenv("APP_NO_ENV_FILE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return []
+
     try:
         from dotenv import load_dotenv
     except ImportError:  # 极简环境下退化为"只认环境变量"

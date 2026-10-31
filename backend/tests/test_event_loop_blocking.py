@@ -23,6 +23,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import app.api.reschedule as api
 
 
+
+def _read_text(path):
+    """读文件文本（`open(...).read()` 的替身：prompt 释放句柄）。
+
+    用 helper 而不是把 `Path.read_text` 铺满各处：这些调用点传的是
+    str 与 os.path 拼接的结果，保持签名不变最小侵入。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
 def _fake_chat_result():
     return {
         "success": True, "message": "ok", "target_week": 3,
@@ -203,7 +213,7 @@ def test_no_async_route_calls_ensure_loaded_directly():
     """
     import re
 
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_text(api.__file__)
     offenders = []
     cur = None
     for i, line in enumerate(src.splitlines(), 1):
@@ -284,7 +294,7 @@ def test_no_async_route_calls_blocking_io_directly():
         "_ensure_loaded()": "_ensure_loaded_async()",
         "_schedulable_extra_tasks()": "_schedulable_extra_tasks_async()",
     }
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_text(api.__file__)
     offenders = []
     cur = None
     for i, line in enumerate(src.splitlines(), 1):
@@ -363,7 +373,6 @@ def test_concurrent_cold_start_records_loaded_inside_worker(monkeypatch):
     又会有请求看到 False 再排一次队。
     """
     seen_states = []
-    real_lock = api._load_lock
 
     def fake_load():
         # 加载结束的那一刻，锁还没释放；loaded 应该已经由调用方在内部置真，
@@ -437,12 +446,15 @@ def test_two_teachers_moving_into_same_room_do_not_both_win():
         for _ in range(10):
             db = build()
 
-            def go(teacher, experiment):
+            def go(teacher, experiment, _db=db):
+                # 默认参数绑定**当轮**的 db：`db = build()` 每轮重建，
+                # 闭包若不绑定就会捕获最后一次迭代的对象（ruff B023），
+                # 于是 10 轮里有 9 轮实际测的是同一份数据 —— 竞争窗口失效。
                 if use_lock:
                     with api._DB_WRITE_LOCK:
-                        move(db, teacher, experiment)
+                        move(_db, teacher, experiment)
                 else:
-                    move(db, teacher, experiment)
+                    move(_db, teacher, experiment)
 
             ts = [threading.Thread(target=go, args=("T1", "实验A")),
                   threading.Thread(target=go, args=("T2", "实验B"))]
@@ -470,7 +482,7 @@ def test_every_apply_reschedule_call_site_holds_write_lock():
       2. 处在 `_load_default_schedule()` 内 —— 那是启动重放，整段被
          `_load_lock` 覆盖，且此时 `loaded` 尚为 False，没人能并发拿到 `_db`。
     """
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_text(api.__file__)
     lines = src.splitlines()
 
     def enclosing_def(idx):
@@ -539,7 +551,7 @@ def test_upload_and_landing_share_a_lock():
     R4 修的是"读到中间态"（空表），这轮修的是"写进被丢弃的实例"。
     两者是同一个实例替换操作的读侧和写侧。
     """
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_text(api.__file__)
     lines = src.splitlines()
 
     def body_of(name):

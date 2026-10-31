@@ -384,3 +384,72 @@ def test_build_from_entries_failure_leaves_object_untouched():
         pass                        # 异常可以冒出来，但状态必须干净
 
     assert md.to_dict() == before, "失败后主数据被改了（半态）"
+
+
+# ---------------------------------------------------------------- master_init 的幂等（R-95）
+#
+# `master_init` 的 docstring 写着"幂等：清空主数据后从当前安排表重新反推"，
+# 但 `grep backend/tests` 结果**零测试**（2026-10-30 核实）。
+# 幂等是最容易说出口、最难验证的承诺之一 —— 本轮把它钉住。
+
+def test_master_init_is_idempotent(monkeypatch, tmp_path):
+    """连点两次"一键初始化"，主数据必须完全一致、不累积、不重复。
+
+    为什么重要：`build_from_entries` 是"清空后重建"，任何残留（比如忘了 clear
+    某个表、或集合被重复 add 出多份）都会在第二次点击时显形。
+    """
+    import asyncio
+
+    from app import master_store
+    from app.utils.excel_parser import ScheduleEntry
+
+    monkeypatch.setattr(master_store, "STORE_PATH", str(tmp_path / "store.json"))
+    db = ScheduleDatabase()
+    db.entries = [
+        ScheduleEntry(1, "周一", "567", "一班", "1组", "声速测量", "A410", "吴琳"),
+        ScheduleEntry(1, "周一", "678", "二班", "1组", "牛顿环测透镜曲率半径", "A411", "柯达"),
+    ]
+    db.loaded = True
+    db._build_index()
+    monkeypatch.setattr(api, "_db", db)
+    monkeypatch.setattr(api, "_master_data", MasterData())
+    monkeypatch.setattr(api, "_master_tasks", [])
+
+    first = asyncio.run(api.master_init())["data"]
+    second = asyncio.run(api.master_init())["data"]
+    third = asyncio.run(api.master_init())["data"]
+
+    assert first == second == third, (
+        "连点多次主数据不一致（不幂等）：\n"
+        f"  1st: {first}\n  2nd: {second}\n  3rd: {third}"
+    )
+    # 内容正确性：两张表都在，没有重复项目
+    names = [e["name"] for e in first["experiments"]]
+    assert sorted(names) == ["声速测量", "牛顿环测透镜曲率半径"]
+    assert len(names) == len(set(names)), f"出现重复项目：{names}"
+
+
+def test_master_init_after_manual_edit_restores_from_table(monkeypatch, tmp_path):
+    """幂等的另一半：手工改过主数据后，再"一键初始化"必须回到安排表反推的结果。"""
+    import asyncio
+
+    from app import master_store
+    from app.utils.excel_parser import ScheduleEntry
+
+    monkeypatch.setattr(master_store, "STORE_PATH", str(tmp_path / "store.json"))
+    db = ScheduleDatabase()
+    db.entries = [ScheduleEntry(1, "周一", "567", "一班", "1组", "声速测量", "A410", "吴琳")]
+    db.loaded = True
+    db._build_index()
+    md = MasterData()
+    monkeypatch.setattr(api, "_db", db)
+    monkeypatch.setattr(api, "_master_data", md)
+    monkeypatch.setattr(api, "_master_tasks", [])
+
+    baseline = asyncio.run(api.master_init())["data"]
+    md.upsert_course("手工加的课")          # 教秘手工加了东西
+    assert "手工加的课" in {c["name"] for c in md.overview()["courses"]}
+
+    restored = asyncio.run(api.master_init())["data"]
+    assert restored == baseline, "一键初始化没有回到安排表反推的基线"
+    assert "手工加的课" not in {c["name"] for c in restored["courses"]}

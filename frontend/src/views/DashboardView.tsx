@@ -76,7 +76,8 @@ export default function DashboardView({
                     ? `🟡 未发现资源冲突，但${gapText}`
                     : '✅ 安排表整体健康，未发现资源冲突'}
               </div>
-              <div className="text-sm text-gray-600 mt-1">
+              <div className="text-sm text-gray-600 mt-1" data-testid="audit-entries"
+                   data-entries={auditData.total_entries} data-rooms={auditData.room_count}>
                 共 {auditData.total_entries} 条安排 ｜ {auditData.teacher_count} 位教师 ｜ {auditData.room_count} 间场地
                 ｜ 覆盖第 {auditData.week_min}~{auditData.week_max} 周
                 {(auditData.missing_room_count ?? 0) > 0 && `｜ ${auditData.missing_room_count} 条未填场地`}
@@ -252,7 +253,8 @@ export default function DashboardView({
 
             {/* 关键指标 */}
             <div className="grid grid-cols-3 gap-3 mb-4">
-              <div className="bg-teal-50 border border-teal-200 rounded-xl p-3">
+              <div className="bg-teal-50 border border-teal-200 rounded-xl p-3"
+                   data-testid="stats-utilization" data-utilization={statsData.avg_room_utilization}>
                 <div className="text-xl font-semibold text-teal-700">{statsData.avg_room_utilization}%</div>
                 <div className="text-xs text-teal-700">平均教室利用率</div>
                 {/* 分母口径必须一起给：只说 9.4% 而不说"按 448 格/间算"，

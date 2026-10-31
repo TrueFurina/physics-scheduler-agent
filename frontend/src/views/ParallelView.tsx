@@ -139,8 +139,12 @@ export default function ParallelView({
       {schoolPlan && (
         <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
           <h3 className="font-medium text-gray-900 mb-1">
-            🌐 全校一键排课 · {schoolPlan.classes_complete ?? schoolPlan.classes_ok}/
-            {schoolPlan.classes_total} 个班排满
+            🌐 全校一键排课 · <span data-testid="school-plan-classes"
+                data-complete={schoolPlan.classes_complete ?? schoolPlan.classes_ok}
+                data-total={schoolPlan.classes_total}
+                data-scheduled={schoolPlan.scheduled}>
+            {schoolPlan.classes_complete ?? schoolPlan.classes_ok}/
+            {schoolPlan.classes_total}</span> 个班排满
           </h3>
           <p className="text-xs text-gray-500 mb-3">
             共 {schoolPlan.scheduled} 条安排（组级）｜ 单元 {schoolPlan.units} 个 ｜ 用时 {schoolPlan.elapsed_s} 秒
@@ -209,7 +213,10 @@ export default function ParallelView({
             📋 排课方案（{result.weekday}）· 状态 {result.status}
           </h3>
           <p className="text-xs text-gray-500 mb-4">
-            {result.scheduled}/{result.total_units} 个单元已排定，用 {result.weeks_used} 周
+            <span data-testid="parallel-units"
+                  data-scheduled={result.scheduled}
+                  data-total={result.total_units}>
+            {result.scheduled}/{result.total_units}</span> 个单元已排定，用 {result.weeks_used} 周
             ｜ 按周分布：{Object.entries(result.by_week || {}).map(([w, n]) => `第${w}周${n}个`).join('、')}
             <button
               onClick={onExport}

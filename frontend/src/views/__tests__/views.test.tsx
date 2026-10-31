@@ -388,7 +388,7 @@ describe('ParallelView', () => {
 
   it('有结果时显示排定数，且无结果时不渲染结果块', () => {
     const { rerender } = render(<ParallelView {...baseProps} />);
-    expect(screen.queryByText(/个单元已排定/)).toBeNull();
+    expect(screen.queryByTestId('parallel-units')).toBeNull();
 
     rerender(
       <ParallelView
@@ -404,7 +404,8 @@ describe('ParallelView', () => {
         }}
       />,
     );
-    expect(screen.getByText(/24\/24 个单元已排定/)).toBeTruthy();
+    // 文案断言改 testid：数字与单位结构可能变（R-79 的教训），而 testid 不随文案漂移
+    expect(screen.getByTestId('parallel-units').textContent).toContain('24/24');
     expect(screen.getAllByText('第1周').length).toBeGreaterThan(0);
   });
 

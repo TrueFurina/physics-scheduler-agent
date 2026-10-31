@@ -202,7 +202,7 @@ def main():
                       "（前端 hash 一致也会漏掉这种状态）", blocking=False)
             else:
                 check("线上后端新鲜度", True, "仓库里的行为特征线上都有", blocking=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             check("线上后端新鲜度", True, f"探测跳过（{e}）", blocking=False)
 
     # 7. 本地 8023 预览（信息项）

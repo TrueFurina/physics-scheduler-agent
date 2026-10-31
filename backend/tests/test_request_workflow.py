@@ -13,7 +13,6 @@
 """
 import os
 import sys
-import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,7 +60,7 @@ def test_create_request_starts_pending(isolated):
 
 def test_list_requests_filters_by_status(isolated):
     r1 = isolated.post("/api/reschedule/requests", json=REQ_BODY, headers=ADMIN)
-    r2 = isolated.post("/api/reschedule/requests", json={**REQ_BODY, "teacher": "林老师"}, headers=ADMIN)
+    isolated.post("/api/reschedule/requests", json={**REQ_BODY, "teacher": "林老师"}, headers=ADMIN)
     id1 = r1.json()["request"]["id"]
 
     # 批一条

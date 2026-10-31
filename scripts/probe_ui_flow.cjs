@@ -131,15 +131,16 @@ function rec(ok, name, detail, opts = {}) {
     try {
       const tS = Date.now();
       await page.getByRole('button', { name: /一键排全校/ }).first().click();
-      await page.waitForFunction(
-        () => /全校一键排课 · \d+\/\d+ 个班排满/.test(document.body.innerText),
-        null, { timeout: 180000 },
-      );
+      // data-testid 而不是文案（R-79 教训：改文案会把断言改瞎；R-96 起这 4 个数字都挂 testid）
+      await page.waitForSelector('[data-testid="school-plan-classes"]', { timeout: 180000 });
       await page.waitForTimeout(400);
-      const stxt = await page.evaluate(() => document.body.innerText);
-      const m = stxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排满/);
-      const rows = stxt.match(/共 (\d+) 条安排/);
-      const n = rows ? Number(rows[1]) : 0;
+      const sp = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="school-plan-classes"]');
+        return el ? { complete: Number(el.dataset.complete), total: Number(el.dataset.total),
+                      scheduled: Number(el.dataset.scheduled) } : null;
+      });
+      const m = sp && [null, String(sp.complete), String(sp.total)];
+      const n = sp ? sp.scheduled : 0;
       rec(
         !!m && m[1] === m[2] && n > 300,
         '🌐 一键排全校（组级）',
@@ -159,18 +160,18 @@ function rec(ok, name, detail, opts = {}) {
     await buttons.nth(Math.min(8, nCards - 1)).click();
     // 结果区渲染的是「📋 排课方案（周五）· 状态 OPTIMAL」+「24/24 个单元已排定」
     // 注意：不能用"周次"之类的泛词做等待条件 —— 页面本来就有这些字，会立刻命中造成假通过。
-    await page.waitForFunction(
-      () => /个单元已排定/.test(document.body.innerText),
-      null, { timeout: 150000 },
-    );
+    await page.waitForSelector('[data-testid="parallel-units"]', { timeout: 150000 });
     await page.waitForTimeout(600);
+    const m = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="parallel-units"]');
+      return el ? [null, el.dataset.scheduled, el.dataset.total] : null;
+    });
     const txt = await page.evaluate(() => document.body.innerText);
-    const m = txt.match(/(\d+)\/(\d+)\s*个单元已排定/);
     const vis = await page.evaluate(() => {
       const h3 = [...document.querySelectorAll('h3')].find((h) => /排课方案/.test(h.textContent || ''));
       if (!h3) return { has: false, ok: false };
       const r = h3.getBoundingClientRect();
-      const p = [...document.querySelectorAll('p')].find((x) => /个单元已排定/.test(x.textContent || ''));
+      const p = document.querySelector('[data-testid="parallel-units"]');
       const pr = p ? p.getBoundingClientRect() : null;
       return {
         has: true,
@@ -227,18 +228,18 @@ function rec(ok, name, detail, opts = {}) {
   try {
     const t3 = Date.now();
     await page.getByRole('button', { name: /数据看板/ }).first().click();
-    await page.waitForFunction(
-      () => /共 \d+ 条安排\s*｜\s*\d+ 位教师/.test(document.body.innerText),
-      null, { timeout: 40000 },
-    );
-    await page.waitForFunction(
-      () => /平均教室利用率/.test(document.body.innerText),
-      null, { timeout: 20000 },
-    );
-    const txt = await page.evaluate(() => document.body.innerText);
-    const mEntries = txt.match(/共 (\d+) 条安排\s*｜\s*\d+ 位教师\s*｜\s*(\d+) 间场地/);
+    await page.waitForSelector('[data-testid="audit-entries"]', { timeout: 40000 });
+    await page.waitForSelector('[data-testid="stats-utilization"]', { timeout: 20000 });
+    const mEntries = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="audit-entries"]');
+      return el ? [null, el.dataset.entries, el.dataset.rooms] : null;
+    });
     const mRooms = mEntries ? [null, mEntries[2]] : null;
-    const mUtil = txt.match(/([\d.]+)%\s*\n\s*平均教室利用率/);
+    const mUtil = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="stats-utilization"]');
+      return el ? [null, el.dataset.utilization] : null;
+    });
+    const txt = await page.evaluate(() => document.body.innerText);
     const conclusion = /整体健康/.test(txt)
       ? '整体健康'
       : /发现潜在冲突/.test(txt)

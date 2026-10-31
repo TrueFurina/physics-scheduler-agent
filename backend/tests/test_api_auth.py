@@ -363,8 +363,13 @@ def _run_security_in_subprocess(extra_env: dict) -> str:
             s.ADMIN_PASS in {"admin123", "admin", "password", "123456"}))
         """
     )
+    # `APP_NO_ENV_FILE=1`：禁止 app 包把仓库根 `.env` 灌进子进程。
+    # 不加这一行时，即便这里剔掉了 ADMIN_PASS，`app/__init__.py` 也会从 `.env`
+    # 把它读回来 ⇒ "未配置"场景永远构造不出来 ⇒ 用例在任何配了 ADMIN_PASS 的
+    # 开发机上必红（2026-10-29 实测踩到）。
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ADMIN_PASS", "APP_ENV")}
+           if k not in ("ADMIN_PASS", "APP_ENV", "APP_NO_ENV_FILE")}
+    env["APP_NO_ENV_FILE"] = "1"
     env.update(extra_env)
     proc = subprocess.run(
         [sys.executable, "-c", code],
@@ -466,14 +471,19 @@ def _startup_log(extra_env: dict) -> str:
         asyncio.run(boot())
         """
     )
+    # `APP_NO_ENV_FILE=1`：禁止 app 包把仓库根 `.env` 灌进子进程。
+    # 不加这一行时，即便这里剔掉了 ADMIN_PASS，`app/__init__.py` 也会从 `.env`
+    # 把它读回来 ⇒ "未配置"场景永远构造不出来 ⇒ 用例在任何配了 ADMIN_PASS 的
+    # 开发机上必红（2026-10-29 实测踩到）。
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ADMIN_PASS", "APP_ENV")}
+           if k not in ("ADMIN_PASS", "APP_ENV", "APP_NO_ENV_FILE")}
+    env["APP_NO_ENV_FILE"] = "1"
     env.update(extra_env)
     proc = subprocess.run(
         [sys.executable, "-c", code],
         cwd=backend_root, env=env, capture_output=True, text=True,
     )
-    lines = [l for l in (proc.stdout + proc.stderr).splitlines() if "[security]" in l]
+    lines = [ln for ln in (proc.stdout + proc.stderr).splitlines() if "[security]" in ln]
     return "\n".join(lines)
 
 
@@ -518,7 +528,6 @@ def test_upload_rejects_oversized_file():
     # 把上限临时压到 64KB，避免测试里真的构造 32MB
     old = rs.MAX_UPLOAD_BYTES
     try:
-        import os as _os
         rs.MAX_UPLOAD_BYTES = 64 * 1024
         r = client.post(
             "/api/reschedule/upload",
@@ -644,7 +653,6 @@ def test_sheet_too_large_message_is_user_facing(monkeypatch):
 
     import openpyxl
 
-    from app.api import reschedule as rs
     from app.utils import excel_parser as ep
 
     # 压低上限，避免真的构造两万行
@@ -805,7 +813,8 @@ def test_merged_header_does_not_crash():
 def test_short_rows_are_reported():
     """短行应被计数并出现在 load_report 里，而不是静默补齐。"""
     from app.utils.excel_parser import ScheduleDatabase
-    import tempfile, os as _os
+    import tempfile
+    import os as _os
 
     fd, path = tempfile.mkstemp(suffix=".xlsx")
     _os.close(fd)
@@ -1016,7 +1025,6 @@ def test_upload_keeps_old_data_when_parse_fails(monkeypatch):
     import io as _io
 
     from app.api import reschedule as rs
-    from app.utils.excel_parser import ScheduleDatabase
 
     import openpyxl
 

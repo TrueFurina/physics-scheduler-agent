@@ -9,22 +9,32 @@
 import os
 import re
 
-import pytest
 
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+
+
+def _read_text(path):
+    """读文件文本（`open(...).read()` 的替身：prompt 释放句柄）。
+
+    用 helper 而不是把 `Path.read_text` 铺满各处：这些调用点传的是
+    str 与 os.path 拼接的结果，保持签名不变最小侵入。
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
 def _pins():
     """解析 requirements.txt 的 name==version。"""
     path = os.path.join(BACKEND, "requirements.txt")
     out = {}
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_.\-]+)(\[[^\]]+\])?==([0-9A-Za-z.\-]+)$", line)
-        if m:
-            out[m.group(1).lower()] = m.group(3)
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r"^([A-Za-z0-9_.\-]+)(\[[^\]]+\])?==([0-9A-Za-z.\-]+)$", line)
+            if m:
+                out[m.group(1).lower()] = m.group(3)
     return out
 
 
@@ -70,6 +80,6 @@ def test_security_doc_exists():
     """升级依据必须留档，否则下一个人不知道为什么锁这个版本。"""
     doc = os.path.join(BACKEND, "..", "docs", "依赖安全-20261029.md")
     assert os.path.isfile(doc), "缺少 docs/依赖安全-20261029.md"
-    text = open(doc, encoding="utf-8").read()
+    text = _read_text(doc)
     assert "1532" in text or "1,532" in text, "文档里应包含 0.0.20 的实测耗时"
     assert "鉴权之前" in text, "文档里应说明计算发生在鉴权之前"

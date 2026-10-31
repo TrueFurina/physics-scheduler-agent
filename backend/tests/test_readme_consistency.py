@@ -83,7 +83,8 @@ def test_readme_tree_comment_matches():
 
 def test_requirements_has_no_python_constraint():
     """README 曾声称用 python-constraint，实际是 ortools —— 反向锁定。"""
-    req = open(os.path.join(BACKEND, "requirements.txt"), encoding="utf-8").read()
+    with open(os.path.join(BACKEND, "requirements.txt"), encoding="utf-8") as f:
+        req = f.read()
     assert "python-constraint" not in req, "requirements 里出现了 python-constraint？"
 
     for name in ("README.md", "README.zh.md"):

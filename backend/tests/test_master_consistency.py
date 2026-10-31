@@ -100,7 +100,7 @@ def test_deleted_teacher_still_blocks_rooms_and_slots(db):
 
     sched = AutoScheduler(db)
     # 合并后 _occupancy 返回 3 元组（room/teacher/class 三重互斥，本地 R-7x 加了班级维度）
-    _room_busy, teacher_busy, _class_busy = sched._occupancy()    # noqa: SLF001
+    _room_busy, teacher_busy, _class_busy = sched._occupancy()
     hits = [k for k in teacher_busy if k[3] == t]
     assert hits, (
         f"删主数据教师后，排课引擎不再认为 {t} 占用时段 —— "

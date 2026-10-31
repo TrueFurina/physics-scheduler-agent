@@ -390,8 +390,8 @@ def _run_tests(files: list, kexpr: str) -> tuple:
     proc = subprocess.run(cmd, cwd=BACKEND, capture_output=True,
                           text=True, timeout=900)
     out = proc.stdout + proc.stderr
-    lines = [l.strip() for l in out.splitlines()
-             if "passed" in l or "failed" in l]
+    lines = [line.strip() for line in out.splitlines()
+             if "passed" in line or "failed" in line]
     return proc.returncode != 0, (lines[-1] if lines else "?")
 
 
@@ -402,7 +402,9 @@ def main() -> int:
         if not os.path.isfile(path):
             results.append((mid, desc, "SKIP", "文件缺失"))
             continue
-        orig = io.open(path, encoding="utf-8").read()
+        # 变异检查刻意用 io.open 而非 with：文件要在 try/finally 里被改回原样，
+        # 用 with 会在检测期间就关闭句柄，后续写回依赖的是路径而非句柄。
+        orig = io.open(path, encoding="utf-8").read()  # noqa: SIM115
         if old not in orig:
             results.append((mid, desc, "SKIP", "锚点未匹配（代码已重构？）"))
             continue
@@ -410,7 +412,8 @@ def main() -> int:
         backup = path + ".mutbak"
         shutil.copy2(path, backup)
         try:
-            io.open(path, "w", encoding="utf-8").write(orig.replace(old, new, 1))
+            io.open(path, "w", encoding="utf-8").write(  # noqa: SIM115
+                orig.replace(old, new, 1))
             detected, summary = _run_tests(FILES.get(mid, []), kexpr)
             results.append((mid, desc, "检出" if detected else "存活", summary[:64]))
         except subprocess.TimeoutExpired:

@@ -218,3 +218,63 @@ def test_enriched_tasks_flow_into_solve(monkeypatch):
     assert r["success"] is True
     assert r["scheduled"] == 2
     assert all(s["teacher"] in {"吴老师", "林老师"} for s in r["schedule"])
+
+
+# ---------------------------------------------------------------- 清单替换必须原子（R-94）
+#
+# 2026-10-29 实测：`_master_tasks.clear()` + `.extend(tasks)` 是两个独立方法调用，
+# 中间读者会看到**空清单**。50 轮替换、3 个读者线程：**365418 次**读到 len == 0。
+#
+# 危害是静默的：`/parallel/*` 与 `/auto-schedule` 用 `len(_master_tasks)` 决定
+# "还有多少待排任务"，读到空清单 ⇒ 少排一批，接口照样 success=true
+# （与 R-76"少排 52 个组课时却报全部排定"同一族）。
+
+def test_set_master_tasks_replaces_atomically():
+    """整体替换：读者要么看到旧清单、要么看到新清单，没有空窗。"""
+    import threading
+
+    from app.utils.excel_parser import PendingTask
+
+    api._ensure_loaded()
+    api._ensure_master_data()
+    tasks = [PendingTask(f"班{i}", f"项目{i}", "1组", teacher="师", room="A1")
+             for i in range(200)]
+    api._set_master_tasks(tasks)
+    assert len(api._master_tasks) == 200
+
+    bad: list[int] = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            n = len(api._master_tasks)
+            if n != 200:
+                bad.append(n)
+
+    threads = [threading.Thread(target=reader, daemon=True) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for _ in range(50):
+        api._set_master_tasks(tasks)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not bad, (
+        f"读者看到 {len(bad)} 次非满清单（样本 {bad[:3]}）——"
+        "清单必须整体替换，不能用 clear()+extend()"
+    )
+
+
+def test_no_clear_extend_on_master_tasks():
+    """结构锁：模块里不许再对 `_master_tasks` 做 clear()/extend() 分步改写。"""
+    import inspect
+
+    src = inspect.getsource(api)
+    code = "\n".join(line.split("#")[0] for line in src.split("\n"))
+    for bad in ("_master_tasks.clear()", "_master_tasks.extend("):
+        assert bad not in code, (
+            f"`{bad}` 还在 —— 两个调用之间读者会看到空清单（实测 365418 次）。"
+            "请改用 `_set_master_tasks(...)` 整体替换。"
+        )
+    assert "_set_master_tasks" in code

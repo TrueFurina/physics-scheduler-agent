@@ -95,6 +95,24 @@ _db = ScheduleDatabase()
 # 有了它，"排一个去年不存在的新实验项目"不再需要先伪造一行假课表 —— 这是
 # 导师座谈后换轨的核心（见 docs/战略复盘-20261022.md）。
 _master_tasks: List = []
+
+
+def _set_master_tasks(tasks: List) -> None:
+    """**整体替换**上传的任务清单（不要 `clear()` + `extend()`）。
+
+    为什么（2026-10-29，R-94）：`clear()` 与 `extend()` 是两个独立方法调用，
+    中间读者会看到**空清单**。实测（200 条任务、50 轮替换、3 个读者线程）：
+    **473718 次**读到 `len == 0`。
+
+    危害是静默的：`/parallel/*` 与 `/auto-schedule` 用 `len(_master_tasks)` 决定
+    "还有多少待排任务"，读到空清单 ⇒ 少排一批任务，而接口照样 success=true
+    （与 R-76"少排 52 个组课时却报全部排定"同一族）。
+
+    整体替换是**单个名字绑定**，读方要么看到旧清单、要么看到新清单。
+    其它模块（含测试）本来就用 `setattr(..., [])` 整体替换，这条只是把同一语义固化成函数。
+    """
+    global _master_tasks
+    _master_tasks = list(tasks)
 # 主数据实体库（课程/实验项目/教师/场地/班级）：导师一号行动项"重构数据库"的落地。
 # 基线反推自安排表；教秘的会话内修改（CRUD/灰箱补全）落盘到 master_store.json，
 # 重启自愈恢复 —— 落盘失效的唯一条件是安排表本身被替换（指纹变化，见 master_store）。
@@ -401,7 +419,7 @@ def _apply_uploaded_schedule(save_path: str, content: bytes) -> dict:
             # 换了安排表 → 旧表上的主数据落盘全部作废（班级/项目可能已不存在），按新表反推
             _schedule_fp = _ms.schedule_fingerprint(save_path)
             _master_data.__init__()      # 回到未初始化态，下次访问按新表反推
-            _master_tasks.clear()
+            _set_master_tasks([])      # 换表 ⇒ 旧清单作废（与下面 _ms.clear() 同一失效规则）
             _ms.clear()
             # 换了安排表 → 旧表上的落地方案一并作废：方案里的单元在新表可能根本不
             # 存在，重放它等于把旧方案强加到新表上。与 master_store 同一失效规则。
@@ -458,8 +476,7 @@ async def upload_master(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
 
-    _master_tasks.clear()
-    _master_tasks.extend(tasks)
+    _set_master_tasks(tasks)
     await _persist_master_state_async()
     return {
         "success": True,
@@ -482,7 +499,7 @@ async def clear_master_tasks():
     """
     await _ensure_loaded_async()
     _ensure_master_data()
-    _master_tasks.clear()
+    _set_master_tasks([])
     await _persist_master_state_async()
     return {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
 
@@ -1037,8 +1054,7 @@ def _ensure_master_data_locked() -> None:
         try:
             _master_data.from_dict(store.get("master") or {})
             if _master_data.initialized:
-                _master_tasks.clear()
-                _master_tasks.extend(master_store.rows_to_tasks(store.get("tasks")))
+                _set_master_tasks(master_store.rows_to_tasks(store.get("tasks")))
                 print(f"✅ 主数据已从落盘恢复（实验项目 {len(_master_data.experiments)}"
                       f" / 待排任务 {len(_master_tasks)}）")
                 return

@@ -168,8 +168,10 @@ def test_counters_track_requests_and_client_errors():
 # 实际覆盖率只有 25%。下面补的是能真正穿透到该行代码的用例。
 
 
-import os
-from urllib.parse import quote
+# 这两个导入放在此处（而非文件顶部）是因为上面是**大段说明注释**，
+# ruff 的 E402 只对"代码后的导入"报错；把它们留在注释块末尾最贴近语义。
+import os  # noqa: E402
+from urllib.parse import quote  # noqa: E402
 
 _BACKEND_REQ = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
