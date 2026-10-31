@@ -82,6 +82,7 @@ FILES = {
     "M46": ["tests/test_enrich_graybox.py"],
     "M47": ["tests/test_import_drift.py"],
     "M48": ["tests/test_impact_analysis.py"],
+    "M49": ["tests/test_land_undo_atomicity.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -472,6 +473,14 @@ MUTANTS = [
         "                if teacher_name and te and same_teacher(teacher_name, te):",
         "                if teacher_name and te and teacher_name in te:  # MUTANT: 退回子串",
         "unparsed_row_teacher or matches_conflict_model",
+    ),
+    (
+        "M49", "撤销标记写失败不兜底（课表退了、记录还在 → 重放复活）",
+        "app/plan_landing.py",
+        "    except Exception as first:  # noqa: F841\n        try:",
+        "    except Exception as first:  # noqa: F841\n"
+        "        raise  # MUTANT: 不兜底，直接抛给调用方\n        try:",
+        "undo or revoke",
     ),
 ]
 

@@ -524,10 +524,37 @@ def undo(db, store: LandingStore, actor: str = "") -> dict:
     if not rec:
         return {"success": False, "error": "当前没有可撤销的落地方案"}
     before = json.loads(rec["before_json"])
+    # 顺序有意为之：**先**恢复内存、**再**打撤销标记。反过来的话，restore 一旦崩掉，
+    # 记录已被标成"已撤销"而课表其实没动 —— 撤销入口消失、什么都没退，那是无法挽回
+    # 的一支。顺序由 tests/test_land_undo_atomicity.py 里的
+    # test_restore_failure_leaves_record_unrevoked 钉住。
     restore(db, before)
-    mark = store.revoke(rec["id"], actor=actor)
+    # ①（内存）与 ②（sqlite）是两个存储，中间没有事务兜底。
+    # ② 写失败时课表已经退了，而记录在库里仍是"已落地"：
+    #   · /land/status 继续报 landed=True —— 撤销按钮指向一个已不生效的方案；
+    #   · 重放（store.all() 只取未撤销的）会在重启后把这次撤销再应用回来，
+    #     教秘撤掉的方案自己复活，而没有人点过按钮。
+    # 所以不能报成功：审计标记本身就是撤销契约的一部分（R55）。
+    try:
+        mark = store.revoke(rec["id"], actor=actor)
+    except Exception as first:  # noqa: F841
+        try:
+            # sqlite 最常见的失败是瞬时锁，重试一次通常就能自愈
+            mark = store.revoke(rec["id"], actor=actor)
+        except Exception as again:
+            return {
+                "success": False,
+                "revoked": False,
+                "rolled_back": True,
+                "landed_at": rec["landed_at"],
+                "restored_entries": len(db.entries),
+                "error": ("课表已回滚到落地前，但撤销记录写入失败（%s）。"
+                          "该记录在库里仍为「已落地」，请重试撤销 —— "
+                          "否则重启重放会把这次撤销再应用回来。" % again),
+            }
     return {
         "success": True,
+        "revoked": True,
         "landed_at": rec["landed_at"],
         "landed_actor": rec.get("actor") or "",
         "restored_entries": len(db.entries),
