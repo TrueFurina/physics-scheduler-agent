@@ -83,6 +83,7 @@ FILES = {
     "M47": ["tests/test_import_drift.py"],
     "M48": ["tests/test_impact_analysis.py"],
     "M49": ["tests/test_land_undo_atomicity.py"],
+    "M50": ["tests/test_enrich_graybox.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -481,6 +482,15 @@ MUTANTS = [
         "    except Exception as first:  # noqa: F841\n"
         "        raise  # MUTANT: 不兜底，直接抛给调用方\n        try:",
         "undo or revoke",
+    ),
+    (
+        "M50", "负载基线不认系统自己补的教师（每次调用从空负载重算 → 后到的任务抢回同一人）",
+        "app/api/reschedule.py",
+        "        if t.teacher:\n            teacher_load[t.teacher] += 1",
+        "        if t.teacher and not getattr(t, "
+        '"_teacher_enriched", False):  # MUTANT: 不把自动补的算进负载\n'
+        "            teacher_load[t.teacher] += 1",
+        "arriving_in_batches or late_arrivals",
     ),
 ]
 
