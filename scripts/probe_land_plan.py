@@ -17,6 +17,7 @@
   D:/miniconda3_new/python.exe scripts/probe_land_plan.py --keep   # 测完不撤销
 """
 import argparse
+import http.cookiejar
 import json
 import os
 import sqlite3
@@ -25,9 +26,36 @@ import urllib.request
 
 DEFAULT_SITE = "http://127.0.0.1:8023"
 ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
+# 口令默认仍是本地演示口令；打线上实例时用 PROBE_ADMIN_PASS 覆盖，
+# 免得把生产口令硬写进脚本（2026-11-01 起线上已换强口令）。
+ADMIN_PASS = os.getenv("PROBE_ADMIN_PASS") or "admin123"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.path.join(HERE, "..", "backend", "app", "data", "requests.db")
+
+# 发布态（sites 沙箱）有两处与本地不同，探针必须自己适配：
+#   1. 边缘代理会覆盖 `Authorization`，线上鉴权只认 `X-Admin-Token`；
+#   2. 分享链接首次访问会种 `__wb_rsc` cookie，之后 `/api/*` 才放行。
+# 统一走带 cookie 容器的 opener，并同时带两个头（本地多带一个头无害）。
+_COOKIE_JAR = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_COOKIE_JAR))
+
+
+def prime_share_cookie(site: str, sharecode: str) -> None:
+    """带 `?sharecode=` 访问一次首页换取访问 cookie。本地站点无需调用。"""
+    if not sharecode:
+        return
+    try:
+        with _OPENER.open(f"{site}/?sharecode={sharecode}", timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        print(f"（预热分享 cookie 失败：HTTP {e.code}，后续请求可能 403）")
+    except OSError as e:
+        print(f"（预热分享 cookie 失败：{e}）")
+
+
+def is_local(site: str) -> bool:
+    """远端站点读不到本地 sqlite 账本，相关校验要换判据（见第 ⑨ 项）。"""
+    return any(h in site for h in ("127.0.0.1", "localhost", "0.0.0.0"))
 
 
 def http(method: str, url: str, payload=None, token: str = "", timeout: int = 120):
@@ -35,9 +63,11 @@ def http(method: str, url: str, payload=None, token: str = "", timeout: int = 12
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     if token:
+        # 两个头都带：本地认 Authorization；线上代理会覆盖它，只认自定义头。
         req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("X-Admin-Token", token)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         body = e.read()
@@ -78,12 +108,16 @@ def core(a: dict):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", default=DEFAULT_SITE)
+    ap.add_argument("--sharecode", default="",
+                    help="打线上分享链接时必填：先用它换 __wb_rsc cookie，"
+                         "否则所有请求会被边缘代理挡成 403")
     ap.add_argument("--keep", action="store_true",
                     help="测完不撤销。默认撤销：落地会改写 400+ 行安排表，"
                          "留着会污染后续所有探针/核查的基线（parallel 47→53），"
                          "所以只有明确想观察落地态时才用")
     args = ap.parse_args()
     site = args.site.rstrip("/")
+    prime_share_cookie(site, args.sharecode)
     rep = Report()
 
     # ① 管理员登录（写接口全都要）
@@ -181,21 +215,32 @@ def main():
                else "（一字未变＝'批了但没生效'）"))
 
     # ⑨ 落盘账本：sqlite 里真有这条记录（否则重启即丢，重放无从谈起）
-    db = os.path.abspath(DEFAULT_DB)
-    n_ledger, latest = -1, ""
-    if os.path.exists(db):
-        try:
-            con = sqlite3.connect(db)
-            n_ledger = con.execute("SELECT COUNT(*) FROM landed_plans").fetchone()[0]
-            latest = con.execute(
-                "SELECT MAX(landed_at) FROM landed_plans").fetchone()[0] or ""
-            con.close()
-        except sqlite3.Error as e:
-            print(f"（读账本失败：{e}）")
-    rep.add(n_ledger >= 1 and latest == cm.get("landed_at"),
-            "落地方案落盘（landed_plans 账本）",
-            f"{n_ledger} 条记录，最新 landed_at={latest}"
-            + ("" if n_ledger >= 1 else "（内存改了但没落盘，重启即丢）"))
+    if is_local(site):
+        db = os.path.abspath(DEFAULT_DB)
+        n_ledger, latest = -1, ""
+        if os.path.exists(db):
+            try:
+                con = sqlite3.connect(db)
+                n_ledger = con.execute("SELECT COUNT(*) FROM landed_plans").fetchone()[0]
+                latest = con.execute(
+                    "SELECT MAX(landed_at) FROM landed_plans").fetchone()[0] or ""
+                con.close()
+            except sqlite3.Error as e:
+                print(f"（读账本失败：{e}）")
+        rep.add(n_ledger >= 1 and latest == cm.get("landed_at"),
+                "落地方案落盘（landed_plans 账本）",
+                f"{n_ledger} 条记录，最新 landed_at={latest}"
+                + ("" if n_ledger >= 1 else "（内存改了但没落盘，重启即丢）"))
+    else:
+        # 远端站点读不到沙箱里的 sqlite，改按接口核账：状态端点若还认这条落地，
+        # 说明记录确实进了库（内存里的对象在别的进程里不会自己冒出来）。
+        _, st = http("GET", f"{site}/api/reschedule/parallel/land/status")
+        st = st or {}
+        latest = st.get("landed_at") or ""
+        rep.add(bool(st.get("landed")) and latest == cm.get("landed_at"),
+                "落地方案落盘（landed_plans 账本）",
+                f"远端按接口核账：landed={st.get('landed')}，landed_at={latest}"
+                + ("" if st.get("landed") else "（内存改了但没落盘，重启即丢）"))
 
     # ⑩ 撤销：快照原样恢复 + 状态清空 + 再撤销报 404
     if args.keep:

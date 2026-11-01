@@ -160,6 +160,22 @@ DEMO_MODE=1 OPENBLAS_NUM_THREADS=1 python run.py
 3. `GET /api/reschedule/export/class-schedule` → 期望合法 xlsx（约 41KB）
 4. 首页 `<title>` = 物理学科智能排课选课系统
 
+**全链路验收（可选，约 1 分钟，自带还原）**：两条写路径探针已支持打线上
+（`--sharecode` 换 cookie、`PROBE_ADMIN_PASS` 传口令、鉴权头改 `X-Admin-Token`、
+远端账本改按接口核账）：
+
+```bash
+PROBE_ADMIN_PASS=<管理员口令> python scripts/probe_land_plan.py \
+  --site https://physics-lab-scheduler.apps.workbuddy.host --sharecode FIEB2FPH6U
+PROBE_ADMIN_PASS=<管理员口令> python scripts/probe_approval_chain.py \
+  --site https://physics-lab-scheduler.apps.workbuddy.host --sharecode FIEB2FPH6U
+```
+
+期望 **19/19** 与 **11/11**。前者测「方案 → 预览 → 采纳 → 落地 → 撤销」，
+后者测「申请 → 驳回 → 应用 → 幂等」。两条都会自己还原：落地探针撤销，
+审批探针走 `/demo/reset`（未开 DEMO_MODE 的站点会回 403，需人工清 `applied_moves`）。
+跑完应回到基线：433 条 / 核心冲突 (0,1,0) / 同班分批 47 / `landed=false`。
+
 ### 11.6 性能基线（云端 vs 本地，2026-11-01 实测）
 
 | 路径 | 云端 | 本地 |

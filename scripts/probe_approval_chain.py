@@ -21,6 +21,7 @@
   （第 207 行那条分支），不会误删任何东西。
 """
 import argparse
+import http.cookiejar
 import json
 import os
 import re
@@ -32,9 +33,28 @@ import urllib.request
 
 DEFAULT_SITE = "http://127.0.0.1:8023"
 ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
+# 口令默认仍是本地演示口令；打线上实例时用 PROBE_ADMIN_PASS 覆盖。
+ADMIN_PASS = os.getenv("PROBE_ADMIN_PASS") or "admin123"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.path.join(HERE, "..", "backend", "app", "data", "requests.db")
+
+# 线上（sites 沙箱）与本地两处不同：边缘代理会覆盖 `Authorization`（只认
+# `X-Admin-Token`），且分享链接要先拿 `__wb_rsc` cookie 才放行 `/api/*`。
+_COOKIE_JAR = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_COOKIE_JAR))
+
+
+def prime_share_cookie(site: str, sharecode: str) -> None:
+    """带 `?sharecode=` 访问一次首页换取访问 cookie。本地站点无需调用。"""
+    if not sharecode:
+        return
+    try:
+        with _OPENER.open(f"{site}/?sharecode={sharecode}", timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        print(f"（预热分享 cookie 失败：HTTP {e.code}，后续请求可能 403）")
+    except OSError as e:
+        print(f"（预热分享 cookie 失败：{e}）")
 
 
 def http(method: str, url: str, payload=None, token: str = ""):
@@ -42,9 +62,11 @@ def http(method: str, url: str, payload=None, token: str = ""):
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     if token:
+        # 两个头都带：本地认 Authorization；线上代理会覆盖它，只认自定义头。
         req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("X-Admin-Token", token)
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
+        with _OPENER.open(req, timeout=180) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         body = e.read()
@@ -125,10 +147,14 @@ def current_course(site: str, teacher: str, course_name: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", default=DEFAULT_SITE)
+    ap.add_argument("--sharecode", default="",
+                    help="打线上分享链接时必填：先用它换 __wb_rsc cookie，"
+                         "否则所有请求会被边缘代理挡成 403")
     ap.add_argument("--restore", action=argparse.BooleanOptionalAction, default=True,
                     help="测完撤掉探针造成的移动（默认开；--no-restore 留痕检查用）")
     args = ap.parse_args()
     site = args.site.rstrip("/")
+    prime_share_cookie(site, args.sharecode)
     rep = Report()
 
     code, login = http("POST", f"{site}/api/reschedule/admin-login",
@@ -207,16 +233,25 @@ def main():
     rep.add(code3 in (401, 403), "匿名调用应用接口被拒", f"HTTP {code3}（200/400 都算漏了门禁）")
 
     if args.restore:
-        db = os.path.abspath(DEFAULT_DB)
-        if os.path.exists(db):
-            conn = sqlite3.connect(db)
-            n = conn.execute("DELETE FROM applied_moves WHERE idem_key LIKE 'probe-%'").rowcount
-            conn.commit()
-            conn.close()
-            http("POST", f"{site}/api/reschedule/load-default", {})
-            print(f"\n已撤掉 {n} 条探针移动并重载排课表")
+        local = any(h in site for h in ("127.0.0.1", "localhost", "0.0.0.0"))
+        if local:
+            db = os.path.abspath(DEFAULT_DB)
+            if os.path.exists(db):
+                conn = sqlite3.connect(db)
+                n = conn.execute("DELETE FROM applied_moves WHERE idem_key LIKE 'probe-%'").rowcount
+                conn.commit()
+                conn.close()
+                http("POST", f"{site}/api/reschedule/load-default", {})
+                print(f"\n已撤掉 {n} 条探针移动并重载排课表")
+            else:
+                print(f"\n未找到 {db}，跳过恢复（远端库需手动清理）")
         else:
-            print(f"\n未找到 {db}，跳过恢复（远端库需手动清理）")
+            # 远端读不到沙箱里的 sqlite：改用演示复位（清 applied_moves + 申请单 + 重载表）。
+            # 非 DEMO_MODE 站点会回 403，此时只能人工清理——如实说出来，不假装成功。
+            code, body = http("POST", f"{site}/api/reschedule/demo/reset", {}, token)
+            print(f"\n远端清理：演示复位 HTTP {code}"
+                  + (f"，{(body or {}).get('message')}" if code == 200
+                     else "（该站点未开 DEMO_MODE，applied_moves 需人工清理）"))
 
     return rep.done()
 
