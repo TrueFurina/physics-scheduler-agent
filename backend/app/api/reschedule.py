@@ -29,6 +29,19 @@ from app.security import check_admin_credentials, issue_admin_token, require_adm
 from app.ratelimit import rate_limit
 from app import plan_landing
 
+# R54：XLSX 导出助手已搬到 `app/api/xlsx_helpers.py`（纯函数，无 IO、无共享状态）。
+# 这里仍按原名转出，所以 `reschedule._safe_sheet_name` / `api._xlsx_response` 这类
+# 「模块属性直调」写法零改动 —— 本轮只搬家，不改任何调用点、不改任何路由。
+from app.api.xlsx_helpers import (
+    _entry_sort_key,
+    _safe_sheet_name,
+    _slot_text,
+    _workbook_bytes,
+    _write_sheet,
+    _xlsx_bytes_response,
+    _xlsx_response,
+)
+
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
@@ -1818,74 +1831,11 @@ async def land_status():
 # 于是"排完了"和"能交付"之间还差一步人工整理。
 # ---------------------------------------------------------------------------
 
-# 节次渲染顺序（与 time_model.ORDER 一致；unknown 排最后，绝不静默丢弃）
-_SLOT_ORDER = {"MORNING": 0, "567": 1, "678": 2, "91011": 3, "78": 4}
-
-
-def _safe_sheet_name(raw: str, used: set) -> str:
-    """Excel 表名：最长 31 字符，且不允许 : \\ / ? * [ ]。重名加 ~N 后缀。"""
-    name = re.sub(r"[:\\/?*\[\]]", "_", str(raw or "").strip())[:31] or "未标注"
-    base, i = name, 1
-    while name in used:
-        suffix = f"~{i}"
-        name = base[: 31 - len(suffix)] + suffix
-        i += 1
-    used.add(name)
-    return name
-
-
-def _slot_text(e) -> str:
-    """给教秘看的上课时间：原表写的是时间区间就照抄（含 14:00-17:00 这类跨节次写法），
-    否则用节次码换成时钟（567 → 13:30-15:45）。"""
-    raw = (getattr(e, "time_raw", "") or "").strip()
-    if ":" in raw or "：" in raw:
-        return raw
-    from app.utils.time_model import clock_text
-
-    return clock_text(e.time_slot) or raw or e.time_slot
-
-
-def _entry_sort_key(e):
-    from app.engine.parallel_scheduler import ALL_WEEKDAYS
-
-    wd = ALL_WEEKDAYS.index(e.weekday) if e.weekday in ALL_WEEKDAYS else 99
-    return (e.week, wd, _SLOT_ORDER.get(e.time_slot, 99), str(e.group))
-
-
-_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-
-def _workbook_bytes(wb) -> bytes:
-    """工作簿 → xlsx 字节。**纯 CPU，重活必须在工作线程里调用**（R-70）。"""
-    from io import BytesIO
-
-    buf = BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-def _xlsx_bytes_response(data: bytes, filename: str):
-    """字节 → 带中文文件名的下载响应（与并行排课导出同一套口径）。"""
-    from io import BytesIO
-    from urllib.parse import quote
-
-    from fastapi.responses import StreamingResponse
-
-    return StreamingResponse(
-        BytesIO(data),
-        media_type=_XLSX_MEDIA,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-    )
-
-
-def _xlsx_response(wb, filename: str):
-    """轻量路径：小工作簿在当前线程直接序列化（实测 ≤50ms 的导出才可走这里）。
-
-    重导出（班级/场地/两份台账/自动排课初稿，实测 77–830ms）一律拆成
-    `_build_*_bytes()` + `run_in_threadpool` —— 否则建表期间事件循环停摆，
-    期间全站请求（含 /health）一起排队，见 R-70。
-    """
-    return _xlsx_bytes_response(_workbook_bytes(wb), filename)
+# 节次顺序 / 表名净化 / 节次文本 / 排序键 / 工作簿序列化 / Response 组装
+#   这一组纯函数已在 R54 搬到 `app/api/xlsx_helpers.py`，由文件头统一 import 转出。
+#   `_SLOT_ORDER` 与 `_XLSX_MEDIA` 两个常量随函数一起走，**只在新模块定义一份** ——
+#   两边各留一份就等于埋了个"改一处、另一处不动"的漂移点。
+#   `_write_sheet` 同理，见下方原位置附近的说明。
 
 
 # ---------------------------------------------------------------------------
@@ -1973,15 +1923,8 @@ def start_export_warmup() -> bool:
     return True
 
 
-def _write_sheet(ws, headers, widths):
-    from openpyxl.styles import Alignment, Font
-
-    ws.append(headers)
-    for c in ws[1]:
-        c.font = Font(bold=True)
-        c.alignment = Alignment(horizontal="center")
-    for col, w in zip("ABCDEFGH", widths):
-        ws.column_dimensions[col].width = w
+# `_write_sheet`（写表头 + 列宽）已搬到 `app/api/xlsx_helpers.py`，文件头那个 import
+# 已经把它转出，所以下面 6 处 `_write_sheet(...)` 调用一行都不用改。
 
 
 def _course_gap_note(cov: dict) -> str:
