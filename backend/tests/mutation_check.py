@@ -88,6 +88,8 @@ FILES = {
     "M52": ["tests/test_teacher_course_attribution.py"],
     "M53": ["tests/test_import_wizard.py"],
     "M54": ["tests/test_import_wizard.py"],
+    "M55": ["tests/test_replay_outer_guard.py"],
+    "M56": ["tests/test_teacher_roles_retry.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -527,6 +529,22 @@ MUTANTS = [
         '    report["existing_tasks"] = len(_master_tasks)',
         '    report["existing_tasks"] = 0  # MUTANT: 预览不报现有条数',
         "will_replace",
+    ),
+    (
+        "M55", "外层重放中断不记录（数据库读不到时仍只说「✅ 成功加载」，"
+                "与「没有调课要重放」分不出来）",
+        "app/api/reschedule.py",
+        '        replay_aborted = f"{type(e).__name__}: {e}"',
+        "        replay_aborted = None  # MUTANT: 外层中断不留痕",
+        "get_db_failure_is_reported or landings_failure_is_reported",
+    ),
+    (
+        "M56", "教师备注打开失败也定格（退回只判路径 → 一次瞬时 IO 错误永久钉成空，"
+                "注释承诺的「下一次重试」永不发生）",
+        "app/utils/excel_parser.py",
+        "        if path and opened:",
+        "        if path:  # MUTANT: 退回只判路径非空",
+        "open_failure_does_not_mark_loaded or open_failure_really_retries_next_time",
     ),
 ]
 

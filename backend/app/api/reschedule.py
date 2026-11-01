@@ -1046,6 +1046,14 @@ def _load_default_schedule() -> tuple[str, int]:
     # 而原来这里是 `except Exception: pass` —— 教秘看到的是"✅ 成功加载"，
     # 实际有一节课停在旧周次。丢的是**已审批的变更**，比丢原始行更重。
     replay_failed: list = []
+    # R51：外层兜底也必须留痕。
+    # `_get_db()` / `_landings().all()` / `events.sort()` 任一失败 → 整段重放被跳过，
+    # 而异常发生在所有 `replay_failed.append` 之外，于是消息照样是「✅ 成功加载 N 条」。
+    # 此刻「没有调课要重放」与「调课全都没重放」在消息里长得一模一样 —— 这是最危险的时刻。
+    #
+    # 不复用 `replay_failed`：那是"第几条失败"，外层连有几条都不知道。
+    # 塞进去会被渲染成「⚠️ 1 条已审批记录重放失败」，把"未知条数"说成"1 条"，是新的误导。
+    replay_aborted = None
     try:
         conn = _get_db()
         moves = conn.execute(
@@ -1078,8 +1086,9 @@ def _load_default_schedule() -> tuple[str, int]:
                         replay_landed += 1
                 except Exception as e:  # noqa: BLE001
                     replay_failed.append(f"{kind}#{_i}: {type(e).__name__}: {e}")
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 与内层一样：不阻断启动（数据损坏不该让服务起不来），但绝不静默。
+        replay_aborted = f"{type(e).__name__}: {e}"
 
     msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
     if replay_applied:
@@ -1092,6 +1101,11 @@ def _load_default_schedule() -> tuple[str, int]:
         msg += (f"；⚠️ {len(replay_failed)} 条已审批记录**重放失败**，"
                 f"它们的调整未生效（{shown}"
                 + ("…" if len(replay_failed) > 3 else "") + "）")
+    if replay_aborted:
+        # 整段没跑：一条都没重放，而且不知道本应重放多少条。
+        # 此时的"成功加载"极易被读成"调课都在"，所以要把话说死。
+        msg += (f"；⚠️ 已审批调课的重放**中断**，本期一条都未重放"
+                f"（{replay_aborted}）—— 课表可能停在上次落盘的状态")
     # 待排/丢弃都必须说出口：静默丢弃是本项目反复踩的坑（R-35、以及缺周次的整行蒸发）
     rep = _db.load_report
     if rep.get("pending"):

@@ -985,15 +985,27 @@ class ScheduleDatabase:
             return dict(self.roles)
 
         roles: Dict[str, str] = {}
+        opened = False
         try:
             import openpyxl
             wb = openpyxl.load_workbook(path if path else self.schedule_path())
             roles = _parse_teacher_roles(wb)
+            opened = True
         except Exception:
             pass
         # 只有"真的开成功了一次工作簿"才认这个结果；开失败（文件不在/损坏）不记，
         # 留给下一次重试 —— 否则一次瞬时 IO 错误会把备注永久钉成空。
-        if path:
+        #
+        # R51：这里原来判的是 `if path:`（路径非空），不是"打开成功"，与上段注释相反：
+        # 打开抛异常时照样置 `_roles_loaded = True`，`:977` 的早退分支永久生效，
+        # 注释承诺的"下一次重试"永远不发生。成因是 2026-10-29 那次性能优化
+        # （`/teachers` 402ms）把容错语义改没了，注释留在原地没跟着改。
+        #
+        # 取舍：改回"失败不记"之后，若文件**持续**损坏，每次 `/teachers` 都会重开
+        # 工作簿（退回 402ms）。这是有意的 —— 一次瞬时错误永久钉空备注是无声的
+        # 数据错误，重复开销是有声的性能问题。要两头都占，应做"连续失败 N 次后定格
+        # 并记 error"，而不是把语义改回去。
+        if path and opened:
             self.roles = dict(roles)
             self._roles_loaded = True
         if roles and path:
