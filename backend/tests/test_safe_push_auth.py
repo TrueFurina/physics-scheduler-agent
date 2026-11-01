@@ -27,7 +27,6 @@ HEADERS = {"Authorization": "Bearer " + _token(), ...}
 - 单个文件 401/403 → 单独提示"鉴权失败"，不要把整批都刷成失败
 """
 import os
-import sys
 
 import pytest
 

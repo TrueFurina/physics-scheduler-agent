@@ -10,6 +10,7 @@
 
 import os
 import sys
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -168,8 +169,6 @@ def test_counters_track_requests_and_client_errors():
 # 实际覆盖率只有 25%。下面补的是能真正穿透到该行代码的用例。
 
 
-import os
-from urllib.parse import quote
 
 _BACKEND_REQ = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "requirements.txt")

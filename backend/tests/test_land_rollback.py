@@ -33,7 +33,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
-import app.plan_landing as plan_landing
 
 
 @pytest.fixture()
@@ -134,7 +133,7 @@ def test_land_rollback_restores_blocked_and_course(env, monkeypatch):
 
 def test_failed_land_leaves_no_landed_record(env, monkeypatch):
     """落盘失败后，land/status 必须仍报未落地（不能留下半条记录）。"""
-    db, client, headers, _ = env
+    _db, client, headers, _ = env
 
     monkeypatch.setattr(api._landings(), "save",
                         lambda *a, **kw: (_ for _ in ()).throw(IOError("x")),

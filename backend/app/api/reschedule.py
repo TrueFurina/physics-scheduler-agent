@@ -1067,7 +1067,7 @@ def _load_default_schedule() -> tuple[str, int]:
                     res = _apply_reschedule(rec, persist=False)
                     replay_applied += res["applied"]
                     replay_skipped += res["skipped"]
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     replay_failed.append(f"#{r['id']}: {type(e).__name__}: {e}")
         else:
             events = [(r["applied_at"] or "0000-00-00", 0, r["id"], "move",
@@ -1084,9 +1084,9 @@ def _load_default_schedule() -> tuple[str, int]:
                     else:
                         plan_landing.replay_landing(_db, payload)
                         replay_landed += 1
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     replay_failed.append(f"{kind}#{_i}: {type(e).__name__}: {e}")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # 与内层一样：不阻断启动（数据损坏不该让服务起不来），但绝不静默。
         replay_aborted = f"{type(e).__name__}: {e}"
 
@@ -3298,7 +3298,23 @@ async def list_requests(status: str = ""):
 
 @router.get("/requests/export", summary="导出调课申请记录 Excel（审批留档）", dependencies=_ADMIN_ONLY)
 async def export_requests(status: str = ""):
-    """把全部（或按状态）调课申请单导出为 Excel —— 管理员留档/归档的真实工作流。"""
+    """把全部（或按状态）调课申请单导出为 Excel —— 管理员留档/归档的真实工作流。
+
+    ⚠️ 与 `/parallel/export` 一样**刻意留在请求线程上**（不是漏改）。
+
+    2026-11-02 实测建表耗时（openpyxl 建表 + 序列化，不含 SQL）：
+        0 行 5.1ms / 50 行 7.1ms / 200 行 15.2ms / 500 行 30.2ms
+    全部在 R-70 的 50ms 线以下。R-70 口径是"只下沉实测 ≥50ms **且**每次点击都会走的路径"，
+    本路由只做审批留档，行数上限就是申请单数量，不在高频路径上 ⇒ 不下沉。
+
+    但它此前**一句话都没写**，于是在 `scripts/audit_async_blocking.py` 眼里与
+    "漏改的阻塞路由"完全一样（零 await + 直接干重活），审计门因此长期红着而没人能判断
+    该修还是该登记。现在把数字写在这里，并登记进 `async_blocking_baseline.json` 的
+    零 await 基线 —— **有数字的豁免**，不是把问题洗进基线。
+
+    若申请单量级涨到千行以上（实测会越过 50ms），按 `_build_*_bytes()` +
+    `run_in_threadpool` 下沉，同时把本路由从基线里删掉。
+    """
     from io import BytesIO
     import openpyxl
     from openpyxl.styles import Font, Alignment

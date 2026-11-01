@@ -67,7 +67,7 @@ def _token():
              "[Environment]::GetEnvironmentVariable('GITHUB_TOKEN','User')"],
             capture_output=True, text=True, timeout=30).stdout.strip()
         return out
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
 
 
@@ -87,7 +87,7 @@ def _get(path, token, ref=None, tries=4):
             if e.code == 404:
                 return None
             time.sleep(2)
-        except Exception:  # noqa: BLE001
+        except Exception:
             time.sleep(2)
     raise RuntimeError("拉取失败：" + path)
 
@@ -172,7 +172,7 @@ def list_dir(path, token, ref=None):
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.loads(r.read())
-        except Exception:  # noqa: BLE001
+        except Exception:
             time.sleep(2)
     raise RuntimeError("列目录失败：" + path)
 
@@ -198,7 +198,7 @@ def main(argv=None):
             cur = stack.pop()
             try:
                 items = list_dir(cur, token, args.ref)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 print("跳过", cur, e)
                 continue
             if not isinstance(items, list):
@@ -220,7 +220,7 @@ def main(argv=None):
                 results.append(check_ref_to_ref(p, token, args.baseline))
             else:
                 results.append(check_one(p, token, args.ref))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             results.append({"path": p, "status": "error", "detail": str(e), "bad": False})
 
     bad = [r for r in results if r["bad"]]

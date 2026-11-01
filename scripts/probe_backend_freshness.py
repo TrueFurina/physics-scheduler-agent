@@ -97,7 +97,7 @@ def _feat_this_week_relative(base):
     # 「这周」分支一定会给出 target = 5（或越界时明确拒绝）。
     # 早期把这里当"跳过"是错的：它会掩盖「R23 分支整个不存在」。
     if src == 6 and tw is None:
-        return False, f"源周=6 但目标周为 None —— 「这周」分支未生效（R23 未上线）"
+        return False, "源周=6 但目标周为 None —— 「这周」分支未生效（R23 未上线）"
     return False, f"未按预期解析（target={tw}, source={src}）——与 R23 行为不符"
 
 
@@ -124,7 +124,7 @@ def main(argv=None):
 
     try:
         _get(base, "/health", timeout=10)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"打不到线上（{base}）：{e}")
         return 2
 
@@ -133,7 +133,7 @@ def main(argv=None):
     # `/teachers` 走 `_ensure_loaded_async()`，是官方推荐的自愈入口。
     try:
         _get(base, "/api/reschedule/teachers", timeout=120)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"预热加载失败（{base}）：{e}")
         return 2
 
@@ -143,7 +143,7 @@ def main(argv=None):
             ok, detail = fn(base)
         except urllib.error.HTTPError as e:
             ok, detail = False, f"HTTP {e.code}：{e.read()[:120].decode('utf-8', 'replace')}"
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             ok, detail = None, f"探测异常：{e}"
         if ok is False:
             stale = True

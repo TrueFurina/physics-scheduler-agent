@@ -565,8 +565,8 @@ def _run_tests(files: list, kexpr: str) -> tuple:
     proc = subprocess.run(cmd, cwd=BACKEND, capture_output=True,
                           text=True, timeout=900)
     out = proc.stdout + proc.stderr
-    lines = [l.strip() for l in out.splitlines()
-             if "passed" in l or "failed" in l or "error" in l]
+    lines = [ln.strip() for ln in out.splitlines()
+             if "passed" in ln or "failed" in ln or "error" in ln]
     summary = lines[-1] if lines else "?"
 
     failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
@@ -595,7 +595,8 @@ def main() -> int:
         if not os.path.isfile(path):
             results.append((mid, desc, "SKIP", "文件缺失"))
             continue
-        orig = io.open(path, encoding="utf-8").read()
+        with io.open(path, encoding="utf-8") as _fh:
+            orig = _fh.read()
         if old not in orig:
             results.append((mid, desc, "SKIP", "锚点未匹配（代码已重构？）"))
             continue
@@ -603,7 +604,8 @@ def main() -> int:
         backup = path + ".mutbak"
         shutil.copy2(path, backup)
         try:
-            io.open(path, "w", encoding="utf-8").write(orig.replace(old, new, 1))
+            with io.open(path, "w", encoding="utf-8") as _fh:
+                _fh.write(orig.replace(old, new, 1))
             verdict, summary = _run_tests(FILES.get(mid, []), kexpr)
             results.append((mid, desc, verdict, summary[:64]))
         except subprocess.TimeoutExpired:

@@ -9,7 +9,6 @@
 import os
 import re
 
-import pytest
 
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -18,7 +17,9 @@ def _pins():
     """解析 requirements.txt 的 name==version。"""
     path = os.path.join(BACKEND, "requirements.txt")
     out = {}
-    for line in open(path, encoding="utf-8"):
+    with open(path, encoding="utf-8") as f:
+        raw = f.readlines()
+    for line in raw:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -70,6 +71,7 @@ def test_security_doc_exists():
     """升级依据必须留档，否则下一个人不知道为什么锁这个版本。"""
     doc = os.path.join(BACKEND, "..", "docs", "依赖安全-20261029.md")
     assert os.path.isfile(doc), "缺少 docs/依赖安全-20261029.md"
-    text = open(doc, encoding="utf-8").read()
+    with open(doc, encoding="utf-8") as f:
+        text = f.read()
     assert "1532" in text or "1,532" in text, "文档里应包含 0.0.20 的实测耗时"
     assert "鉴权之前" in text, "文档里应说明计算发生在鉴权之前"

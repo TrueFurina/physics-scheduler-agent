@@ -40,7 +40,6 @@ R50 坏落盘永久豁免）。而且这次后果更重：**丢的是已审批�
 
 不阻断启动 —— 数据损坏不该让服务起不来。但**绝不能不说**。
 """
-import json
 import os
 import sys
 
@@ -98,11 +97,11 @@ def test_replay_failure_is_counted_and_reported(env):
 def test_replay_failure_does_not_block_startup(env):
     """坏记录不能阻断启动 —— 数据损坏不该让服务起不来。"""
     _insert_move("{{{{", "2026-10-30T00:00:02")
-    msg, total = env._load_default_schedule()
+    _msg, total = env._load_default_schedule()
     assert total > 0, "有坏记录就不加载整表了 —— 那会把可用数据一起废掉"
 
 
 def test_good_replay_still_silent(env):
     """没有坏记录时，不该冒出「重放失败」的噪音。"""
-    msg, total = env._load_default_schedule()
+    msg, _total = env._load_default_schedule()
     assert "重放失败" not in msg, f"没有坏记录却报了失败：{msg!r}"

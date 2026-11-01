@@ -43,7 +43,6 @@ $ python scripts/preflight_release.py
     发布走的是那个目录的内容。但**必须说清楚**，让人知道这条检查没生效。
 """
 import os
-import re
 import subprocess
 import sys
 
@@ -80,9 +79,9 @@ def test_git_failure_is_reported_not_green(tmp_path):
         [sys.executable, SCRIPT, "--offline"],
         cwd=root, capture_output=True, text=True, timeout=300)
     out = proc.stdout + proc.stderr
-    line = [l for l in out.splitlines() if "git 工作区" in l]
-    assert line, f"预检没有输出 git 那一行：\n{out[:400]}"
-    the_line = line[0]
+    found = [ln for ln in out.splitlines() if "git 工作区" in ln]
+    assert found, f"预检没有输出 git 那一行：\n{out[:400]}"
+    the_line = found[0]
 
     is_repo = subprocess.run(["git", "status", "--short"], cwd=root,
                              capture_output=True, text=True).returncode == 0

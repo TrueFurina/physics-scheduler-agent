@@ -32,7 +32,6 @@ env  ADMIN_PASS     = 'admin123'                  ← 后来才设的
 """
 import os
 
-import pytest
 
 
 def test_admin_pass_is_set_before_anything_imports_security():
@@ -44,7 +43,7 @@ def test_admin_pass_is_set_before_anything_imports_security():
         "conftest 没设 ADMIN_PASS —— security.py 会随机生成口令，"
         "而 test_api_auth 读到的是环境变量，两者不一致 ⇒ 登录 401"
     )
-    assert security.ADMIN_PASS == env_pass, (
+    assert env_pass == security.ADMIN_PASS, (
         f"security.ADMIN_PASS({security.ADMIN_PASS!r}) 与 "
         f"环境变量({env_pass!r}) 不一致 —— 有模块在 ADMIN_PASS 设置之前"
         "就 import 了 app.security"

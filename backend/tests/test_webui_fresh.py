@@ -12,10 +12,7 @@ R57 事故：源码改了、`webui/` 没重建 —— **测试全绿、探针全
 - index.html 引用不存在的资源 → 不可用
 - 未被引用的旧 chunk 要报出来
 """
-import json
 import os
-import subprocess
-import sys
 
 import pytest
 

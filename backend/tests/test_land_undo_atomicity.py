@@ -57,7 +57,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import app.plan_landing as plan_landing  # noqa: E402
+import app.plan_landing as plan_landing
 
 
 def _db_and_store(tmp_path):
@@ -167,7 +167,7 @@ def test_restore_failure_leaves_record_unrevoked(tmp_path, monkeypatch):
     monkeypatch.setattr(plan_landing, "restore",
                         lambda d, s: (_ for _ in ()).throw(RuntimeError("restore 崩了")))
 
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         plan_landing.undo(db, store, actor="tester")
 
     assert store.latest() is not None, (

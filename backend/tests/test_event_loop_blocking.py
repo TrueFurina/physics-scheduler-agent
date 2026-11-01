@@ -21,6 +21,14 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
+def _read_api_src() -> str:
+    """读 reschedule.py 源码。
+
+    4 条 AST-lite 检查共用 —— 原先 4 份 `open(...).read()` 各写一遍，
+    既漏 `with`（SIM115）也漏清理。收成一处。
+    """
+    with open(api.__file__, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 def _fake_chat_result():
@@ -205,7 +213,7 @@ def test_no_async_route_calls_ensure_loaded_directly():
     """
     import re
 
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_api_src()
     offenders = []
     cur = None
     for i, line in enumerate(src.splitlines(), 1):
@@ -286,7 +294,7 @@ def test_no_async_route_calls_blocking_io_directly():
         "_ensure_loaded()": "_ensure_loaded_async()",
         "_schedulable_extra_tasks()": "_schedulable_extra_tasks_async()",
     }
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_api_src()
     offenders = []
     cur = None
     for i, line in enumerate(src.splitlines(), 1):
@@ -365,7 +373,6 @@ def test_concurrent_cold_start_records_loaded_inside_worker(monkeypatch):
     又会有请求看到 False 再排一次队。
     """
     seen_states = []
-    real_lock = api._load_lock
 
     def fake_load():
         # 加载结束的那一刻，锁还没释放；loaded 应该已经由调用方在内部置真，
@@ -439,7 +446,8 @@ def test_two_teachers_moving_into_same_room_do_not_both_win():
         for _ in range(10):
             db = build()
 
-            def go(teacher, experiment):
+            # B023：db 是循环变量，按默认参数绑定 —— 闭包按名查会读到下一轮的值
+            def go(teacher, experiment, db=db):
                 if use_lock:
                     with api._DB_WRITE_LOCK:
                         move(db, teacher, experiment)
@@ -472,7 +480,7 @@ def test_every_apply_reschedule_call_site_holds_write_lock():
       2. 处在 `_load_default_schedule()` 内 —— 那是启动重放，整段被
          `_load_lock` 覆盖，且此时 `loaded` 尚为 False，没人能并发拿到 `_db`。
     """
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_api_src()
     lines = src.splitlines()
 
     def enclosing_def(idx):
@@ -541,7 +549,7 @@ def test_upload_and_landing_share_a_lock():
     R4 修的是"读到中间态"（空表），这轮修的是"写进被丢弃的实例"。
     两者是同一个实例替换操作的读侧和写侧。
     """
-    src = open(api.__file__, "r", encoding="utf-8").read()
+    src = _read_api_src()
     lines = src.splitlines()
 
     def body_of(name):

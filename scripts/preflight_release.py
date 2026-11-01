@@ -206,7 +206,7 @@ def main():
             detail = ("缺少源码标记：%s" % "、".join(miss)) if miss else "；".join(probs[:2])
             check("前端产物新鲜度", False,
                   f"{detail}｜先跑 cd frontend && npx vite build --outDir webui --emptyOutDir")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # ⚠️ 这一条**不能降级成 True**。
         #
         # 它是 R59 立的阻塞项：产物过期 = 用户会看到旧功能，而所有测试都绿。
@@ -265,7 +265,7 @@ def main():
                       "（前端 hash 一致也会漏掉这种状态）", blocking=False)
             else:
                 check("线上后端新鲜度", True, "仓库里的行为特征线上都有", blocking=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             check("线上后端新鲜度", True, f"探测跳过（{e}）", blocking=False)
 
     # 7. 本地 8023 预览（信息项）

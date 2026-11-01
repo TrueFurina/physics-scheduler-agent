@@ -112,7 +112,7 @@ def test_corrupt_store_falls_back_to_schedule_baseline(env):
 
 def test_corrupt_store_file_is_discarded(env):
     """坏落盘必须被丢弃 —— 否则每次启动都重跑一遍失败恢复。"""
-    db, store = env
+    _db, store = env
     store.write_text("{ 这不是 JSON", encoding="utf-8")
     api._master_data.__init__()
     api._ensure_master_data()
@@ -124,7 +124,7 @@ def test_empty_master_in_store_is_not_treated_as_authority(env):
 
     否则一次重启就把 17 个班 / 25 个项目全清空（注释里记录过实测）。
     """
-    db, store = env
+    _db, store = env
     store.write_text(json.dumps({
         "schema_version": ms.SCHEMA_VERSION,
         "schedule_fingerprint": "fp-test",
@@ -143,7 +143,7 @@ def test_empty_master_in_store_is_not_treated_as_authority(env):
 
 def test_good_store_is_restored_not_discarded(env):
     """对照组：好的落盘必须被采用，不能被误删。"""
-    db, store = env
+    _db, store = env
     master = _good_master()
     ms.save({"schedule_fingerprint": "fp-test", "master": master, "tasks": []})
 

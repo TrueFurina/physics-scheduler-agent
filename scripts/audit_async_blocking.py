@@ -104,9 +104,41 @@ def has_await(fn):
     return False
 
 
+_SCOPE_BREAK = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _own_nodes(node):
+    """遍历**自身作用域**的节点，不进入嵌套的函数/类/lambda 定义。
+
+    为什么需要这一步（2026-11-02 实测）：原来一律用 `ast.walk(fn)`，它会穿过嵌套定义，
+    于是"端点里定义了一个内层函数、内层函数调了重活"这件事会被记到**端点自己**头上。
+    典型受害者是 `/load-default`：
+        def _locked_load():
+            with _load_lock:
+                return _load_default_schedule()      # ← 这行的调用泄漏到路由
+        msg, total = await run_in_threadpool(_locked_load)
+    它**早就正确下沉线程池**了，`threaded_calls()` 也把 `_locked_load` 收进了豁免集，
+    但 `calls_in()` 仍然从内层函数体里捞出了 `_load_default_schedule`，
+    让这条路由永远被判"重活在事件循环上" —— 假阳性，且改不动。
+
+    分开之后：内层函数自身的调用由 `blocking_in_closure()` 经 `sync_fns` 单独展开，
+    仍然能抓到"重活藏在 helper 里"；只是不再冒充端点的直接调用。
+    """
+    if not isinstance(node, _SCOPE_BREAK):
+        yield from ast.walk(node)
+        return
+    stack = list(node.body)
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, _SCOPE_BREAK):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+
+
 def calls_in(fn):
     out = []
-    for node in ast.walk(fn):
+    for node in _own_nodes(fn):
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Attribute):

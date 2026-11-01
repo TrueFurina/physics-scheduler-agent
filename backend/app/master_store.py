@@ -112,7 +112,7 @@ def last_load_was_corrupt(store_path: Optional[str] = None) -> bool:
         return False
     if store_path is None:
         return True
-    return _LAST_CORRUPT == os.path.abspath(store_path)
+    return os.path.abspath(store_path) == _LAST_CORRUPT
 
 
 def consume_corrupt_flag() -> bool:

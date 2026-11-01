@@ -40,7 +40,6 @@ master_store.json 16 KB 主数据落盘
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

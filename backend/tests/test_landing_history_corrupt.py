@@ -52,7 +52,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
-import app.plan_landing as pl
 
 
 @pytest.fixture()

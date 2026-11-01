@@ -161,7 +161,7 @@ def test_conflict_count_equals_hand_placed_blocked_cells(monkeypatch):
         _place("周二", "678", "A102", TEACHERS[1]),
         _place("周三", "91011", "A103", TEACHERS[2]),
     ]
-    agent, _ = _world(monkeypatch, placed)
+    _agent, _ = _world(monkeypatch, placed)
     data = _impact()
 
     assert data["conflict_count"] == 3, "手摆了 3 个被占格子，报出的冲突数应等于 3"
