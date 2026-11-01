@@ -229,6 +229,12 @@ export interface SchoolPlanResult {
   success: boolean;
   classes_total: number;
   classes_ok: number;
+  /** 排满的班级数。后端 parallel_scheduler.py:247 一直在返回它；
+   *  前端此前只有 `classes_ok`，视图靠 `classes_complete ?? classes_ok` 兜底 ——
+   *  接口漏声明导致 `tsc --noEmit` 报 3 条 TS2339，CI 的 frontend job 因此直接红。 */
+  classes_complete?: number;
+  /** 还缺多少个「组课时」。后端 parallel_scheduler.py:253；同上，接口缺声明。 */
+  units_missing?: number;
   classes_failed: Array<{ class_name: string; error?: string | null }>;
   scheduled: number;
   units: number;
