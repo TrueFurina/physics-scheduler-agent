@@ -84,6 +84,8 @@ FILES = {
     "M48": ["tests/test_impact_analysis.py"],
     "M49": ["tests/test_land_undo_atomicity.py"],
     "M50": ["tests/test_enrich_graybox.py"],
+    "M51": ["tests/test_teacher_course_attribution.py"],
+    "M52": ["tests/test_teacher_course_attribution.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -491,6 +493,20 @@ MUTANTS = [
         '"_teacher_enriched", False):  # MUTANT: 不把自动补的算进负载\n'
         "            teacher_load[t.teacher] += 1",
         "arriving_in_batches or late_arrivals",
+    ),
+    (
+        "M51", "我的课程按子串认教师（吴琳 命中 吴琳琳 → 别人的课进我的卡片）",
+        "app/utils/excel_parser.py",
+        "            if not e.teacher or not same_teacher(teacher_name, e.teacher):",
+        "            if not e.teacher or not (teacher_name in e.teacher):  # MUTANT: 退回子串",
+        "similar_teacher_names or co_taught_cell",
+    ),
+    (
+        "M52", "卡片只报第一个时段（同一天下午的第二次课被吞掉）",
+        "app/utils/excel_parser.py",
+        '                "time_ambiguous": len(time_slots) > 1,',
+        '                "time_ambiguous": False,  # MUTANT: 不标记多时段',
+        "every_period or single_period",
     ),
 ]
 

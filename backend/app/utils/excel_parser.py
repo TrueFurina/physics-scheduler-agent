@@ -1089,8 +1089,16 @@ class ScheduleDatabase:
                     "weeks": set(),
                     # 这张卡片横跨哪些课程（逐条 resolve，口径与冲突判定同一份）
                     "courses": set(),
+                    # R48：教室与时段同样要「说全」。真实表 188 张卡片里 164 张
+                    # 横跨 >1 个 (星期,节次)（同一天下午 1 组 567、2 组 678），
+                    # 而 `room` / `original_time` 只取排序后的第一条 —— 教师看到
+                    # "周二 13:30-15:45" 会以为那天只有这一次课。
+                    # 与 R50 给课程立的判据一致：给全量 + 显式标记，不让第一条冒充整张卡片。
+                    "rooms": set(),
                 }
             groups[key]["courses"].add(resolve_course(e, courses))
+            if e.room:
+                groups[key]["rooms"].add(e.room)
             groups[key]["slots"].append({
                 "week": e.week,
                 "weekday": e.weekday,
@@ -1116,6 +1124,14 @@ class ScheduleDatabase:
             # 时间友好显示：周四 567 → 周四 13:30-15:45；
             # 跨节次记录按原表写法显示（如 14:00-17:00），见 slots[].time_text
             time_display = first.get("time_text") or TIME_DISPLAY.get(first["time_slot"], first["time_slot"])
+
+            def _slot_text(s) -> str:
+                """单条记录的「星期 时段」文案，与 `original_time` 同一套口径。"""
+                return f"{s['weekday']} {s.get('time_text') or TIME_DISPLAY.get(s['time_slot'], s['time_slot'])}"
+
+            # 去重但保持 slots_sorted 的先后顺序（最早一次在前，`original_time` 与它同源）
+            time_slots = list(dict.fromkeys(_slot_text(s) for s in slots_sorted))
+            room_list = sorted(info["rooms"])
             cards.append({
                 "course_name": info["course_name"],  # 实验项目名（apply-move 按它匹配，勿改语义）
                 "class_name": info["class_name"],
@@ -1126,7 +1142,16 @@ class ScheduleDatabase:
                 # 而不是被第一门课的名字骗过去。
                 "course_ambiguous": len(course_list) > 1,
                 "original_time": f"{first['weekday']} {time_display}",
+                # R48：这张卡片真正占用的全部时段（人读文案，顺序同 original_time）。
+                # `original_time` 保持"最早一次"不变 —— 历史申请单与 apply-move 都按它匹配，
+                # 语义不能动；要说全由 `time_slots` / `time_ambiguous` 承担。
+                "time_slots": time_slots,
+                "time_ambiguous": len(time_slots) > 1,
                 "room": first["room"],
+                # 同理：一张卡片可能跨多间教室（不同组分在不同实验室），
+                # `room` 仍是代表值，全量与标记在这里。
+                "rooms": room_list,
+                "room_ambiguous": len(room_list) > 1,
                 # 周次：连续才写区间，不连续逐周列出（见 format_week_span）
                 "week_range": format_week_span(weeks_sorted),
                 "weeks": weeks_sorted,  # 机器可读的真实周次

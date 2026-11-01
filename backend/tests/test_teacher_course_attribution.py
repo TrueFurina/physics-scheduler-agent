@@ -228,3 +228,98 @@ def test_endpoint_returns_course_attribution(monkeypatch):
     assert card["courses"] == [COURSE_B]
     assert card["weeks"] == [3]
     assert card["week_range"] == "3周"
+
+
+# ==================== 五、R48：卡片要说全「时段/教室」，且不许串到相似教师名 ====================
+#
+# 为什么还要补一轮：R50 只给**课程**立了「说全」的判据（courses 列表 +
+# course_ambiguous），同一张卡片上的教室与时段仍然只报排序后的第一条。
+# 实测 schedule.demo.xlsx（433 行 / 188 张卡片 / 13 位教师）：
+#   164 张卡片横跨 >1 个 (星期,节次) —— 占 87%；
+#   0 张卡片横跨 >1 门课程、0 张横跨 >1 间教室（该表同一项目的分组同在一间房）。
+# 也就是说「同一天下午 1 组 567、2 组 678」是这张表的常态，而卡片只说前一次。
+
+
+def test_card_lists_every_period_it_occupies():
+    """同一天下午 1 组 567、2 组 678 → 两次课都要列出来，不能只给最早那一次。
+
+    真实表形态（教师C / 2024级应用化学1、2班 / 扭摆法）：卡片旧输出
+    `original_time="周二 13:30-15:45"`、`week_range="3周"`、`total_slots=2`，
+    教师读到的是"那周一次课"，实际同一天还有 15:45-18:00 那一次。
+    """
+    d = _db([
+        _e(3, "周二", "567", "24应化2班", "1组", "扭摆法测物体转动惯量", "A504"),
+        _e(3, "周二", "678", "24应化2班", "2组", "扭摆法测物体转动惯量", "A504"),
+    ])
+    card = _one(d)
+
+    assert card["time_slots"] == ["周二 13:30-15:45", "周二 15:45-18:00"], card["time_slots"]
+    assert card["time_ambiguous"] is True, "跨两个时段却不标记 = 让教师以为只有一次课"
+    # 反向保护：`original_time` 语义不许动 —— 申请单与 apply-move 都按它匹配
+    assert card["original_time"] == card["time_slots"][0]
+    assert card["total_slots"] == 2
+
+
+def test_single_period_card_is_not_flagged_ambiguous():
+    """正向控制：只有一次课的卡片不许报"多次"，否则标记本身变成噪音。"""
+    d = _db([_e(3, "周二", "567", "24应化2班", "1组", "扭摆法测物体转动惯量", "A504")])
+    card = _one(d)
+
+    assert card["time_slots"] == ["周二 13:30-15:45"]
+    assert card["time_ambiguous"] is False
+    assert card["rooms"] == ["A504"]
+    assert card["room_ambiguous"] is False
+
+
+def test_card_reports_every_room_not_just_the_first():
+    """1 组在 A504、2 组在 A516 → 只报 A504 等于让一半学生去错地方。
+
+    真实表本轮没有这种情况（同一项目的分组同在一间房），但 `room` 取
+    `first["room"]` 的写法与 R50 批评过的"第一门课冒充整张卡片"是同一形态，
+    这里按同样判据补齐，免得换一批数据就重现。
+    """
+    d = _db([
+        _e(3, "周二", "567", "24应化2班", "1组", "声速测量", "A504"),
+        _e(5, "周二", "567", "24应化2班", "2组", "声速测量", "A516"),
+    ])
+    card = _one(d)
+
+    assert card["rooms"] == ["A504", "A516"], card["rooms"]
+    assert card["room_ambiguous"] is True
+    # 反向保护：`room` 仍是代表值（前端按单个字符串渲染，既有契约不能破）
+    assert card["room"] == "A504"
+
+
+def test_similar_teacher_names_never_bleed_into_each_other():
+    """「吴琳」的我的课程里不得出现「吴琳琳」的课（方向四：名称兜底不许串）。
+
+    过滤走 `same_teacher`（先拆个体名再判相交，绝不做子串）。一旦退化成子串，
+    这里会静默多出别人的卡片 —— 而本文件其余用例的教师名互不为子串，
+    **原有 12 例一条都抓不到**（M51 实测：注入子串后 12 passed 全绿）。
+    """
+    d = _db([
+        _e(3, "周一", "345", "24物理1班", "1组", "声速测量", "A504", teacher="吴琳"),
+        _e(5, "周三", "345", "24物理2班", "1组", "扭摆法", "A516", teacher="吴琳琳"),
+    ])
+
+    mine = d.get_teacher_courses("吴琳")
+    assert len(mine) == 1, mine
+    assert mine[0]["class_name"] == "24物理1班"
+
+    other = d.get_teacher_courses("吴琳琳")
+    assert len(other) == 1, other
+    assert other[0]["class_name"] == "24物理2班"
+
+
+def test_co_taught_cell_appears_once_per_teacher():
+    """一格写两位教师（「吴琳、吴琼」）→ 两人各得一张卡，本人名下不许重复。
+
+    真实表里本轮没有这种格子（实测 13 位教师名无一含分隔符），但这是
+    「合授」唯一的表现形式：既要两人都看得到，也不能给同一人发两张。
+    """
+    d = _db([_e(3, "周一", "345", "24物理1班", "1组", "声速测量", "A504", teacher="吴琳、吴琼")])
+
+    for who in ("吴琳", "吴琼"):
+        cards = d.get_teacher_courses(who)
+        assert len(cards) == 1, (who, cards)
+        assert cards[0]["course_name"] == "声速测量"
