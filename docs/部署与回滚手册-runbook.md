@@ -88,12 +88,94 @@
 ## 10. 冻结状态与解冻三决策（用户拍板，非工程缺陷）
 
 - **冻结**：2026-10-23 起发布永久冻结，线上永停（D-9 态）。
+  **2026-11-01 已解冻**：用户要求废弃旧链接并重发，现网状态见第 11 节。
 - **解冻需用户拍板三件事**：
-  1. 是否解除发布冻结；
+  1. ~~是否解除发布冻结~~ → **已拍板：解除，并已重发**（2026-11-01）；
   2. 是否开通 D-8 第二真实登录账号（A 提交 → 用户审批）；
   3. 轻微冲突强制通过的 PII 口径（`/upload-student` 维持 `require_admin` 且前端零调用，不顺手放开）。
 - 上述任一项变动都属于产品决策，不在本工程收尾范围内。
 - 注：教室容量不校验**已确认非痛点**（一个教室一个班级，容量结构性自保证），不做相关改造。
+
+## 11. 云端发布态（sites 沙箱，2026-11-01 起）
+
+现网：`https://physics-lab-scheduler.apps.workbuddy.host/?sharecode=FIEB2FPH6U`
+应用 `wbapp_vrw4Hly0FOsTFNpB6gJRmz`；发布源 `E:/physics-scheduler-deploy`。
+
+### 11.1 发布源必须从「工作树」导出，且不能直发仓库根
+
+发布工具只排除 `node_modules/.git/build output`，**不认 `.gitignore`**。直发仓库根会把
+`env.local`（真实 LLM 密钥）、`schedule.xlsx`（真实教师数据）、`scheduler.db` 一起传上云。
+
+```bash
+rm -rf /e/physics-scheduler-deploy && mkdir -p /e/physics-scheduler-deploy
+tar -cf - --exclude='./.git' --exclude='./.tmp' --exclude='node_modules' \
+  --exclude='./.ruff_cache' --exclude='./.pytest_cache' --exclude='./.box-agent*' \
+  --exclude='./.workbuddy' --exclude='./.workbuddy-ai' --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='./env.local' --exclude='*.db' --exclude='*.genie' --exclude='*.pdf' --exclude='./frontend/dist' \
+  . | tar -xf - -C /e/physics-scheduler-deploy
+```
+
+为什么用 `tar` 而不是 `git archive HEAD`：后者只等于**提交态**。实测本地工作树曾有
+20 文件 / 618 行未提交改动（含 `reschedule.py` 与重建的 `frontend/webui`），
+按 HEAD 发布会得到「界面和代码都不是你本地那份」，且前端资产指纹能直接看出差异。
+
+### 11.2 启动参数（含必须项）
+
+```
+APP_ENV=production ADMIN_PASS=<20 位强口令> APP_SECRET_KEY=<固定密钥> \
+DEMO_MODE=1 OPENBLAS_NUM_THREADS=1 python run.py
+```
+
+- `APP_ENV=production` 只 gate 口令策略（缺失即启动失败、长度 <16 报错），不影响业务分支。
+- **`APP_SECRET_KEY` 必须带**：不带则每次发布进程重启后所有管理员会话失效（实测）。
+  带上之后实测「拿 token → 重新发布 → 同一 token 仍 200」。
+- 口令与会话密钥**只存在于部署配置**，不写进仓库、不落盘、不入库。换口令＝改 `startCmd` 重发。
+- `DEMO_MODE=1` 才有 `/demo/reset`（演示前一键复位），该端点需管理员会话。
+
+### 11.3 三条实测约束（踩过的坑）
+
+1. **鉴权只能走 `X-Admin-Token`**：边缘代理会覆盖 `Authorization`。同一 token 实测
+   `X-Admin-Token` → 200、`Authorization: Bearer` → 401「会话已失效」。前端本来就用自定义头，
+   浏览器不受影响；**脚本 / Postman / 第三方集成按标准 Bearer 会全部失败**。
+2. **分享链接会种 cookie**：带 `?sharecode=` 首次访问返回 `Set-Cookie: __wb_rsc=…`（30 天），
+   之后 SPA 的 `/api/*` 凭 cookie 通行；**不带 cookie 直连接口一律 403**（2988B，非应用故障）。
+3. **上传的表是临时的**：`/upload` 只写进进程内存，重新发布立刻回落到镜像里的
+   `schedule.xlsx`。实测「上传脱敏表→线上变教师H→重新发布→回落真实表」。
+
+### 11.4 数据在哪、什么会丢
+
+| 数据 | 位置 | 重新发布 | 沙箱回收 |
+|---|---|---|---|
+| 安排表（权威） | 镜像 `schedule.xlsx` | 被覆盖（＝发版） | 随镜像重建 |
+| 上传的表 | 进程内存 + data 目录 | **失效，回落镜像表** | 丢 |
+| 工单 `requests.db` / 主数据 `master_store.json` | 沙箱磁盘 | **保留**（实测） | 丢 |
+
+结论：**改数据 = 改本地表 → 重新导出发布目录 → 再发一次**；线上直接传只对当次有效。
+需要留档时用 `GET /api/reschedule/requests/export` 与 `/export/master-workbook` 导出。
+
+### 11.5 演示前检查清单（云端，4 步约 10 秒）
+
+1. `POST /api/reschedule/demo/reset`（管理员）→ 期望「课表已重载」
+2. `GET /api/reschedule/data-audit` → 期望 433 条 / 13 教师 / 1 处「林珠云」教师冲突
+3. `GET /api/reschedule/export/class-schedule` → 期望合法 xlsx（约 41KB）
+4. 首页 `<title>` = 物理学科智能排课选课系统
+
+### 11.6 性能基线（云端 vs 本地，2026-11-01 实测）
+
+| 路径 | 云端 | 本地 |
+|---|---|---|
+| 全校一键 `/auto-schedule` | 17.4s（求解 14.7s），171/171 段 | 16.5s（求解 16.4s） |
+| 并行 `/parallel/solve-all` | 14.4s（求解 11.8s），17/17 班、410/410 课时 | 同级 |
+| 导出班级课表 | 2.6s / 41KB | — |
+
+结论：**算力不是瓶颈**，云端与本地同级。
+
+### 11.7 已知平台限制（非代码缺陷）
+
+- **无外部数据库、无备份**：只有单端口 + 沙箱磁盘，沙箱回收即丢，需靠导出留档。
+- **无 LLM 密钥**：`env.local` 里的 ZHIPU/DEEPSEEK 等未上云，`/chat` 静默降级为规则解析，
+  `ai_plans` 恒空。要演示「AI 出候选方案」必须显式注入密钥（有额度成本）。
+- **公开链接＝公开管理入口**：拿到链接的人都能看到登录页，口令是唯一门禁（已换 20 位强口令）。
 
 ---
 
