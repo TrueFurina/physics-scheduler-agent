@@ -12,6 +12,8 @@ import {
 import { withRetry, whenIdle } from './utils/async';
 import { describeApiError } from './utils/apiError';
 import { clearStaleLoadBanner } from './utils/msg';
+import { downloadBlob } from './utils/download';
+import { EXPORT_KINDS } from './utils/exportKinds';
 import ErrorBoundary from './components/ErrorBoundary';
 import type { View, ImpactResult, AiPlan, NlSlotContext, ScheduleGrid } from './types';
 import IdentityView from './views/IdentityView';
@@ -297,19 +299,6 @@ function App() {
     if (parallelResult) parallelResultRef.current?.scrollIntoView({ block: "start" });
   }, [parallelResult]);
 
-  // blob → 浏览器下载。⚠️ 后端出错时返回的是 JSON，浏览器照样会下成一个 .xlsx，
-  // 所以校验走接口侧（导出接口只返回 xlsx），这里不额外猜内容。
-  const downloadBlob = (data: any, filename: string) => {
-    const url = window.URL.createObjectURL(new Blob([data]));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(url);
-  };
-
   // 并行排课：方案导出 Excel（blob 触发浏览器下载）
   const handleParallelExport = async () => {
     if (!parallelResult?.schedule) return;
@@ -321,12 +310,6 @@ function App() {
     }
   };
 
-  // 教务标准课表 + 基础数据台账（都基于当前安排表，不是新排的方案）
-  const EXPORT_KINDS: Record<string, { label: string; file: string }> = {
-    class: { label: '班级课表', file: '班级课表_全部班级.xlsx' },
-    room: { label: '场地课表', file: '场地课表_全部场地.xlsx' },
-    master: { label: '基础数据台账', file: '实验排课基础数据台账.xlsx' },
-  };
   // 导出中状态：班级课表要 17 个 sheet，实测约 750ms（openpyxl 每 sheet 固定开销），
   // 场地课表约 500ms。没有反馈时用户会重复点击，导致重复下载。
   // 用 kind 而不是布尔值：可区分"正在导班级课表"与"正在导台账"。
