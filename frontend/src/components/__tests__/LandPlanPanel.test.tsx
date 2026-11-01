@@ -9,6 +9,7 @@
  *  4. has_changes=false 时说"无需写入"，不给确认按钮；
  *  5. 未登录管理员时采纳/撤销走 onRequireLogin，绝不调写接口（不能假装能写）；
  *  6. 撤销成功后 rolled_back_moves>0 时，顶部横幅必须带出"一并回滚 N 条调课"。
+ *  7. 采纳横幅**用后端 message**，前端不再自拼数字（R60；无差异落地时尤其明显）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -143,6 +144,29 @@ describe('LandPlanPanel', () => {
     expect(onMsg).toHaveBeenCalledWith(expect.stringContaining('7 → 6 条'));
     // 状态刷新：撤销入口应出现（ landed: true 后第二次 landStatus）
     expect(vi.mocked(rescheduleApi.landStatus).mock.calls.length).toBeGreaterThanOrEqual(2);
+    confirmSpy.mockRestore();
+  });
+
+  it('横幅用后端回执 message —— 无差异落地时不再自拼"N 行写入"', async () => {
+    // R60：后端把回执说全了（四个账 / 长实验截短 / 能否撤销），前端只负责显示。
+    // 这条守的是"前端不自己编数字"：旧代码在 has_changes=false 时仍说"2 行写入"，
+    // 而那 2 行一个字都没改。
+    const RECEIPT = '✅ 已记录一次落地（2 条方案行 / 2 个单元），但安排表**没有任何变化**';
+    vi.mocked(rescheduleApi.landStatus).mockResolvedValue({ data: { landed: false } } as any);
+    vi.mocked(rescheduleApi.landPreview).mockResolvedValue({ data: DIFF } as any);
+    vi.mocked(rescheduleApi.landCommit).mockResolvedValue({
+      data: { ...DIFF, has_changes: false, landed_at: '2026-11-02T04:35:12.000001', message: RECEIPT },
+    } as any);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    // 前面用例已经点过一次采纳，mock 调用记录会累计 —— 不清就从"本次点了 1 次"变成 2 次
+    vi.mocked(rescheduleApi.landCommit).mockClear();
+    const { onMsg } = renderPanel(true);
+    fireEvent.click(screen.getByRole('button', { name: /落地为正式安排表/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /确认采纳/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /确认采纳/ }));
+    await waitFor(() => expect(rescheduleApi.landCommit).toHaveBeenCalledTimes(1));
+    expect(onMsg).toHaveBeenCalledWith(RECEIPT);
+    expect(onMsg).not.toHaveBeenCalledWith(expect.stringContaining('行写入'));
     confirmSpy.mockRestore();
   });
 

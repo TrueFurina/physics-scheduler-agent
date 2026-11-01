@@ -142,7 +142,12 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       const r = await rescheduleApi.landCommit(schedule);
       setDiff(r.data);
       await loadStatus();
-      onMsg(`✅ 已落地为正式安排表：${r.data.plan_rows} 行写入，安排表 ${r.data.before_entries} → ${r.data.after_entries} 条。`
+      // R60：横幅以后端回执为准。此前是前端自拼"${plan_rows} 行写入" —— 在
+      // 「方案与安排表完全一致」的落地里，那几行一个字都没改，横幅却说写入了；
+      // 而后端 message 分得出"已落地"与"记录了一次落地但没有任何变化"，
+      // 还会点名被截短的长实验。缺 message 才退回旧的兜底文案（老后端兼容）。
+      onMsg(r.data.message
+        || `✅ 已落地为正式安排表：${r.data.plan_rows} 行写入，安排表 ${r.data.before_entries} → ${r.data.after_entries} 条。`
         + '其他模块重新进入即可看到最新安排；如需回退用「↩️ 撤销落地」。');
     } catch (err: any) {
       if (isAuthError(err)) {

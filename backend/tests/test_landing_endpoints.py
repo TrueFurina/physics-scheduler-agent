@@ -15,12 +15,17 @@ R55 给 `plan_landing` 加了 `actor` / `revoke` / `history`，并新增了
 
 功能的"接线"没人守，函数再对也没用。**这层测试存在的唯一理由，就是这种事。**
 
-锁五条契约：
+锁五条契约（R60 又追加两条，见文末）：
 1. `POST /parallel/land` 的响应带 `landed_by`，且库里 `actor` 真是那个管理员；
 2. `GET /parallel/land/history` 存在、要管理员、返回 `{total,active,revoked,history}`；
 3. 撤销后该条在历史里标成 `revoked=true` 并带上 `revoked_by`（不删行）；
 4. `GET /parallel/land/status` 带 `landed_by`；
 5. 无令牌访问 history → 401（不能因为"只是看看历史"就放开）。
+
+R60 追加两条（R50 断点②）：
+6. `POST /parallel/land` 的响应里有**人话** `message`，四个差异账齐全；
+7. 同一方案再落一次（无差异）时，`message` 明说"没有任何变化"而不是复读"已落地"。
+   —— 这两条守的是"回执"本身：字段没了，前端会把它渲染成空白，而不是报错。
 """
 import os
 import sys
@@ -134,3 +139,43 @@ def test_history_requires_admin(env):
     r = client.get("/api/reschedule/parallel/land/history")
 
     assert r.status_code == 401, f"历史接口被裸奔访问了：{r.status_code}"
+
+
+# ------------------------------------------------------------------ R60 追加
+
+def test_land_commit_returns_human_message(env):
+    """落地回执里必须有一句人话，且四个差异账都在。
+
+    R50 断点②：这一步是整条链路里唯一拿不到 message 的写操作，前端只好自己拼
+    文案 —— 于是"落地成功"在界面上可能只剩一个数字。字段被回退时，前端会渲染
+    出空白而不是报错，**这类缺失只有接线测试守得住**。
+    """
+    client, headers = env
+    r = client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    msg = body.get("message")
+    assert isinstance(msg, str) and msg, f"落地回执没有 message：{body.keys()}"
+    assert msg.startswith("✅ 已落地 1 条方案行（1 个单元）"), msg
+    for frag in ("新增 0 个单元", "调整 1 个", "未覆盖保留 1 个（1 行）", "原样保留 0 个"):
+        assert frag in msg, f"回执缺账目「{frag}」：{msg}"
+    assert "安排表仍 2 条" in msg, msg
+    assert "由 admin 落地" in msg, msg
+
+
+def test_land_commit_message_admits_no_change(env):
+    """同一方案再落一次：回执必须说"没有任何变化"，不能复读"已落地 N 条"。
+
+    第二次落地时接口仍返回 200、库里仍多一条记录，但安排表一个字节都没动。
+    若回执照抄第一次的措辞，教秘会以为又改了一轮 —— 这正是"写路径不实"。
+    """
+    client, headers = env
+    first = client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers).json()
+    assert "没有任何变化" not in first["message"]
+
+    second = client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers)
+    assert second.status_code == 200, second.text
+    msg = second.json()["message"]
+    assert "没有任何变化" in msg, msg
+    assert "1 个单元与现有安排完全一致" in msg, msg
+    assert "已落地" not in msg, f"无差异时不能说「已落地」：{msg}"

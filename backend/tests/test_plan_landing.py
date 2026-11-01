@@ -180,6 +180,75 @@ def test_diff_reports_uncovered_units_as_kept():
     assert any("长实验" in ls["unit"] for ls in d["long_sessions"])
 
 
+# ------------------------------------------------- 1.5 落地回执（R60，纯函数）
+
+def test_receipt_reads_all_four_ledgers():
+    """回执必须把四个账都念出来 —— 只报 after_entries 等于没说。
+
+    同一句"410 条"，可以是全新排的 410 条，也可以是原封不动又落了一遍；
+    教秘分不出来时，回执就只是让人安心的装饰。
+    """
+    d = plan_landing.diff_plan(_plan_a(), _base_entries())
+    msg = plan_landing.landing_receipt(d, landed_at="2026-11-02T04:35:12.123456",
+                                       actor="admin")
+    assert msg.startswith("✅ 已落地 4 条方案行（4 个单元）")
+    for frag in ("新增 0 个单元", "调整 4 个", "未覆盖保留 0 个（0 行）", "原样保留 0 个"):
+        assert frag in msg, f"回执缺账目「{frag}」：{msg}"
+    # 状态迁移要能对上：7 行 → 6 行（2 条非可排原样保留，长实验 2 行并 1 行）
+    assert "安排表 7 → 6 条" in msg
+    assert "2 条绪论/考核类" in msg, "没解释条数为什么少了"
+    # 时间格式化成人能读的形态，且带上操作人
+    assert "🕒 2026-11-02 04:35:12" in msg
+    assert "由 admin 落地" in msg and "撤销" in msg
+
+
+def test_receipt_says_no_change_when_nothing_changed():
+    """没有差异时不许只回一个全 0 的 diff —— 必须明说"没有任何变化"。
+
+    这是最容易骗人的一种落地：接口 200、库里有记录、教秘以为课表变了。
+    """
+    entries = _base_entries()
+    # 方案与现有安排逐字段一致（含长实验的 blocked 口径）
+    plan = [
+        {"class_name": "甲班", "project": "项目A", "group": "1组", "week": 2,
+         "weekday": "周一", "time_slot": "567", "room": "A410", "teacher": "吴老师"},
+        {"class_name": "甲班", "project": "项目A", "group": "2组", "week": 2,
+         "weekday": "周一", "time_slot": "678", "room": "A410", "teacher": "林老师"},
+        {"class_name": "甲班", "project": "项目B", "group": "1组", "week": 3,
+         "weekday": "周二", "time_slot": "567", "room": "A412", "teacher": "吴老师"},
+    ]
+    d = plan_landing.diff_plan(plan, entries)
+    assert d["has_changes"] is False and d["unchanged_units"] == 3
+    msg = plan_landing.landing_receipt(d, landed_at="2026-11-02T04:35:12.000001")
+    assert "没有任何变化" in msg
+    assert "3 个单元与现有安排完全一致" in msg
+    assert "安排表仍 7 条" in msg, "无变化时不能写成'7 → 7'来假装发生了迁移"
+    # 方案只覆盖 3 个单元，「长实验」没覆盖（2 行）—— 无变化分支也必须报出来，
+    # 否则"没有变化"会被读成"方案覆盖了全部"。
+    assert "另有 1 个单元不在方案里（2 行，原样保留）" in msg, msg
+    assert "已落地" not in msg, "无变化时不能说'已落地 N 条'——那是它没做的事"
+    assert "由" not in msg, "没给 actor 时不能编一个出来"
+
+
+def test_receipt_names_long_sessions_and_hides_duplicate_warning():
+    """长实验截短必须单独点名（唯一的静默数据变更），且不与 warnings 重复计数。"""
+    d = plan_landing.diff_plan(_plan_a(), _base_entries())
+    msg = plan_landing.landing_receipt(d)
+    assert "1 个单元的长实验会被截短" in msg
+    assert "补回第二时段" in msg
+    # 本场景 warnings 只有长实验那一条，已被单独点名 ⇒ 不许再补一句"另有 0 条"
+    assert len(d["warnings"]) == 1
+    assert "条提醒" not in msg, f"同一条警告被念了两遍：{msg}"
+    assert "🕒" not in msg, "没给落地时间时不该出现时间行"
+
+
+def test_receipt_handles_empty_diff_without_crashing():
+    """空方案走的是 400，但异常路径不该在下游抛 —— 回执对空 diff 要能兜住。"""
+    msg = plan_landing.landing_receipt({})
+    assert msg.startswith("✅ 已记录一次落地（0 条方案行 / 0 个单元）")
+    assert "没有任何变化" in msg
+
+
 def test_normalize_reports_missing_fields_and_rejects_empty():
     with pytest.raises(plan_landing.PlanValidationError) as e:
         plan_landing.normalize_plan([{"class_name": "甲班", "project": "X"}])

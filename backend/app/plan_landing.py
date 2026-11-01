@@ -224,6 +224,90 @@ def diff_plan(plan_rows: List[dict], entries: List) -> dict:
     }
 
 
+def landing_receipt(diff: dict, landed_at: str = "", actor: str = "") -> str:
+    """落地回执：一句话说清"这次到底改了什么、能不能撤"。pure：只读 diff。
+
+    为什么要这个函数（R60）
+    ----------------------
+    `/parallel/land` 是这条链路里唯一一个**只回 diff 结构、不回人话**的写端点
+    （`/upload`、`/load-default`、`/master/*` 都回 message）。于是前端各自拼文案：
+    有的只显示 `after_entries`，有的干脆不显示。教秘看不到"改了哪些、有没有被
+    截短、能不能撤"，也就无从判断这次落地是不是他要的那一份 —— 与 R-36
+    「写路径的任何不实都必须可见」同一条线。
+
+    措辞口径（每一条都对应一种"看着成功、其实不是"的情形）：
+
+    - **四个账都要念出来**：新增 / 调整 / 未覆盖保留 / 原样保留。只报
+      `after_entries` 时，"410 条"既可能是全新排的，也可能是原封不动又落了一遍。
+    - **`has_changes` 为假必须明说"没有任何变化"**。否则"落地成功"与"落地没生效"
+      在回执上长得一模一样，教秘只能靠刷新页面猜。
+    - **长实验截短单独点名**：这是落地唯一的静默数据变更（原表 2 行 → 方案 1 行）。
+      它只出现在 `warnings` 列表里时等于没说 —— 列表会被人一眼跳过。
+    - **时间与操作人写进回执**：落地是可追责的写操作，"什么时候、谁落的"不该
+      只存在于另一个面板里。
+    """
+    plan_rows = int(diff.get("plan_rows") or 0)
+    plan_units = int(diff.get("plan_units") or 0)
+    added = diff.get("added") or []
+    changed = diff.get("changed") or []
+    uncovered = diff.get("uncovered") or []
+    uncovered_rows = sum(len(u.get("rows") or []) for u in uncovered)
+    unchanged = int(diff.get("unchanged_units") or 0)
+    long_sessions = diff.get("long_sessions") or []
+    warnings = diff.get("warnings") or []
+    before = diff.get("before_entries")
+    after = diff.get("after_entries")
+
+    if diff.get("has_changes"):
+        # 有改动：四个账逐一念。`unchanged_units` 也要念 —— 它回答的是
+        # "有多少单元我压根没碰"，那是教秘核对"是不是少排了"的基数。
+        head = (f"✅ 已落地 {plan_rows} 条方案行（{plan_units} 个单元）："
+                f"新增 {len(added)} 个单元、调整 {len(changed)} 个、"
+                f"未覆盖保留 {len(uncovered)} 个（{uncovered_rows} 行）、"
+                f"原样保留 {unchanged} 个")
+    else:
+        head = (f"✅ 已记录一次落地（{plan_rows} 条方案行 / {plan_units} 个单元），"
+                f"但安排表**没有任何变化**")
+        if unchanged:
+            head += f"：{unchanged} 个单元与现有安排完全一致，无需改动"
+        if uncovered:
+            # 无变化分支同样要报未覆盖：否则"没变化"读起来像"方案覆盖了全部"，
+            # 实际可能是求解只排了一半、另一半原样留在表里。
+            head += (f"；另有 {len(uncovered)} 个单元不在方案里"
+                     f"（{uncovered_rows} 行，原样保留）")
+
+    if before is not None and after is not None:
+        if before == after:
+            head += f"；安排表仍 {after} 条"
+        else:
+            head += f"；安排表 {before} → {after} 条"
+    nonsched = int(diff.get("untouched_nonsched") or 0)
+    if nonsched:
+        # 有它才解释得通"为什么方案只覆盖一部分单元，条数却没少"
+        head += f"（含 {nonsched} 条绪论/考核类不参与排课，原样保留）"
+
+    if long_sessions:
+        names = "、".join(str(ls.get("unit") or "?") for ls in long_sessions[:3])
+        if len(long_sessions) > 3:
+            names += f" 等 {len(long_sessions)} 个单元"
+        head += (f"\n⚠️ {len(long_sessions)} 个单元的长实验会被截短"
+                 f"（原表同一天占多个节次，方案每单元只给一节）：{names}。"
+                 f"请确认，或落地后在教务系统补回第二时段")
+
+    if warnings and not long_sessions:
+        # 长实验已在上一行单独点名，这里只说"还有几条"，细节留在 diff.warnings
+        head += f"\n⚠️ 另有 {len(warnings)} 条提醒（详见响应里的 warnings）"
+    elif warnings and long_sessions and len(warnings) > 1:
+        head += f"\n⚠️ 另有 {len(warnings) - 1} 条提醒（详见响应里的 warnings）"
+
+    if landed_at:
+        when = landed_at.replace("T", " ")[:19]
+        head += f"\n🕒 {when}"
+        head += f"，由 {actor} 落地" if actor else " 落地"
+        head += "；可在「落地历史」里撤销"
+    return head
+
+
 # ---------------------------------------------------------------------------
 # 快照（撤销用）
 # ---------------------------------------------------------------------------

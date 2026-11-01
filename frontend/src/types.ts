@@ -347,6 +347,14 @@ export interface LandPlanDiff {
   has_changes: boolean;
   /** 仅采纳响应带 */
   landed_at?: string;
+  /**
+   * 仅采纳响应带：后端给的落地回执（R60）。
+   *
+   * 界面直接显示它，**不要再自己拼数字** —— 前端自拼的句子在"无差异落地"
+   * 时仍会说"N 行写入"，而那 N 行一个字都没改；后端回执已经把四个差异账、
+   * 长实验截短、能否撤销说全了。
+   */
+  message?: string;
 }
 
 /** `/parallel/land/status`：当前落地状态（供界面显示撤销入口）。 */

@@ -1767,6 +1767,11 @@ async def land_commit(req: LandPlanRequest, land_by: str = Depends(require_admin
                  "after_entries": applied["total"],
                  # R58：谁落的 —— 撤销/历史面板要能对上人
                  "landed_by": rec.get("actor") or land_by or ""})
+    # R60：这条链路唯一拿不到人话回执的一步（R50 断点②）。四个差异账、长实验
+    # 截短、能不能撤，全部由 `landing_receipt` 一次说完。放在 update 之后算 ——
+    # 用的是**实际写入后**的 after_entries，不是 diff 推算值。
+    diff["message"] = plan_landing.landing_receipt(
+        diff, landed_at=rec["landed_at"], actor=diff["landed_by"])
     return diff
 
 
