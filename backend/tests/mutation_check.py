@@ -86,6 +86,8 @@ FILES = {
     "M50": ["tests/test_enrich_graybox.py"],
     "M51": ["tests/test_teacher_course_attribution.py"],
     "M52": ["tests/test_teacher_course_attribution.py"],
+    "M53": ["tests/test_import_wizard.py"],
+    "M54": ["tests/test_import_wizard.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -337,9 +339,13 @@ MUTANTS = [
     (
         "M30", "追问分支少返回契约字段",
         "app/agent/reschedule_agent.py",
+        # R49：锚点补上后来新增的 `ai_plans_source` —— 少了这一行锚点就整段失配，
+        # 变异体被静默 SKIP（`mutation_check.py` 的退出码不看 SKIP），
+        # 于是"追问分支少返回契约字段"这条一直在报"全检出"，其实什么都没验。
         """            "course_name": parsed.get("course_name"),
             "course_unrecognized": not parsed.get("course_name"),
             "ai_plans": [],
+            "ai_plans_source": "none",
             "total": 0,
         }""",
         """        }  # MUTANT: 追问分支退回到 8 键""",
@@ -507,6 +513,20 @@ MUTANTS = [
         '                "time_ambiguous": len(time_slots) > 1,',
         '                "time_ambiguous": False,  # MUTANT: 不标记多时段',
         "every_period or single_period",
+    ),
+    (
+        "M53", "清单上传回执不说明整批替换掉了几条",
+        "app/api/reschedule.py",
+        "    replaced = len(_master_tasks)",
+        "    replaced = 0  # MUTANT: 不报替换了多少条",
+        "replaced",
+    ),
+    (
+        "M54", "清单预览不报现有清单条数（看不出提交会整批换掉什么）",
+        "app/api/reschedule.py",
+        '    report["existing_tasks"] = len(_master_tasks)',
+        '    report["existing_tasks"] = 0  # MUTANT: 预览不报现有条数',
+        "will_replace",
     ),
 ]
 

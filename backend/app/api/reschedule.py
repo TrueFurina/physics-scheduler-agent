@@ -458,13 +458,25 @@ async def upload_master(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
 
+    # R49：记下"这次换掉了多少条"再清空。
+    #
+    # 本端点是**整批替换**（再传一份就覆盖，不累加）。教秘若已有一份清单，
+    # 提交后旧的整份消失 —— 这是设计（见 `clear_master_tasks`），不是缺陷；
+    # 缺陷在说明：回执只说"已读入 N 条"，教秘无从知道还有 M 条被换掉了。
+    # ⚠️ 这个数是**提交时刻**的真实值，不是预览时刻的值 —— 两者不一致就说明
+    # 这期间有人传过新清单，而教秘看到的就是这里的实际值（以实际结果为准）。
+    replaced = len(_master_tasks)
     _master_tasks.clear()
     _master_tasks.extend(tasks)
     await _persist_master_state_async()
+    msg = f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）"
+    if replaced:
+        msg += f"\n♻️ 已整批替换原有 {replaced} 条清单（清单不累加，再传一份会整体覆盖）"
     return {
         "success": True,
-        "message": f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）",
+        "message": msg,
         "total_tasks": len(tasks),
+        "replaced_tasks": replaced,
         "classes": sorted({t.class_name for t in tasks}),
         "report": report,
     }
@@ -763,6 +775,11 @@ async def master_tasks_preview(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"清单解析失败：{e!s}")
+    # R49：确认（`/upload-master`）是**整批替换**语义（先 clear 再 extend），
+    # 而预览只说"将读入 N 条"—— 教秘读到的是"再加 N 条"。
+    # 行为不改（替换本来就是这套清单的设计，见 `clear_master_tasks` 的说明），
+    # 补的是**说明**：把"现有几条、会被整体换掉"一并给出，让预览与提交对得上。
+    report["existing_tasks"] = len(_master_tasks)
     return {"success": True, "kind": "tasks", "data": report}
 
 

@@ -486,3 +486,135 @@ def test_no_new_entities_keeps_message_plain(api_env):
     d = r.json()
     assert d["stats"]["teachers"]["added"] == 0
     assert "本次新建" not in (d.get("message") or ""), "没有新增却加了「本次新建」段落"
+
+
+# ---------------------------------------------------------------------------
+# R49：清单导入的**时序竞态** —— 预览 → 提交之间，被替换掉的是哪一份
+#
+# 前面 17 条把「预览不改数据」守得很密（242/278/296/330），但那批锁的都是
+# 「同一份数据前后两次读」。真正没人认领的是两阶段之间的**语义**：
+#
+#   `/upload-master` 是**整批替换**（先 clear 再 extend，不累加）。
+#   教秘手里已有一份 2 条清单时再传一份 3 条的，得到的是 3 条、不是 5 条 ——
+#   这个行为是对的（见 `clear_master_tasks` 的说明），**错的是说明**：
+#
+#     预览： 「将读入 3 条」        ← 听起来像"加 3 条"
+#     提交： 「已读入 3 条主数据任务」← 不提旧的 2 条去哪了
+#
+# 教秘无从知道自己刚换掉了什么；若这期间别人也传过一份清单，
+# 他连"换掉的那份还是不是自己预览时看到的那份"都不知道。
+#
+# 与 M47（台账导入的 `reports_drift`）不是同一条：M47 守的是**台账**
+# `/master/import`（只增补），这里守的是**清单** `/upload-master`（整批替换）。
+# ---------------------------------------------------------------------------
+
+
+def _task_list_bytes(rows):
+    """造一份清单（课程/班级/实验项目/学生组）；rows 为 (班级, 项目, 组)。"""
+    buf = io.BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "实验项目清单"
+    ws.append(["课程", "班级", "实验项目", "学生组"])
+    for cls, exp, grp in rows:
+        ws.append(["大学物理实验", cls, exp, grp])
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _two_tasks():
+    return _task_list_bytes([("25级新专业", "迈克耳孙干涉", "1组"),
+                             ("25级新专业", "声速测量", "2组")])
+
+
+def _five_tasks():
+    return _task_list_bytes([("26级新专业", f"实验项目{i}", f"{i}组") for i in range(1, 6)])
+
+
+def test_tasks_preview_says_what_the_upload_will_replace(api_env):
+    """预览必须说出「现有几条会被换掉」—— 提交是整批替换，不是累加。
+
+    ⚠️ 空转检查（M54）：把 `existing_tasks` 抹成 0，本例必须红。
+    只断言 `tasks == 3` 是假绿 —— 那是已有用例 `test_tasks_preview_...`
+    早就验过的"预览行数"，本例验的是"预览有没有说清代价"。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    r = _post_file(client, "/api/reschedule/upload-master", _two_tasks(), _admin_headers())
+    assert r.status_code == 200, r.text[:300]
+    assert client.get("/api/reschedule/master-status").json()["data"]["master_tasks"] == 2
+
+    three = _task_list_bytes([("25级新专业", "迈克耳孙干涉", "1组"),
+                              ("25级新专业", "声速测量", "2组"),
+                              ("25级新专业", "牛顿环", "3组")])
+    pv = _post_file(client, "/api/reschedule/master/tasks-preview", three, _admin_headers())
+    assert pv.status_code == 200, pv.text[:300]
+    d = pv.json()["data"]
+    assert d["tasks"] == 3, "前提：新清单 3 条"
+    assert d.get("existing_tasks") == 2, (
+        "预览只说「将读入 3 条」，没说现有 2 条会被**整体换掉** —— "
+        f"教秘会以为提交后是 5 条。实际 data 键：{sorted(d)}"
+    )
+
+
+def test_upload_master_says_how_many_it_replaced(api_env):
+    """提交回执必须说出换掉了几条，且真的没把新旧累加在一起。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    _post_file(client, "/api/reschedule/upload-master", _two_tasks(), _admin_headers())
+
+    one = _task_list_bytes([("26级新专业", "迈克耳孙干涉", "1组")])
+    r = _post_file(client, "/api/reschedule/upload-master", one, _admin_headers())
+    assert r.status_code == 200, r.text[:300]
+    d = r.json()
+
+    assert d["total_tasks"] == 1
+    assert client.get("/api/reschedule/master-status").json()["data"]["master_tasks"] == 1, \
+        "整批替换被写成了累加（1 + 2 = 3 条）"
+    assert d.get("replaced_tasks") == 2, f"结构化字段没报替换条数：{d.get('replaced_tasks')!r}"
+    msg = d.get("message") or ""
+    assert "原有 2 条" in msg, (
+        "回执只说「已读入 1 条」，没说旧的 2 条被换掉了 —— "
+        f"教秘不知道它们去哪了。实际 message：{msg!r}"
+    )
+
+
+def test_upload_reports_replaced_count_at_commit_time(api_env):
+    """预览之后清单被别人换过 → 回执报的必须是**提交时**的数量，不是预览时的。
+
+    场景（这正是「预览 → 提交」之间那段窗口）：
+        预览 B：现有 2 条（existing_tasks=2）
+        中间  ：另一位教秘传了 5 条的清单
+        提交 B：实际换掉的是 5 条
+
+    回执若照着预览报 2 条，教秘拿着"换掉 2 条"的印象去核对，
+    会对不上 —— 数字都是真的，描述的却不是同一件事（R54/M47 同族）。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    _post_file(client, "/api/reschedule/upload-master", _two_tasks(), _admin_headers())
+
+    one = _task_list_bytes([("26级新专业", "迈克耳孙干涉", "1组")])
+    pv = _post_file(client, "/api/reschedule/master/tasks-preview", one, _admin_headers()).json()
+    assert pv["data"]["existing_tasks"] == 2, "前提：预览时看到的是 2 条"
+
+    # 中间：别处先传了一份 5 条的清单
+    mid = _post_file(client, "/api/reschedule/upload-master", _five_tasks(), _admin_headers())
+    assert mid.json()["total_tasks"] == 5
+
+    r = _post_file(client, "/api/reschedule/upload-master", one, _admin_headers()).json()
+    msg = r.get("message") or ""
+    assert "原有 5 条" in msg, (
+        "回执报的是预览时的 2 条 —— 提交时实际换掉的是 5 条，"
+        f"说明里的数必须与实际结果一致。实际 message：{msg!r}"
+    )
+    assert "原有 2 条" not in msg, "同一个回执里出现了两个不同的'原有'数量"
