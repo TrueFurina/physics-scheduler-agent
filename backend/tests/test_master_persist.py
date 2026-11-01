@@ -17,13 +17,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app import master_store
 from app.master_data import MasterData
-from app.utils.excel_parser import PendingTask, ScheduleDatabase, ScheduleEntry
+from app.utils.excel_parser import PendingTask, ScheduleDatabase
 
 import app.api.reschedule as api
 
-
-def _entry(week, weekday, slot, cls, group, room, teacher="吴老师", experiment="扭摆法"):
-    return ScheduleEntry(week, weekday, slot, cls, group, experiment, room, teacher)
+from _entrylib import _entry
 
 
 @pytest.fixture

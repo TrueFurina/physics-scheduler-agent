@@ -21,13 +21,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.master_data import DEFAULT_COURSE, MasterData
-from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
+from app.utils.excel_parser import ScheduleDatabase
 
 import app.api.reschedule as api
 
-
-def _entry(week, weekday, slot, cls, group, room, teacher="吴老师", experiment="扭摆法"):
-    return ScheduleEntry(week, weekday, slot, cls, group, experiment, room, teacher)
+from _entrylib import _entry
 
 
 # ---------------------------------------------------------------- 反推

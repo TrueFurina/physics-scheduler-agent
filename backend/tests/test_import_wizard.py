@@ -29,12 +29,10 @@ import openpyxl
 from app import master_store
 from app.master_data import MasterData
 from app.master_workbook import preview_workbook
-from app.utils.excel_parser import (PendingTask, ScheduleDatabase, ScheduleEntry,
+from app.utils.excel_parser import (PendingTask, ScheduleDatabase,
                                     parse_master_tasks, preview_master_tasks)
 
-
-def _entry(week, weekday, slot, cls, group, room, teacher="吴老师", experiment="扭摆法"):
-    return ScheduleEntry(week, weekday, slot, cls, group, experiment, room, teacher)
+from _entrylib import _entry
 
 
 def _base_md() -> MasterData:

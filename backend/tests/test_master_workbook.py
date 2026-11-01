@@ -28,11 +28,9 @@ from app import master_store
 from app.master_data import MasterData
 from app.master_workbook import (_split_multi, apply_tables, build_workbook,
                                 parse_workbook)
-from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
+from app.utils.excel_parser import ScheduleDatabase
 
-
-def _entry(week, weekday, slot, cls, group, room, teacher="吴老师", experiment="扭摆法"):
-    return ScheduleEntry(week, weekday, slot, cls, group, experiment, room, teacher)
+from _entrylib import _entry
 
 
 def _base_md() -> MasterData:
