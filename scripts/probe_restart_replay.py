@@ -77,7 +77,17 @@ def stop(proc):
 
 
 def pick_course(site):
-    """找一个"可调 + 有原时间 + 有教室"的真实课程。"""
+    """找一个"可调 + 有原时间 + 有教室 + **真的能挪走**"的真实课程。
+
+    2026-11-01（R-100）修正：原来只按"可调/有时间/有教室"挑，然后暴力试 1..16 周。
+    实测这条会**假红** —— `_apply_reschedule` 只改周次、不改星期/时段/教室，
+    所以"能移过去"等价于"那一周同一格空着"；课程密集时 15 个候选周全被占，
+    applied 恒为 0，探针报"闭环断了"，而产品是好的（本轮实测 2/2 复现）。
+    改为问沙盘要一个"真空着的周次"——与 prepare_demo / 审批探针同一判据。
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import probe_approval_chain as pa
+
     _, t = http(site, "GET", "/api/reschedule/teachers")
     for teacher in t.get("teachers") or []:
         name = teacher.get("name") or teacher.get("teacher_name")
@@ -85,9 +95,13 @@ def pick_course(site):
             continue
         _, c = http(site, "GET", f"/api/reschedule/teachers/{urllib.parse.quote(name)}/courses")
         for course in c.get("courses") or []:
-            if course.get("adjustable") and course.get("original_time") and course.get("room"):
-                return name, course
-    return None, None
+            if not (course.get("adjustable") and course.get("original_time")
+                    and course.get("room")):
+                continue
+            week, _slot = pa.find_movable_week(site, name, course)
+            if week is not None:
+                return name, course, week
+    return None, None, None
 
 
 def week_range(site, teacher, course_name):
@@ -112,23 +126,16 @@ def main():
             token = login.get("token") or ""
             assert token, "拿不到管理员令牌"
 
-            teacher, course = pick_course(site)
+            teacher, course, target = pick_course(site)
             assert course, "没有可调课程"
             name = course["course_name"]
             before = week_range(site, teacher, name)
-            nums = [int(x) for x in __import__("re").findall(r"\d+", before or "1")]
-            base_week = max(nums)
-            # 目标周不能随手 +1：可能撞场地/教师。逐个试，直到真的写进去（applied>0）
-            code, applied, target = 0, {}, None
-            for t in [w for w in range(1, 17) if w != base_week]:
-                rec = {"teacher": teacher, "course_name": name,
-                       "class_name": course.get("class_name", ""),
-                       "original_time": course["original_time"],
-                       "target_week": t, "key": f"restart-probe-{teacher}-{name}-{t}"}
-                code, applied = http(site, "POST", "/api/reschedule/apply-move", rec, token)
-                if (applied.get("data") or {}).get("applied"):
-                    target = t
-                    break
+            # 目标周由沙盘给出（那一格真的空着），不再暴力试 —— 见 pick_course 注释
+            rec = {"teacher": teacher, "course_name": name,
+                   "class_name": course.get("class_name", ""),
+                   "original_time": course["original_time"],
+                   "target_week": target, "key": f"restart-probe-{teacher}-{name}-{target}"}
+            code, applied = http(site, "POST", "/api/reschedule/apply-move", rec, token)
             after = week_range(site, teacher, name)
             print(f"进程A：{teacher} / {name}  {before} → {after}  "
                   f"(目标第 {target} 周, HTTP {code}, "

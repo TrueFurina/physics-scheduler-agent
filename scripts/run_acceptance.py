@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -137,14 +138,20 @@ def main():
 
     # 1) 单测与类型检查
     if not args.skip_tests:
-        # pytest 默认把临时目录丢在系统 %TEMP%\pytest-of-*，一次跑完 400+ 用例会有
-        # 近 500 个残留文件，被环境的安全钩子判成"批量删除"而中断（表现为 100% 全绿
-        # 但退出码非 0，前面已踩）。指到仓库 .tmp 下的独立 basetemp 可稳定退出 0。
-        basetemp = os.path.join(".tmp", "pytest_bt_%d" % int(time.time()))
+        # ⚠️ 两个坑都踩过（2026-11-01，R-100）：
+        # ① `--basetemp=.tmp/...` 会反噬：几千个临时文件堆进仓库 .tmp（实测残留
+        #    32 个目录 / 21931 个文件 / 89MB），pytest 每次会话开始清理 basetemp，
+        #    一跑就撞批量删除守卫 → SystemExit，表现为 515 passed / 163 errors。
+        # ② 改回默认 `%TEMP%\pytest-of-*` 仍会撞：pytest 在**会话结束**清理旧根目录，
+        #    一次删 603 个文件 → `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]
+        #    {"count":603,"threshold":50}` → 退出码非 0（但用例全绿，最容易误判）。
+        # 解法：给它一个**全新**的 PYTEST_DEBUG_TEMPROOT，清理时无旧目录可删。
+        # 实测：678 passed / rc=0（跑 6m27s，比平时慢是因为机器同时在起服务）。
+        pt_root = os.path.join(tempfile.gettempdir(), "psa-pytest-%d" % int(time.time()))
+        os.makedirs(pt_root, exist_ok=True)
         step("pytest（后端全量）",
-             [PY, "-m", "pytest", "backend/tests", "-q",
-              "--basetemp=" + basetemp, "-p", "no:cacheprovider"],
-             timeout=1800)
+             [PY, "-m", "pytest", "backend/tests", "-q", "-p", "no:cacheprovider"],
+             timeout=1800, env=dict(os.environ, PYTEST_DEBUG_TEMPROOT=pt_root))
         step("verify（前端 tsc + vitest）", ["npm", "run", "verify"], cwd=FRONTEND, timeout=900)
 
     # 2) 独立核查器（写入类探针自清理 / 显式 --cleanup）
