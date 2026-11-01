@@ -537,7 +537,7 @@ def undo(db, store: LandingStore, actor: str = "") -> dict:
     # 所以不能报成功：审计标记本身就是撤销契约的一部分（R55）。
     try:
         mark = store.revoke(rec["id"], actor=actor)
-    except Exception as first:  # noqa: F841
+    except Exception as first:
         try:
             # sqlite 最常见的失败是瞬时锁，重试一次通常就能自愈
             mark = store.revoke(rec["id"], actor=actor)
@@ -548,9 +548,12 @@ def undo(db, store: LandingStore, actor: str = "") -> dict:
                 "rolled_back": True,
                 "landed_at": rec["landed_at"],
                 "restored_entries": len(db.entries),
-                "error": ("课表已回滚到落地前，但撤销记录写入失败（%s）。"
+                "error": ("课表已回滚到落地前，但撤销记录写入失败"
+                          # 两次原因都报（R59）：只留重试那次会把"磁盘满"
+                          # 误导成"database is locked"，排障方向整个错。
+                          "（首次：%s；重试：%s）。"
                           "该记录在库里仍为「已落地」，请重试撤销 —— "
-                          "否则重启重放会把这次撤销再应用回来。" % again),
+                          "否则重启重放会把这次撤销再应用回来。" % (first, again)),
             }
     return {
         "success": True,

@@ -488,8 +488,8 @@ MUTANTS = [
     (
         "M49", "撤销标记写失败不兜底（课表退了、记录还在 → 重放复活）",
         "app/plan_landing.py",
-        "    except Exception as first:  # noqa: F841\n        try:",
-        "    except Exception as first:  # noqa: F841\n"
+        "    except Exception as first:\n        try:",
+        "    except Exception as first:\n"
         "        raise  # MUTANT: 不兜底，直接抛给调用方\n        try:",
         "undo or revoke",
     ),

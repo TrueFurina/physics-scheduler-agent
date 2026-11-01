@@ -154,6 +154,40 @@ def test_undo_revoke_transient_failure_is_retried(tmp_path, monkeypatch):
     assert store.latest() is None, "重试成功后记录必须已标记撤销"
 
 
+def test_undo_dual_failure_keeps_both_errors(tmp_path, monkeypatch):
+    """② 两次都失败：两次的原因都要报出来，不能只留最后一次（R59）。
+
+    为什么这条值得一个用例
+    ----------------------
+    `undo` 的 except 分支绑了 `first` 却从没用过 —— 那行还挂着
+    `# noqa: F841` 把 ruff 的"绑了不用"挡住。于是一旦"磁盘满（首次）+
+    database is locked（重试）"同时出现，调用方只看到后者，会去查锁，
+    而真正的原因是磁盘。**排障信息缺一半，比没有更贵**：它指向错的方向。
+
+    两种失败分别用不同文案，断言两句话都在 `error` 里。
+    """
+    db, store = _db_and_store(tmp_path)
+    _land_something(db, store)
+
+    seq = ["模拟首次失败：磁盘满", "模拟重试失败：database is locked"]
+    calls = {"n": 0}
+
+    def always_fail(rec_id, actor=""):
+        msg = seq[min(calls["n"], len(seq) - 1)]
+        calls["n"] += 1
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(store, "revoke", always_fail)
+
+    out = plan_landing.undo(db, store, actor="tester")
+
+    assert out.get("success") is False, f"两次都失败却报成功：{out}"
+    assert calls["n"] == 2, f"应当恰好尝试两次，实际 {calls['n']} 次"
+    text = str(out.get("error", "")) + str(out.get("warning", "")) + str(out)
+    assert "磁盘满" in text, f"首次失败的原因被丢掉，只留下重试那次：{out}"
+    assert "database is locked" in text, f"重试失败的原因没报出来：{out}"
+
+
 def test_restore_failure_leaves_record_unrevoked(tmp_path, monkeypatch):
     """顺序守卫：restore 崩掉时记录**不能**被标记成已撤销。
 
