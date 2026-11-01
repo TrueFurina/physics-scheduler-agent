@@ -363,3 +363,170 @@ def test_concurrent_loads_do_not_overwrite_each_other(tmp_path, monkeypatch):
         f"并发加载互相覆盖了 {len(mismatches)} 次（样本 {mismatches[:3]}）——"
         "load_from_excel 必须持 _LOAD_LOCK"
     )
+
+
+# ---------------------------------------------------------------------------
+# R-102：签名并入「解析器源码指纹」——把"记得 bump 版本"这条纪律变成结构保证
+# ---------------------------------------------------------------------------
+
+def _valid_data():
+    return {"entries": [[1, "周一", "567", "班", "1组", "实验", "A410", "教师", "", ["567"], ""]]}
+
+
+def test_parser_fingerprint_is_stable_and_shaped():
+    fp1 = parse_cache.parser_fingerprint()
+    fp2 = parse_cache.parser_fingerprint()
+    assert fp1 == fp2, "同一进程内指纹必须稳定（否则缓存永远不命中）"
+    assert len(fp1) == 12 and all(c in "0123456789abcdef" for c in fp1)
+
+
+def test_signature_carries_parser_fingerprint(tmp_path):
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    sig = parse_cache.signature(str(f))
+    assert sig["parser"] == parse_cache.parser_fingerprint()
+    assert sig["v"] == parse_cache.CACHE_VERSION
+
+
+def test_signature_none_for_missing_file(tmp_path):
+    """文件不存在/无权限 → None（调用方直接重解析），不许抛。"""
+    assert parse_cache.signature(str(tmp_path / "nope.xlsx")) is None
+
+
+def test_cache_misses_when_parser_code_changes(tmp_path, monkeypatch):
+    """**核心判据**：解析器源码一变，旧缓存必须立刻失效。
+
+    模拟"改了 excel_parser.py 但没动 CACHE_VERSION"（R-66 的真实事故形态）：
+    写一份缓存，然后把进程内指纹换掉 —— load 必须返回 None，而不是旧数据。
+    """
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.reset_memo()
+
+    parse_cache.save(str(f), _valid_data())
+    assert parse_cache.load(str(f)) is not None, "前提：先要能命中"
+
+    # 换指纹 = 模拟源码变更（不动 CACHE_VERSION，正是 R-66 的踩法）
+    parse_cache.reset_memo()
+    monkeypatch.setattr(parse_cache, "_PARSER_FP", "deadbeef0000")
+    assert parse_cache.load(str(f)) is None, "源码变了却命中了旧缓存 —— 正是要防的那类静默脏"
+
+
+def test_legacy_cache_without_parser_field_is_rejected(tmp_path, monkeypatch):
+    """v7 及更早的缓存没有 `parser` 字段：必须判未命中（fail-closed），不能"字段缺就当相等"。"""
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.reset_memo()
+
+    sig = parse_cache.signature(str(f))
+    legacy = {"sig": {k: v for k, v in sig.items() if k != "parser"},
+              "data": _valid_data()}
+    target = parse_cache._cache_file(str(f))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert parse_cache.load(str(f)) is None
+
+
+def test_validate_rejects_each_malformed_shape(tmp_path):
+    """`_validate` 的六道闸逐个过一遍 —— 任何一条松动都会让脏数据进课表。"""
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    sig = parse_cache.signature(str(f))
+
+    good = {"sig": dict(sig), "data": _valid_data()}
+    assert parse_cache._validate(good, sig) is True
+
+    bad_payload = ["not", "a", "dict"]
+    assert parse_cache._validate(bad_payload, sig) is False
+
+    no_sig = {"sig": "not-a-dict", "data": _valid_data()}
+    assert parse_cache._validate(no_sig, sig) is False
+
+    no_data = {"sig": dict(sig)}
+    assert parse_cache._validate(no_data, sig) is False
+
+    entries_not_list = {"sig": dict(sig), "data": {"entries": {"a": 1}}}
+    assert parse_cache._validate(entries_not_list, sig) is False
+
+    wrong_width = {"sig": dict(sig), "data": {"entries": [["too", "short"]]}}
+    assert parse_cache._validate(wrong_width, sig) is False
+
+    week_not_int = {"sig": dict(sig),
+                    "data": {"entries": [["1"] + _valid_data()["entries"][0][1:]]}}
+    assert parse_cache._validate(week_not_int, sig) is False
+
+
+def test_save_failure_is_swallowed(tmp_path, monkeypatch):
+    """写盘失败（磁盘满/权限）只能意味着"下次重解析"，绝不能把排课拖崩。"""
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.reset_memo()
+
+    def boom(*_a, **_k):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(parse_cache.os, "replace", boom)
+    parse_cache.save(str(f), _valid_data())        # 不抛
+    assert parse_cache.load(str(f)) is None        # 也没写进去
+
+
+def test_save_disabled_writes_nothing(tmp_path, monkeypatch):
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("PARSE_CACHE", "0")
+    parse_cache.reset_memo()
+
+    parse_cache.save(str(f), _valid_data())
+    assert not parse_cache._cache_file(str(f)).exists()
+    assert parse_cache.load(str(f)) is None
+
+
+# ---------------------------------------------------------------- merge
+
+def test_merge_attaches_extra_fields_and_keeps_existing(tmp_path, monkeypatch):
+    """`merge` 是 roles / semester_start 的落点：只补字段，不许把 entries 冲掉。
+
+    此前 merge 整个函数零覆盖（覆盖率实测 8 行全未执行），而生产代码在用它。
+    """
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.reset_memo()
+
+    parse_cache.save(str(f), _valid_data())
+    parse_cache.merge(str(f), {"roles": {"教师": "实验教师"}})
+
+    parse_cache.reset_memo()          # 强制从磁盘读，验证真的落盘了
+    got = parse_cache.load(str(f))
+    assert got["roles"] == {"教师": "实验教师"}
+    assert got["entries"] == _valid_data()["entries"], "merge 把 entries 弄丢了"
+
+
+def test_merge_without_cache_is_noop(tmp_path, monkeypatch):
+    """没有缓存时 merge 什么都不做 —— 不能凭空造一份"只有 roles 没有 entries"的缓存。"""
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.reset_memo()
+
+    parse_cache.merge(str(f), {"roles": {"教师": "实验教师"}})
+    assert not parse_cache._cache_file(str(f)).exists()
+
+
+def test_merge_disabled_is_noop(tmp_path, monkeypatch):
+    f = tmp_path / "s.xlsx"
+    f.write_bytes(b"x")
+    monkeypatch.setenv("PARSE_CACHE_DIR", str(tmp_path / "cache"))
+    parse_cache.save(str(f), _valid_data())
+
+    monkeypatch.setenv("PARSE_CACHE", "0")
+    parse_cache.reset_memo()
+    parse_cache.merge(str(f), {"roles": {"教师": "实验教师"}})
+    monkeypatch.delenv("PARSE_CACHE")
+    parse_cache.reset_memo()
+    assert "roles" not in (parse_cache.load(str(f)) or {})

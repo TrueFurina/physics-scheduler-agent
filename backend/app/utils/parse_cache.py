@@ -58,7 +58,11 @@ from app.paths import DATA_DIR as _DATA_DIR
 #     逐行翻译成课程名（COURSE_CODE_MAP）。解析**行为**又变了（course 从空串
 #     变三门课名），同 v6 的教训：不 bump 则 v6 磁盘缓存（course 全空）签名仍
 #     "有效"被命中，映射静默不生效。
-CACHE_VERSION = 7
+CACHE_VERSION = 8
+# v8：签名并入**解析器源码指纹**（R-102）。v1..v7 的失效靠"人记得改 CACHE_VERSION"，
+#     R-66 正是这么栽的（解析行为变了、版本没动，旧缓存签名仍"有效"被命中）。
+#     现在代码一改指纹就变 —— 正确性不再依赖纪律。旧的 v7 缓存没有 "parser" 字段，
+#     会被 `_validate` 判为未命中并重解析一次，符合 fail-closed。
 
 # ScheduleEntry 序列化后的字段数（entries_to_rows 产出 / _validate 校验 / ScheduleEntry(*row) 反序列化
 # 三处必须一致）。字段顺序即 ScheduleEntry.__init__ 的位置参数顺序：
@@ -69,9 +73,43 @@ _APP_DIR = Path(__file__).resolve().parents[1]  # backend/app
 
 _DEFAULT_DIR = Path(_DATA_DIR) / "cache"
 
+# 参与"解析行为"的源码文件：解析器本身 + 本文件（序列化/校验口径也在这里）
+_PARSER_FILES = ("excel_parser.py", "parse_cache.py")
+_PARSER_FP: Optional[str] = None
+_PARSER_FP_LOCK = threading.Lock()
+
 # 进程内记忆：(绝对路径) → {"sig": {...}, "data": {...}}
 _MEMO: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
+
+
+def parser_fingerprint() -> str:
+    """解析器源码指纹（sha1 前 12 位，进程内算一次）。
+
+    为什么把**源码本身**放进缓存签名（R-102）
+    -----------------------------------------
+    此前签名的 `v` 字段要求"任何解析逻辑变化都要手工 +1"。这条纪律在 R-66 断过一次：
+    解析行为从模糊匹配改成精确别名，v 没动 ⇒ 旧缓存签名（path/mtime/size/v）全部仍
+    "有效"而被命中，表现为"数据看着不对，`PARSE_CACHE=0` 又全绿"，排查了很久。
+
+    现在把 `excel_parser.py` 与 `parse_cache.py` 的字节算进签名：改一个字符，指纹就变，
+    缓存自动失效。**正确性不再依赖人记得 bump 版本** —— 代价是注释改动也会让缓存重解析一次，
+    那是几秒钟，比"静默返回旧课表"便宜得多。
+    """
+    global _PARSER_FP
+    if _PARSER_FP is None:
+        with _PARSER_FP_LOCK:
+            if _PARSER_FP is None:
+                h = hashlib.sha1()
+                for name in _PARSER_FILES:
+                    try:
+                        h.update((_APP_DIR / "utils" / name).read_bytes())
+                    except OSError:
+                        # 读不到（打包/权限异常）就退化成文件名，仍然 fail-closed：
+                        # 指纹会与"正常机器"不同，缓存自然不命中。
+                        h.update(("missing:" + name).encode("utf-8"))
+                _PARSER_FP = h.hexdigest()[:12]
+    return _PARSER_FP
 
 
 def _enabled() -> bool:
@@ -84,13 +122,18 @@ def cache_dir() -> Path:
 
 
 def signature(filepath: str) -> Optional[Dict[str, Any]]:
-    """当前文件的签名；取不到（文件不存在/无权限）返回 None。"""
+    """当前文件的签名；取不到（文件不存在/无权限）返回 None。
+
+    四个维度都要对上才算命中：**解析器指纹**（代码变了就失效）、绝对路径、
+    mtime_ns、size。少任何一个都会出现"文件/代码变了但读到旧课表"。
+    """
     try:
         st = os.stat(filepath)
     except OSError:
         return None
     return {
         "v": CACHE_VERSION,
+        "parser": parser_fingerprint(),
         "path": os.path.abspath(filepath),
         "mtime_ns": st.st_mtime_ns,
         "size": st.st_size,
@@ -103,13 +146,17 @@ def _cache_file(filepath: str) -> Path:
 
 
 def _validate(payload: Any, sig: Dict[str, Any]) -> bool:
-    """严格校验：宁可多解析一次，也不返回结构可疑的数据。"""
+    """严格校验：宁可多解析一次，也不返回结构可疑的数据。
+
+    ⚠️ 键列表必须与 `signature()` 一一对应：少比一个维度，就等于给"静默脏"留一扇门。
+    `parser` 尤其不能漏 —— 它才是"代码变了缓存就失效"的执行点（R-102）。
+    """
     if not isinstance(payload, dict):
         return False
     cached_sig = payload.get("sig")
     if not isinstance(cached_sig, dict):
         return False
-    for key in ("v", "path", "mtime_ns", "size"):
+    for key in ("v", "parser", "path", "mtime_ns", "size"):
         if cached_sig.get(key) != sig.get(key):
             return False
     data = payload.get("data")
