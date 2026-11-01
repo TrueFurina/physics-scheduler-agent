@@ -606,7 +606,12 @@ def undo(db, store: LandingStore, actor: str = "") -> dict:
     """
     rec = store.latest()
     if not rec:
-        return {"success": False, "error": "当前没有可撤销的落地方案"}
+        # `error_kind` 是给**端点**看的：404 与 500 必须分开返回。
+        # 只有"根本没有可撤销的记录"才是 404；下面那支（课表已退、标记没写进去）
+        # 是服务端自己没做完，报 404 会让教秘以为什么都没发生，然后重新落地 ——
+        # 把刚退掉的方案又落回去。分型由 tests/test_landing_endpoints.py 钉住。
+        return {"success": False, "error_kind": "no_record",
+                "error": "当前没有可撤销的落地方案"}
     before = json.loads(rec["before_json"])
     # 顺序有意为之：**先**恢复内存、**再**打撤销标记。反过来的话，restore 一旦崩掉，
     # 记录已被标成"已撤销"而课表其实没动 —— 撤销入口消失、什么都没退，那是无法挽回
@@ -628,7 +633,10 @@ def undo(db, store: LandingStore, actor: str = "") -> dict:
         except Exception as again:
             return {
                 "success": False,
+                "error_kind": "revoke_failed",
                 "revoked": False,
+                # 这一条是**已发生的事实**，不是错误码的附属：课表真的退了。
+                # 端点据此返回 500（不是 404），界面据此刷新状态。
                 "rolled_back": True,
                 "landed_at": rec["landed_at"],
                 "restored_entries": len(db.entries),

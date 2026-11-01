@@ -15,7 +15,7 @@ R55 给 `plan_landing` 加了 `actor` / `revoke` / `history`，并新增了
 
 功能的"接线"没人守，函数再对也没用。**这层测试存在的唯一理由，就是这种事。**
 
-锁五条契约（R60 又追加两条，见文末）：
+锁五条契约（R60 追加两条、R61 追加两条，见文末）：
 1. `POST /parallel/land` 的响应带 `landed_by`，且库里 `actor` 真是那个管理员；
 2. `GET /parallel/land/history` 存在、要管理员、返回 `{total,active,revoked,history}`；
 3. 撤销后该条在历史里标成 `revoked=true` 并带上 `revoked_by`（不删行）；
@@ -26,6 +26,12 @@ R60 追加两条（R50 断点②）：
 6. `POST /parallel/land` 的响应里有**人话** `message`，四个差异账齐全；
 7. 同一方案再落一次（无差异）时，`message` 明说"没有任何变化"而不是复读"已落地"。
    —— 这两条守的是"回执"本身：字段没了，前端会把它渲染成空白，而不是报错。
+
+R61 追加两条（撤销失败分型）：
+8. 没有可撤销的记录 → **404**（资源不存在，语义正确）；
+9. 课表**已经**回滚、只是撤销标记写不进库 → **500**，且 `rolled_back` /
+   `restored_entries` / `detail` 必须都在。此前这一型也报 404，界面会说
+   「没有可撤销的记录」—— 而安排表其实已经退回落地前了。
 """
 import os
 import sys
@@ -179,3 +185,52 @@ def test_land_commit_message_admits_no_change(env):
     assert "没有任何变化" in msg, msg
     assert "1 个单元与现有安排完全一致" in msg, msg
     assert "已落地" not in msg, f"无差异时不能说「已落地」：{msg}"
+
+
+# ------------------------------------------------------------------ R61 追加
+
+def test_undo_without_record_is_404(env):
+    """没有可撤销的记录 → 404。这一型是对的，不能被下一条改动带走。"""
+    client, headers = env
+    r = client.post("/api/reschedule/parallel/land/undo", headers=headers)
+
+    assert r.status_code == 404, f"空库撤销应报 404，实得 {r.status_code}：{r.text}"
+    assert "没有可撤销" in r.json().get("detail", ""), r.json()
+
+
+def test_undo_revoke_failure_is_500_and_says_rolled_back(env, monkeypatch):
+    """课表已回滚、撤销标记写失败 → 必须是 500，且"已回滚"这个事实不许丢。
+
+    此前这里一律 404：界面写"没有可撤销的记录"，而安排表其实已经退回落地前。
+    更贵的是 `rolled_back` / `restored_entries` 随异常一起被丢掉 —— 前端无从判断
+    "该不该再点一次撤销"（该），只会弹一句通用报错，教秘转头去重新落地，
+    把刚退掉的方案又落回去。
+
+    所以这条同时锁三件事：状态码不是 404、结构体还在、人话在 `detail` 里。
+    """
+    client, headers = env
+    client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers)
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("disk I/O error")
+
+    # 重试两次都失败才走这一支，所以 patch 整个方法即可（两次调用都会炸）
+    monkeypatch.setattr(api.plan_landing.LandingStore, "revoke", boom)
+
+    r = client.post("/api/reschedule/parallel/land/undo", headers=headers)
+    assert r.status_code != 404, (
+        f"课表已回滚却报 404 —— 界面会说「没有可撤销的记录」：{r.text}")
+    assert r.status_code == 500, f"服务端自己没写完，应是 500，实得 {r.status_code}"
+
+    body = r.json()
+    assert body.get("rolled_back") is True, f"「已回滚」这条事实被吞了：{body}"
+    assert body.get("revoked") is False, body
+    assert body.get("restored_entries") == 2, body
+    # 通用错误翻译读的是 detail 字符串；只留 error 字段的话前端拿不到人话
+    detail = body.get("detail", "")
+    assert "已回滚到落地前" in detail, detail
+    assert "disk I/O error" in detail, f"两次失败原因没报出来：{detail}"
+
+    # 记录仍未被标撤销 —— 库与内存此刻不一致，这正是"必须重试"的理由
+    h = client.get("/api/reschedule/parallel/land/history", headers=headers).json()
+    assert h["history"][0]["revoked"] is False

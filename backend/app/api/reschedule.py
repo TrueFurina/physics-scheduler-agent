@@ -13,6 +13,7 @@ from collections import Counter, OrderedDict
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -1782,13 +1783,26 @@ async def land_undo(actor: str = Depends(require_admin)):
 
     `actor` 由 `require_admin` 依赖注入（它返回管理员账号）——
     撤销是一条**要追责的写操作**，不记"谁撤的"就等于没留痕。
+
+    失败分两型（R61）：
+    - `no_record`：库里没有可撤销的记录 → **404**，这是"资源不存在"，语义正确。
+    - `revoke_failed`：课表**已经**回滚到落地前，只是撤销标记没写进 sqlite（重试
+      两次都失败）→ **500**。此前这里一律 404，于是三种代价同时发生：
+      ① 界面写"没有可撤销的记录"，而安排表其实已经退了；
+      ② `rolled_back: true`、`restored_entries` 这些**已发生事实**随异常一起丢掉，
+         前端无从判断"该不该重试撤销"（该），只会看到一句 generic 报错；
+      ③ 教秘以为撤销没生效，转头去"重新落地"，把刚退掉的方案又落回去。
+      所以这一型返回 500 + 完整结构，只额外补一个 `detail` 字符串给通用
+      `describeApiError` 读取（前端不认结构也能拿到人话）。
     """
     await _ensure_loaded_async()
     with _land_lock:
         out = plan_landing.undo(_db, _landings(), actor=actor or "")
-    if not out.get("success"):
+    if out.get("success"):
+        return out
+    if out.get("error_kind") == "no_record":
         raise HTTPException(status_code=404, detail=out["error"])
-    return out
+    return JSONResponse(status_code=500, content={**out, "detail": out["error"]})
 
 
 @router.get("/parallel/land/history", summary="落地历史（含已撤销，需管理员）",

@@ -10,6 +10,8 @@
  *  5. 未登录管理员时采纳/撤销走 onRequireLogin，绝不调写接口（不能假装能写）；
  *  6. 撤销成功后 rolled_back_moves>0 时，顶部横幅必须带出"一并回滚 N 条调课"。
  *  7. 采纳横幅**用后端 message**，前端不再自拼数字（R60；无差异落地时尤其明显）。
+ *  8. 撤销返回 500 + rolled_back=true（课表已退、标记没写进库）时，横幅必须说
+ *     "只做了一半"并重拉状态 —— 否则界面还挂着"可撤销"而安排表已经变了（R61）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -184,6 +186,49 @@ describe('LandPlanPanel', () => {
     await waitFor(() => expect(rescheduleApi.landUndo).toHaveBeenCalledTimes(1));
     expect(onMsg).toHaveBeenCalledWith(expect.stringContaining('已撤销落地'));
     expect(onMsg).toHaveBeenCalledWith(expect.stringContaining('1 条调课'));
+    confirmSpy.mockRestore();
+  });
+
+  it('撤销返回 500 且 rolled_back=true：横幅说"只做了一半"，并重拉状态（R61）', async () => {
+    // 上一个用例调过 landUndo，这里的调用计数必须从零开始数
+    vi.mocked(rescheduleApi.landUndo).mockClear();
+    vi.mocked(rescheduleApi.landStatus).mockClear();
+    vi.mocked(rescheduleApi.landStatus).mockResolvedValue({
+      data: { landed: true, landed_at: '2026-10-23T18:00:00', plan_rows: 2, note: '测试' },
+    } as any);
+    // 后端真实形态：课表已回滚，但撤销标记没写进库 → 500 + 完整结构 + detail 人话
+    vi.mocked(rescheduleApi.landUndo).mockRejectedValue({
+      response: {
+        status: 500,
+        data: {
+          success: false,
+          error_kind: 'revoke_failed',
+          revoked: false,
+          rolled_back: true,
+          restored_entries: 7,
+          detail: '课表已回滚到落地前，但撤销记录写入失败（首次：disk I/O error；重试：disk I/O error）。',
+        },
+      },
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { onMsg } = renderPanel(true);
+    await waitFor(() => expect(screen.getByRole('button', { name: /撤销落地/ })).toBeTruthy());
+    const statusCallsBefore = vi.mocked(rescheduleApi.landStatus).mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: /撤销落地/ }));
+    await waitFor(() => expect(rescheduleApi.landUndo).toHaveBeenCalledTimes(1));
+
+    // 横幅必须点明"只做了一半"——不能落成一句通用的"撤销失败"：
+    // 教秘看到"失败"会去重新落地，而安排表其实已经退回去了。
+    await waitFor(() => expect(onMsg).toHaveBeenCalledWith(expect.stringContaining('只做了一半')));
+    expect(onMsg).toHaveBeenCalledWith(expect.stringContaining('已回滚到落地前'));
+
+    // 状态必须重拉：否则面板还挂着"已落地 / 可撤销"，而安排表已经变了
+    await waitFor(() =>
+      expect(vi.mocked(rescheduleApi.landStatus).mock.calls.length).toBeGreaterThan(statusCallsBefore));
+
+    // 后端的两次失败原因要透到界面上（别只剩"撤销失败"四个字）
+    await waitFor(() => expect(document.body.textContent).toContain('disk I/O error'));
     confirmSpy.mockRestore();
   });
 

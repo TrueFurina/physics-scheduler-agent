@@ -182,6 +182,16 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
         onRequireLogin();
         setError('登录状态已失效，请重新登录管理员后再撤销');
       } else {
+        // R61：500 + rolled_back 是"只做了一半"——**课表已经退回落地前**，只是撤销
+        // 标记没写进库。不跟着刷新的话，面板还挂着"已落地 / 可撤销"，而安排表已经
+        // 变了：教秘会以为撤销没生效，转头去重新落地，把刚退掉的方案又落回去。
+        // 刷新后撤销入口仍会在（库里那条还是未撤销），再点一次就能补齐标记。
+        if (err?.response?.data?.rolled_back === true) {
+          setDiff(null);
+          await loadStatus();
+          onMsg('⚠️ 撤销只做了一半：安排表已回滚到落地前，但撤销记录没写进库 —— '
+            + '请再点一次「↩️ 撤销落地」把记录补上。');
+        }
         setError(describeApiError(err, '撤销失败'));
       }
     } finally {
