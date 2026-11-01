@@ -101,6 +101,15 @@ async function waitForText(page, re, timeout, what) {
   });
 }
 
+/** 读一个 data-testid 元素的 dataset（探针不依赖文案：R-96/R-97） */
+async function testidData(page, id, timeout = 60000) {
+  await page.waitForSelector(`[data-testid="${id}"]`, { timeout });
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    return el ? { ...el.dataset } : null;
+  }, `[data-testid="${id}"]`);
+}
+
 /** 元素矩形是否**完整**落在视口内（只断言顶边在视口内是假绿，R-44 实测过） */
 async function fullyInViewport(page, selector) {
   return page.evaluate((sel) => {
@@ -186,7 +195,8 @@ async function fullyInViewport(page, selector) {
       await page.getByRole('button', { name: /周课表/ }).first().click();
       // 等待条件：「第 N 周 · M 条安排」汇总条——接口回来后才有的串。
       // 不能用"网格生成中..."的消失或"周课表"标题（导航按钮文案，一进页面就有）。
-      await waitForText(page, /第 \d+ 周 · \d+ 条安排/, 40000, 'G1 网格加载');
+      const g0 = await testidData(page, 'grid-summary', 40000);
+      if (!g0?.week) throw new Error('G1 网格加载：没拿到周次');
       const g1 = await summaryText(page);
       const mWeek = g1.match(/第 (\d+) 周 · (\d+) 条安排/);
       // 与 API 对账，而不是拍一个"每周应该有多少条"的常数——真实表周次分布
@@ -226,11 +236,11 @@ async function fullyInViewport(page, selector) {
       // 签名对比直接抓出来——"点了没反应"的机器判据。
       const sigW1 = await gridSignature(page);
       await page.locator('main select').first().selectOption({ label: '第 9 周' });
-      await waitForText(page, /第 9 周 · \d+ 条安排/, 30000, 'G5 切到第 9 周');
+      await page.waitForSelector('[data-testid="grid-summary"][data-week="9"]', { timeout: 30000 });
       await page.waitForTimeout(300);
       const sigW9 = await gridSignature(page);
       await page.locator('main select').first().selectOption({ label: '第 1 周' });
-      await waitForText(page, /第 1 周 · \d+ 条安排/, 30000, 'G5 切回第 1 周');
+      await page.waitForSelector('[data-testid="grid-summary"][data-week="1"]', { timeout: 30000 });
       await page.waitForTimeout(300);
       const sigBack = await gridSignature(page);
       rec(sigW1 !== sigW9 && sigBack === sigW1,
@@ -299,16 +309,16 @@ async function fullyInViewport(page, selector) {
       // L1：全校求解出方案（LandPlanPanel 的 schedule 来源；单班结果不进该面板）
       const tS = Date.now();
       await page.getByRole('button', { name: /一键排全校/ }).first().click();
-      await waitForText(page, /全校一键排课 · \d+\/\d+ 个班排满/, 240000, 'L1 一键排全校');
-      const planTxt = await summaryText(page);
-      const mPlan = planTxt.match(/全校一键排课 · (\d+)\/(\d+) 个班排满/);
-      rec(!!mPlan && mPlan[1] === mPlan[2], 'L1 一键排全校（方案来源）',
-        `${Date.now() - tS}ms，${mPlan ? `${mPlan[1]}/${mPlan[2]} 班` : '未见解'}`);
+      const sp = await testidData(page, 'school-plan-classes', 240000);
+      const complete = Number(sp?.complete), total = Number(sp?.total);
+      rec(!!sp && complete === total && total > 0, 'L1 一键排全校（方案来源）',
+        `${Date.now() - tS}ms，${sp ? `${complete}/${total} 班` : '未见解'}`);
 
       // L2：预览不写入。/status 前后必须一个字节不变，land/status 必须仍未落地。
       // 这条是"先看差异再写入"产品承诺的机器判据（预览偷写＝教秘被代表）。
       await page.getByRole('button', { name: /落地为正式安排表/ }).first().click();
-      await waitForText(page, /🔍 落地预览（未写入）/, 60000, 'L2 落地预览');
+      const landPrev = await testidData(page, 'land-state');
+      if (landPrev?.landed !== 'false') throw new Error(`L2 落地预览：状态应为未落地，实际 landed=${landPrev?.landed}`);
       const previewTxt = await summaryText(page);
       const afterPreview = await getStatus(page);
       const landAfterPreview = await getLandStatus(page);
@@ -345,7 +355,15 @@ async function fullyInViewport(page, selector) {
       // after_entries 一致；③ 预览账目 新增+调整 > 0（按钮只在 has_changes
       // 时出现，故内容必变——diff_plan 与 apply_plan 同一套 unit_key 口径）。
       await page.getByRole('button', { name: /确认采纳/ }).first().click();
-      await waitForText(page, /✅ 落地结果/, 60000, 'L4 确认采纳');
+      // 等**属性**变化，不是等元素存在：采纳后面板已在，`landed` 要等接口回来才翻 true。
+      // 直接 testidData 会立刻读到旧的 'false'（本轮踩到）。
+      await page.waitForSelector('[data-testid="land-state"][data-landed="true"]', { timeout: 60000 })
+        .catch(async () => {
+          const now = await testidData(page, 'land-state').catch(() => null);
+          throw new Error(`L4 落地结果：60s 内 landed 未变成 true（当前 landed=${now?.landed}）`);
+        });
+      const landDone = await testidData(page, 'land-state');
+      if (landDone?.landed !== 'true') throw new Error(`L4 落地结果：状态应为已落地，实际 landed=${landDone?.landed}`);
       const bannerTxt = await summaryText(page);
       const afterCommit = await getStatus(page);
       const landAfterCommit = await getLandStatus(page);
@@ -429,9 +447,9 @@ async function fullyInViewport(page, selector) {
     await p2.getByRole('button', { name: /并行排课/ }).first().click();
     await p2.waitForFunction(() => document.body.innerText.includes('2024级'), null, { timeout: 40000 });
     await p2.getByRole('button', { name: /一键排全校/ }).first().click();
-    await waitForText(p2, /全校一键排课 · \d+\/\d+ 个班排满/, 240000, 'L0 求解');
+    await p2.waitForSelector('[data-testid="school-plan-classes"]', { timeout: 240000 });
     await p2.getByRole('button', { name: /落地为正式安排表/ }).first().click();
-    await waitForText(p2, /🔍 落地预览（未写入）/, 60000, 'L0 预览');
+    await p2.waitForSelector('[data-testid="land-state"][data-landed="false"]', { timeout: 60000 });
     const guardTxt = await p2.evaluate(() => document.body.innerText);
     const hintShown = /采纳需管理员登录/.test(guardTxt);
     // 点采纳：必须弹云端登录（守卫接线），且安排表一个字节都没变

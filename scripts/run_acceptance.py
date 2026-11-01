@@ -87,6 +87,21 @@ def main():
     # 否则会"在本地验收、实际打线上"，读到旧功能还以为是产品红（实测踩过）。
     probe_env = dict(os.environ, SITE=SITE)
 
+    # 脱敏表（CI / 演示）里没有真实姓名：两个探针的默认教师（吴琳）点不到人，
+    # 会以 3×30s 的 click 超时假红（实测 5/8、0/11）。这里按"表里第一个教师"补上，
+    # **只在表是脱敏的**（姓名形如「教师X」）时生效 —— 真实表上一字不改。
+    # 这不是放宽判据：探针照旧要求"这个老师有课、能调"，只是不再假设姓名。
+    if "PROBE_TEACHER" not in probe_env:
+        try:
+            with urllib.request.urlopen(f"{SITE}/api/reschedule/teachers", timeout=10) as r:
+                names = [t.get("name") for t in (json.loads(r.read().decode()).get("teachers") or [])]
+            first = next((n for n in names if n), "")
+            if first.startswith("教师"):
+                probe_env["PROBE_TEACHER"] = first
+                print(f"ℹ️ 检测到脱敏表：PROBE_TEACHER 自动取「{first}」")
+        except Exception:
+            pass
+
     def step(name, cmd, cwd=REPO, timeout=1800, reset=False, must=None, env=None):
         if reset:
             reset_state()

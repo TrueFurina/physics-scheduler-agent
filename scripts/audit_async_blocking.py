@@ -104,15 +104,42 @@ def has_await(fn):
     return False
 
 
-def calls_in(fn):
+def calls_in(fn, shallow=False):
+    """收集函数体内的调用名。
+
+    `shallow=True` 时**不进入内嵌函数体**（2026-10-30 修的一处误报）：
+    `ast.walk(fn)` 会把内嵌 `def` 里的调用也算成"外层函数直接调用了它"。
+    于是 `/load-default` 里
+
+        def _locked_load():
+            return _load_default_schedule()      # ← 内层，跑在工作线程
+        await run_in_threadpool(_locked_load)
+
+    被算成"端点直接调了 `_load_default_schedule`" ⇒ 判"重活在事件循环上"。
+    这是误报，而**会误报的门同样没人看**（R-25 的反面）。
+
+    所以判断"端点自己在事件循环上做了什么"时必须 shallow：
+    内嵌函数要么被 `run_in_threadpool` 调（跑在工作线程）、
+    要么在外层被直接调用（此时外层调用点会被 `shallow` 看到）。
+    """
     out = []
-    for node in ast.walk(fn):
+
+    def visit(node):
+        # ⚠️ 必须先看 node 自身：`calls_in(run_in_threadpool(...) 那个 Call 节点)`
+        # 若只从 iter_child_nodes 开始，会把"它自己就是一次调用"这件事漏掉，
+        # 于是 `iter_child_nodes` 里全是实参 ⇒ 返回空列表 ⇒ 上层判不出"这是线程池调用"。
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Attribute):
                 out.append(f.attr)
             elif isinstance(f, ast.Name):
                 out.append(f.id)
+        for child in ast.iter_child_nodes(node):
+            if shallow and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue               # 不深入内嵌函数体
+            visit(child)
+
+    visit(fn)
     return out
 
 
@@ -131,6 +158,11 @@ def threaded_calls(fn):
 
 
 # 本模块内的同步函数表（用于展开闭包）
+# ⚠️ 必须用 `ast.walk` 收**内嵌函数**（2026-10-30 修的一处误报）：
+# `/load-default` 把解析包在局部闭包里再 `run_in_threadpool(_locked_load)`，
+# 而内嵌函数不在模块顶层 ⇒ 递归展开时看不到"它已被下沉"，于是把
+# `_load_default_schedule` 记到端点头上，判成"重活在事件循环上"。
+# 这是**误报**，而一条会误报的门同样没人看（R-25 的反面）。
 sync_fns = {}
 for n in ast.walk(tree):
     if isinstance(n, ast.FunctionDef):
@@ -145,8 +177,14 @@ def blocking_in_closure(fn, depth=0, seen=None):
     thr = threaded_calls(fn)
     heavy = set()
     walked = set()
-    for name in calls_in(fn):
+    # `shallow=True`：只看端点**自己**调了什么。内嵌函数里的调用不能算到它头上 ——
+    # 那些要么已被 `run_in_threadpool` 下沉（`_locked_load`），要么由外层调用点体现。
+    # 用非 shallow 时 `/load-default` 会被误判（实测 2026-10-30）。
+    for name in calls_in(fn, shallow=True):
         if name in thr:
+            # 这个名字被 `run_in_threadpool(...)` 直接调起 ⇒ 它跑在工作线程上。
+            # **不要再展开它内部** —— 否则它调用的 `load_from_excel` 之类
+            # 会被误算到事件循环上（`/load-default` 的 `_locked_load` 就是这样）。
             continue
         if name in HEAVY:
             heavy.add(name)
@@ -165,7 +203,8 @@ for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.Asyn
     if not decos:
         continue
     is_async = isinstance(fn, ast.AsyncFunctionDef)
-    linear = sorted(set(calls_in(fn)) & HEAVY)
+    # 只看端点**自己**在事件循环上调了什么（内嵌函数另算）
+    linear = sorted(set(calls_in(fn, shallow=True)) & HEAVY)
     deep, walked = blocking_in_closure(fn) if is_async else (set(), set())
     # 闭包里命中的、且**不在**本函数直接调用清单里的，才算"藏在辅助函数里"
     hidden = sorted(deep - set(linear))

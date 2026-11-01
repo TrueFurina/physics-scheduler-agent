@@ -134,3 +134,117 @@ jobs:
         # 本地（有真实表）88.3%。留 7 个点余量 —— 门槛的作用是"拦住覆盖率断崖"，
         # 不是逼人为数字写测试。--fail-zero 才是硬要求：任何文件整份零覆盖即红。
         run: python ../scripts/coverage_probe.py --fail-under 80 --fail-zero --top 10
+
+  ui-probes:
+    name: ui probes (Playwright × 3)
+    runs-on: ubuntu-latest
+    # 为什么这个 job 拖到现在才有（2026-10-30，R-97）：
+    # 探针一直"只能手动跑"，根因不是麻烦，而是**两条硬耦合**：
+    #   ① `probe_ui_flow.cjs` 硬编码了 13 位真实教师姓名 ⇒ 只能在带真实表的机器上跑；
+    #   ② CI 的干净检出**没有** `schedule.xlsx`（.gitignore 第 35 行），只有脱敏表。
+    # 本轮把 ① 改成从 `/teachers` 接口取名字，实测脱敏表上 16/16、8/8、11/11 全过，
+    # ② 就不再是障碍 —— `schedule.demo.xlsx` 与真实表**规模完全一致**
+    # （433 条 / 17 班 / 16 周，只是姓名脱敏）。
+    #
+    # 只跑 3 个不依赖云端 OAuth 的探针；`probe_demo_path` / `probe_demo_rehearsal`
+    # 需要微信扫码与云端回调域白名单，CI 上必然失败（本地也会，见探针内注释）。
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Install frontend deps + Chromium
+        working-directory: frontend
+        run: |
+          npm ci
+          # playwright-core 不自带浏览器；版本必须与 package.json 的 1.64.1 对齐，
+          # 否则 CDP 协议不匹配（`scripts/_browser.cjs` 里有自动发现的兜底，
+          # 但显式指定更稳、报错更清楚）。
+          npx playwright install --with-deps chromium
+
+      - name: Build webui
+        working-directory: frontend
+        run: npx vite build
+
+      - name: Start server (demo table, DEMO_MODE)
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          DEMO_MODE: "1"
+          ADMIN_PASS: admin123
+          PORT: "8023"
+          # 干净检出没有真实表；显式指到脱敏表，避免回退逻辑在不同环境走不同分支
+          SCHEDULE_PATH: ${{ github.workspace }}/schedule.demo.xlsx
+        run: |
+          nohup python run.py > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8023/health > /dev/null; then
+              echo "server up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server 未起来，日志："; tail -40 /tmp/server.log; exit 1
+
+      - name: Warm up (load default table)
+        run: |
+          curl -sf -X POST http://127.0.0.1:8023/api/reschedule/load-default | head -c 200
+          echo
+          curl -sf http://127.0.0.1:8023/api/reschedule/teachers | head -c 160
+
+      - name: Probe — 主流程 16 项
+        working-directory: frontend
+        env:
+          SITE: http://127.0.0.1:8023/
+        run: npm run probe
+
+      - name: Probe — 故障注入 8 项
+        working-directory: frontend
+        env:
+          SITE: http://127.0.0.1:8023/
+          PROBE_TEACHER: 教师C          # 脱敏表里的第一个教师
+        run: npm run probe:faults
+
+      - name: Probe — 调课 11 项
+        working-directory: frontend
+        env:
+          SITE: http://127.0.0.1:8023/
+          PROBE_TEACHER: 教师C
+        run: npm run probe:reschedule
+
+      # 彩排探针（10 步、约 31s）：测的是"每一步有没有画面、要等多久"，
+      # 与上面三个探针的"功能对不对"互补。
+      # 前置必须 prepare_demo.py：它会 reset 演示态 + 造一条**已验证可落地**的工单；
+      # 没有它，⑥「同意一条 → 课表落地」会干等超时（R-79 为此把探针改成 0.2s 快速失败）。
+      - name: Prepare demo (reset + seeded ticket)
+        env:
+          # 脚本读的是 DEMO_BASE_URL（`scripts/prepare_demo.py` 第 18 行）；
+          # 写成 BASE_URL 会被静默忽略，然后连到默认端口 —— CI 上恰好也是 8023，
+          # 所以这个错误不会报错、只会在改端口时突然失效。
+          DEMO_BASE_URL: http://127.0.0.1:8023
+        run: python scripts/prepare_demo.py
+
+      - name: Probe — 演示彩排 10 步
+        working-directory: frontend
+        env:
+          SITE: http://127.0.0.1:8023/
+        run: node ../scripts/probe_demo_rehearsal.cjs
+
+      - name: Server log on failure
+        if: failure()
+        run: tail -80 /tmp/server.log

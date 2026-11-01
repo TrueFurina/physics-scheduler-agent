@@ -41,19 +41,32 @@ function rec(ok, name, detail, opts = {}) {
   await page.waitForSelector('text=物理实验调课辅助', { timeout: 60000 });
   const loadMs = Date.now() - t0;
 
-  // 等教师列表加载完成（首屏 init）
+  // 等教师列表加载完成（首屏 init）。
+  //
+  // ⚠️ **不许写死姓名**（2026-10-30，R-97）：原来硬编码 13 位真实教师名，
+  // 于是这套探针只能在**带真实表的机器**上跑 —— 而 CI 的干净检出只有
+  // `schedule.demo.xlsx`（脱敏表，姓名是「教师C/教师E…」，但 433 条 / 17 班 / 16 周
+  // 与真实表**完全一致**）。写死姓名 = 探针永远进不了 CI。
+  // 现在从 `/teachers` 接口取名字，真实表与脱敏表都能跑。
   let teacherCount = 0;
+  let teacherNames = [];
   try {
-    await page.waitForFunction(() => {
-      const names = ['吴琳','吴琼','张妹玉','林晨','林珠云','柯达','洪锦泉','翁铭华','肖刚','郑辉','鄢仁文','钟蔚','陈胜钰'];
-      const btns = Array.from(document.querySelectorAll('button'));
-      return btns.filter((b) => names.some((n) => (b.textContent || '').includes(n))).length >= 13;
-    }, null, { timeout: 45000 });
-    teacherCount = await page.evaluate(() => {
-      const names = ['吴琳','吴琼','张妹玉','林晨','林珠云','柯达','洪锦泉','翁铭华','肖刚','郑辉','鄢仁文','钟蔚','陈胜钰'];
-      return Array.from(document.querySelectorAll('button')).filter((b) => names.some((n) => (b.textContent || '').includes(n))).length;
-    });
-    rec(teacherCount >= 13, '首屏教师列表', `渲染 ${teacherCount}/13 位真实教师，首屏 ${loadMs}ms`);
+    const resp = await page.request.get(`${SITE.replace(/\/$/, '')}/api/reschedule/teachers`);
+    const body = await resp.json();
+    teacherNames = (body.teachers || []).map((t) => t.name).filter(Boolean);
+    if (!teacherNames.length) throw new Error('接口返回 0 位教师');
+    const expect = teacherNames.length;
+    await page.waitForFunction(
+      (names) => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        return btns.filter((b) => names.some((n) => (b.textContent || '').includes(n))).length >= names.length;
+      },
+      teacherNames, { timeout: 45000 },
+    );
+    teacherCount = await page.evaluate((names) => Array.from(document.querySelectorAll('button'))
+      .filter((b) => names.some((n) => (b.textContent || '').includes(n))).length, teacherNames);
+    rec(teacherCount >= expect, '首屏教师列表',
+      `渲染 ${teacherCount}/${expect} 位教师（姓名取自 /teachers，不写死），首屏 ${loadMs}ms`);
   } catch (e) {
     rec(false, '首屏教师列表', `45s 内未渲染出教师列表：${String(e).slice(0, 80)}`);
   }
@@ -108,7 +121,7 @@ function rec(ok, name, detail, opts = {}) {
   // F2：点第一位教师 → 我的课程
   try {
     const t1 = Date.now();
-    await page.locator('button', { hasText: '吴琳' }).first().click();
+    await page.locator('button', { hasText: teacherNames[0] }).first().click();
     await page.waitForFunction(() => /当前教师：/.test(document.body.innerText), null, { timeout: 30000 });
     await page.waitForTimeout(800);
     const bodyLen = await page.evaluate(() => document.body.innerText.length);

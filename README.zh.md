@@ -166,7 +166,19 @@ Ruff 质量门（与 CI 同一把尺；`ruff.toml` 里每条 ignore 都附了理
 ruff check --config ruff.toml .
 ```
 
-CI（`.github/workflows/ci.yml`）在每次 push/PR 跑两个 job：**后端**（py3.12 —— ruff → 导入冒烟 → pytest）和**前端**（node 22 —— `npm run verify` ＝ tsc + vitest）。干净检出（无 `schedule.xlsx`）时期望形态是"passed + skipped、零 failed"——真实表用例在设计上就skip。
+### 质量门一览（CI 4 个 job）
+
+| job | 内容 | 大约耗时 |
+|---|---|---|
+| `backend` | ruff（全仓） → 导入冒烟 → pytest | 5min |
+| `frontend` | `tsc -b && vitest run` | 1min |
+| `coverage` | 行覆盖率 ≥ 80%，且无零覆盖文件 | 3min |
+| `ui-probes` | Playwright × **5** 探针（主流程 16 / 故障 8 / 调课 11 / 彩排 10 + 前置 `prepare_demo`） | 6min |
+
+`ui-probes` 跑在**脱敏表**（`schedule.demo.xlsx`）上 —— 它与真实表规模完全一致
+（433 条 / 17 班 / 16 周），只是姓名脱敏，因此探针不依赖真实数据也能跑。
+
+干净检出（无 `schedule.xlsx`）时期望形态是"passed + skipped、零 failed"——真实表用例在设计上就 skip；`ui-probes` 用脱敏表，不受影响。
 
 后端测试不需要联网、不需要 LLM 密钥（`conftest.py` 默认 `LLM_DISABLED=1` /
 `RATELIMIT_DISABLED=1`）。真实 `schedule.xlsx` 被 `.gitignore` 排除；没有它时

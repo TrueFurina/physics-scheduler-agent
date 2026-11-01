@@ -28,12 +28,19 @@ function appSource(): string {
 }
 
 describe('App.tsx 体量守卫', () => {
-  it('行数不得超过 1500（拆视图后净增 437 行的教训）', () => {
+  it('行数不得超过 1470（2026-10-30 收紧：原来的 1500 已无预警作用）', () => {
+    // 原来定 1500，而实测 1460 —— 只差 40 行。阈值贴着上限等于没有预警：
+    // 它要等有人**真的**加了 41 行才红，那时已经来不及讨论"这 41 行该不该进 App"。
+    // 收紧到 1470（余 10 行），让红线出现在"即将发生"的位置：
+    // 谁要往 App 里加超过 10 行，就得先停下来问"它是不是页面级的"。
+    // 真要突破，改这个数字并在提交信息里写理由，让评审看见。
     const lines = appSource().split('\n').length;
-    expect(lines).toBeLessThanOrEqual(1500);
+    expect(lines).toBeLessThanOrEqual(1470);
   });
 
-  it('useState 数量不得超过 70（每个都是一份要手工同步的状态）', () => {
+  it('useState 数量不得超过 70（当前 68，余量 2）', () => {
+    // 每个 useState 都是一份要手工保持同步的状态；68 已接近这个页面的实际复杂度上限。
+    // 再加之前先问"能不能并进已有的状态对象"。
     const count = (appSource().match(/useState/g) ?? []).length;
     expect(count).toBeLessThanOrEqual(70);
   });

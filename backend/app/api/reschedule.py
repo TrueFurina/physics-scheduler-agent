@@ -12,7 +12,7 @@ from datetime import datetime
 from collections import Counter, OrderedDict
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -3208,14 +3208,34 @@ async def list_requests(status: str = ""):
     return {"success": True, "requests": items, "total": len(items)}
 
 
-@router.get("/requests/export", summary="导出调课申请记录 Excel（审批留档）", dependencies=_ADMIN_ONLY)
+@router.get("/requests/export", summary="导出调课申请记录 Excel（审批留档）",
+            dependencies=_ADMIN_ONLY)
 async def export_requests(status: str = ""):
-    """把全部（或按状态）调课申请单导出为 Excel —— 管理员留档/归档的真实工作流。"""
-    from io import BytesIO
-    import openpyxl
-    from openpyxl.styles import Font, Alignment
-    from fastapi.responses import StreamingResponse
+    """把全部（或按状态）调课申请单导出为 Excel —— 管理员留档/归档的真实工作流。
+
+    ⚠️ 建表必须在线程池（2026-10-30，R-97）：实测 200 条工单 **153ms**，
+    期间事件循环被拖 **143ms** —— 与 R-19/R-70 的导出族同一族。
+    这个端点是合并远程安全加固线时加进来的，**从未被 R-70 的修法覆盖**，
+    而它自己就是被 R-86 那条静态审计门抓出来的（`audit_async_blocking` 报
+    "新增了 2 个零 await 的 async 路由"）。
+    """
+    data = await run_in_threadpool(_requests_export_bytes, status)
+    status_cn = {"pending": "待审批", "approved": "已通过", "rejected": "已驳回"}
     from urllib.parse import quote
+    label = f"_{status_cn.get(status, status)}" if status else ""
+    filename = quote(f"调课申请记录{label}.xlsx")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+
+
+def _requests_export_bytes(status: str = "") -> bytes:
+    """（同步、纯 CPU/IO）调课申请单 → xlsx 字节。"""
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.styles import Alignment, Font
 
     conn = _get_db()
     if status:
@@ -3244,13 +3264,7 @@ async def export_requests(status: str = ""):
 
     buf = BytesIO()
     wb.save(buf)
-    buf.seek(0)
-    label = f"_{status_cn.get(status, status)}" if status else ""
-    filename = quote(f"调课申请记录{label}.xlsx")
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+    return buf.getvalue()
 
 
 @router.post("/requests/{request_id}/approve", summary="管理员审批（F6）", dependencies=_ADMIN_ONLY)

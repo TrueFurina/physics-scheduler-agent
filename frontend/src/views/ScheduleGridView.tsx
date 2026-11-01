@@ -132,7 +132,10 @@ export default function ScheduleGridView({
           <>
             {/* 汇总条：条数 + 冲突（说清是全表口径）+ 数据缺口 */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600 mb-3">
-              <span>第 {data.week} 周 · <b className="text-gray-800">{data.totals.entries}</b> 条安排</span>
+              <span data-testid="grid-summary"
+                    data-week={data.week} data-entries={data.totals.entries}>
+                第 {data.week} 周 · <b className="text-gray-800">{data.totals.entries}</b> 条安排
+              </span>
               <span>{data.totals.nonempty_cells} 个非空格</span>
               <span className={data.totals.conflict_entries > 0 ? 'text-red-600 font-medium' : ''}>
                 ⚠ 冲突条目 {data.totals.conflict_entries}

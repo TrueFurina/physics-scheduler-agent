@@ -82,11 +82,23 @@ async function shoot(page, name) {
     return `${m[1]}/${m[2]} 排定（含未校验声明）`;
   }, '02-auto-schedule.png');
 
-  // ③ 我的课程（点真实教师）
-  await timed('③ 我的课程（吴琳）', async () => {
+  // ③ 我的课程（点第一位真实教师）
+  //
+  // ⚠️ 不写死姓名（2026-10-30，R-98）：原来固定点「吴琳」，于是这套彩排
+  // 只能在带真实表的机器上跑；CI 的干净检出只有脱敏表（姓名「教师C…」）。
+  // 与 `probe_ui_flow` 同一处修法：名字从 `/teachers` 接口取。
+  const teacherNames = await page.evaluate(async () => {
+    const r = await fetch('/api/reschedule/teachers');
+    const b = await r.json();
+    return (b.teachers || []).map((t) => t.name).filter(Boolean);
+  });
+  if (!teacherNames.length) throw new Error('③ 我的课程：/teachers 返回 0 位教师');
+  const firstTeacher = process.env.PROBE_TEACHER || teacherNames[0];
+
+  await timed(`③ 我的课程（${firstTeacher}）`, async () => {
     const respPromise = page.waitForResponse(
       (r) => r.url().includes('/courses') && r.status() === 200, { timeout: 40000 });
-    await page.getByRole('button', { name: /吴琳/ }).first().click();
+    await page.getByRole('button', { name: new RegExp(firstTeacher) }).first().click();
     await respPromise;
     await page.waitForFunction(() => /可调课程/.test(document.body.innerText), null, { timeout: 30000 });
     return '可调/不可调分组已渲染';

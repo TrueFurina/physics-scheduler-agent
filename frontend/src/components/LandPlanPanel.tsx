@@ -198,7 +198,11 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       {d && (
         <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/40 p-4">
           <div className="flex items-baseline justify-between gap-2 flex-wrap">
-            <h4 className="text-sm font-semibold text-gray-900">
+            {/* data-testid 让探针不依赖文案：`landed` 属性直接表达"预览 vs 已落地"，
+                文案怎么改（加图标/换措辞）都不会让探针假绿（R-96/R-97） */}
+            <h4 className="text-sm font-semibold text-gray-900"
+                data-testid="land-state" data-landed={d.landed_at ? 'true' : 'false'}
+                data-plan-rows={d.plan_rows ?? 0}>
               {d.landed_at ? '✅ 落地结果' : '🔍 落地预览（未写入）'}
             </h4>
             <span className="text-xs text-gray-500">
