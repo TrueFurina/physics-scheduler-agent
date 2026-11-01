@@ -23,7 +23,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 
@@ -145,13 +144,13 @@ def main():
         # ② 改回默认 `%TEMP%\pytest-of-*` 仍会撞：pytest 在**会话结束**清理旧根目录，
         #    一次删 603 个文件 → `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]
         #    {"count":603,"threshold":50}` → 退出码非 0（但用例全绿，最容易误判）。
-        # 解法：给它一个**全新**的 PYTEST_DEBUG_TEMPROOT，清理时无旧目录可删。
-        # 实测：678 passed / rc=0（跑 6m27s，比平时慢是因为机器同时在起服务）。
-        pt_root = os.path.join(tempfile.gettempdir(), "psa-pytest-%d" % int(time.time()))
-        os.makedirs(pt_root, exist_ok=True)
+        # 解法统一收在 `_pytest_temproot`（R-101）：给一个全新 temproot，无旧目录可删。
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _pytest_temproot import fresh_env
+
         step("pytest（后端全量）",
              [PY, "-m", "pytest", "backend/tests", "-q", "-p", "no:cacheprovider"],
-             timeout=1800, env=dict(os.environ, PYTEST_DEBUG_TEMPROOT=pt_root))
+             timeout=1800, env=fresh_env(os.environ))
         step("verify（前端 tsc + vitest）", ["npm", "run", "verify"], cwd=FRONTEND, timeout=900)
 
     # 2) 独立核查器（写入类探针自清理 / 显式 --cleanup）

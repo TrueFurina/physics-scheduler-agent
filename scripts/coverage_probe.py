@@ -260,6 +260,12 @@ def main() -> int:
     mon.start()
     try:
         import pytest
+        # in-process 跑 pytest 也必须换 temproot：否则会话结束清理旧根目录撞
+        # 批量删除守卫，进程直接 SystemExit —— 表现是"跑完 100% 却没有报告"（R-101）。
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _pytest_temproot import install_inprocess
+
+        install_inprocess()
         rc = pytest.main(list(args.pytest_args) + ["-q", "--no-header"])
     finally:
         mon.stop()

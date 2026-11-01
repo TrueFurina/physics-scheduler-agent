@@ -36,7 +36,12 @@ print(f"[soak] 已起 {N} 个忙等进程，3 秒后开跑", flush=True)
 rc = 1
 try:
     time.sleep(3)
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="1")
+    # 全新 PYTEST_DEBUG_TEMPROOT：否则 pytest 会话结束清理旧根目录，一次删几百个文件，
+    # 撞沙箱的批量删除守卫（threshold=50）→ 用例全绿但退出码非 0（R-100/R-101）。
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _pytest_temproot import fresh_env
+
+    env = fresh_env(dict(os.environ, OPENBLAS_NUM_THREADS="1"))
     t0 = time.time()
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "backend/tests", "-q", "-p", "no:cacheprovider"],
