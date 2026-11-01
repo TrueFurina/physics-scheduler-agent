@@ -34,7 +34,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.utils.excel_parser import ScheduleDatabase
+from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
 
 REAL = os.path.join(os.path.dirname(__file__), "..", "..", "schedule.demo.xlsx")
 
@@ -123,4 +123,63 @@ def test_chunk_report_totals_add_up(solved):
     total = len(r.get("schedule") or [])
     assert per_chunk == total, (
         f"各片排定数之和 {per_chunk} ≠ 总排定数 {total} —— 有课在片间丢了或重复计入"
+    )
+
+
+def test_chunked_schedule_backfills_class_between_tight_chunks():
+    """片间**班级**回填必须是硬约束，不能靠"求解器恰好避开"（R58）。
+
+    为什么不复用上面的真实表夹具
+    ----------------------------
+    真实表 433 条里，第 2 片会不会排进第 1 片已经用过的格子，取决于 CP-SAT
+    在一批同等最优解里挑了哪个。实测同一份代码连跑 12 次，把
+    `extra_class_busy=class_busy` 改成 `None` 的变异体只被检出 8 次 ——
+    "回填漏了一整个维度"这件事，真实表有约三分之一的时间看不见。
+
+    所以这里把候选格压到只剩一个，让结论与求解器的选择无关：
+      1 周 × 5 星期 × 3 时段 = 15 格，两间教室；
+      14 格用绪论课（绪论不参与重排，但确实占着教室）把两间都占满；
+      只剩 (周一, 567) 一格还有空教室；
+      班级 X 有两个教学段，`chunk_size=1` ⇒ 必然落进两片。
+
+    · 回填生效 → 第 2 片看见 X 已在 (周一,567) → 无格可用 → 只排 1 段，另 1 段进冲突
+    · 回填漏掉 → 第 2 片看不见 → 排进同一格的**另一间**教室（教室维度不冲突）
+      → 同班同格两门课
+
+    `assert len(sch) == 1` 是防"构造失效后空过"：一旦格子够用了，这一条先红，
+    而不是让"无重复"悄悄通过。
+    """
+    from app.engine.auto_scheduler import TIME_SLOTS, WEEKDAYS
+
+    free_cell = ("周一", "567")
+    rooms = ["A401", "A402"]
+    entries = []
+    for day in WEEKDAYS:
+        for slot in TIME_SLOTS:
+            if (day, slot) == free_cell:
+                continue
+            for room in rooms:
+                # 绪论课：`_is_intro` 只看项目名里有没有"绪论"，不参与重排但占着教室
+                entries.append(
+                    ScheduleEntry(1, day, slot, "别班-" + room, "1组", "绪论", room, "别师"))
+    entries.append(ScheduleEntry(1, "周三", "678", "X班", "1组", "项目甲", "A401", "教师甲"))
+    entries.append(ScheduleEntry(1, "周四", "91011", "X班", "1组", "项目乙", "A401", "教师乙"))
+
+    db = ScheduleDatabase()
+    db.entries = entries
+    db.skipped = []
+    db.loaded = True
+
+    from app.engine.auto_scheduler import AutoScheduler
+
+    r = AutoScheduler(db).solve_all(chunk_size=1)
+    sch = r.get("schedule") or []
+    assert len(sch) == 1, (
+        f"预期只排出 1 段（另一段无格可用），实际 {len(sch)} 段 —— "
+        f"构造前提已失效，这个结果不能用来判回填。rows={sch}"
+    )
+    dup = _dups(sch, lambda s: (s["week"], s["weekday"], s["time_slot"], s["class_name"]))
+    assert not dup, (
+        f"班级在片间被重复排进同一格 {len(dup)} 处 —— "
+        f"第 2 片没看见第 1 片占掉的班级格。示例：{list(dup.items())[:1]}"
     )
