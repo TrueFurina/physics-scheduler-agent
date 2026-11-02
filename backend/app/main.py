@@ -20,6 +20,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import reschedule
+# R76：落地方案端点族已搬到 `app/api/landing.py`。**必须在 reschedule 之后导入** ——
+# landing 顶部要 `from app.api import reschedule` 取可变模块状态（`_db` / `_land_lock`），
+# 反过来 reschedule 只在 `__getattr__` 里惰性取 landing（导入期不成环）。
+from app.api import landing
 from app.engine import warmup
 
 _STARTED_AT = time.time()
@@ -175,6 +179,9 @@ app.add_middleware(
 
 # 只注册调课相关的路由
 app.include_router(reschedule.router, prefix="/api/reschedule", tags=["调课管理"])
+# R76：落地方案（/parallel/land/**）搬到独立模块，prefix 与 tags 与搬迁前完全一致 ——
+# 对前端、对 /openapi.json 都是同一批路径，搬迁不改任何调用方。
+app.include_router(landing.router, prefix="/api/reschedule", tags=["调课管理"])
 
 
 @app.exception_handler(Exception)

@@ -445,8 +445,10 @@ MUTANTS = [
     ),
     (
         "M43", "落盘失败不回滚内存（方案神秘消失）",
-        "app/api/reschedule.py",
-        "            plan_landing.restore(_db, before)",
+        # R76：锚点随落地方案一族搬到 app/api/landing.py（原文在 reschedule.py，
+        #       且 `_db` 现在按模块属性取成 `_api._db`）。
+        "app/api/landing.py",
+        "            plan_landing.restore(_api._db, before)",
         "            pass  # MUTANT: 不回滚",
         "rolls_back or rollback_restores",
     ),

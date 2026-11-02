@@ -65,7 +65,15 @@ jobs:
         #     且带实测数字（当前只有 `/upload`，附 343ms + 44ms 空窗的说明）；
         #   · 零 await 的轻查询（13 个，1–5ms）与基线快照比对，**只拦新增**；
         #   · 基线变化需 `--update-baseline` 显式更新并提交，评审能看见。
-        run: python scripts/audit_async_blocking.py backend/app/api/reschedule.py
+        #
+        # R76：落地方案端点族搬到 `backend/app/api/landing.py`，两个文件都要扫。
+        # 脚本一次只接受一个文件（多给会被它拒绝，不再静默只看第一个）。
+        # 少扫一个文件 = 这道门静默缩小覆盖面，而它看起来仍然是绿的。
+        # landing 带 `--no-baseline`：零 await 基线是按 reschedule.py 攒的，
+        # 拿它比 landing 只会打印一句假的"消除了 8 个"，而零 await 路由照样判红。
+        run: |
+          python scripts/audit_async_blocking.py backend/app/api/reschedule.py
+          python scripts/audit_async_blocking.py backend/app/api/landing.py --no-baseline
 
       - name: Pytest
         working-directory: backend

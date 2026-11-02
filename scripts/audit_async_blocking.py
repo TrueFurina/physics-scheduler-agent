@@ -31,8 +31,12 @@ handler 里只是一行普通调用。①号判据对这种情况**永远报绿*
   冷的时候是 800ms。判据只能是"这段代码**可能**有多慢"，不是"这次有多慢"。
 
 用法：
-    python scripts/audit_async_blocking.py [path]
+    python scripts/audit_async_blocking.py [path] [--no-baseline]
 退出码：有零 await 的 async 路由 或 有可疑阻塞调用 时为 1（可进 CI）。
+
+`--no-baseline`：不比对零 await 基线（基线是按单文件攒的，跨文件比会得到假的
+"消除 N 个"），但零 await 路由仍判红。给 R76 之后新增的 api 模块用。
+一次只接受一个文件 —— 多给会直接报错，不静默取第一个。
 """
 
 import ast
@@ -42,6 +46,16 @@ from pathlib import Path
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 update_baseline = "--update-baseline" in sys.argv[1:]
+skip_baseline = "--no-baseline" in sys.argv[1:]
+# R76：这里原本是 `path = args[0]` —— 多给一个文件时**静默只看第一个**。
+# 本轮把落地方案搬到 `app/api/landing.py` 后，第一次跑
+# `audit_async_blocking.py reschedule.py landing.py` 得到的表里只有 48 条
+# reschedule 路由，landing 的 5 条一条没出现，而脚本 rc=0「全绿」——
+# 一道门静默缩了半张表，比没有这道门更糟。宁可报错也不猜。
+if len(args) > 1:
+    sys.exit("本脚本一次只扫一个文件（收到 %d 个：%s）。\n"
+             "行号列与基线都按单文件计，多文件请分开跑："
+             "CI 里是两行 `run`，本地请串两条命令。" % (len(args), args))
 path = args[0] if args else "backend/app/api/reschedule.py"
 tree = ast.parse(Path(path).read_text(encoding="utf-8"))
 
@@ -316,6 +330,22 @@ if update_baseline:
     print()
     print(f"📝 已更新基线：{len(current)} 个零 await 轻查询 → {BASELINE.name}")
     print("   （把这个文件一起提交，让评审看见基线变化）")
+elif skip_baseline:
+    # R76：基线是**按单文件**攒出来的（当前是 reschedule.py 的 8 个轻查询）。
+    # 拿它去比对另一个文件，只会得到一句假的"✅ 有 8 个零 await 路由被消除"，
+    # 每个 PR 都打印，噪音还会掩盖真正被消除的那几个。
+    # 所以新搬出来的文件用 --no-baseline：**不比对**，但零 await 路由照样判红 ——
+    # 比"和别人的基线比"更严格。
+    if zero_await:
+        print()
+        print(f"❌ 本文件出现 {len(zero_await)} 个零 await 的 async 路由"
+              f"（--no-baseline 下仍判红；要么改成有 await，要么登记进基线）：")
+        for lineno, p, name, heavy in zero_await:
+            print(f"   - L{lineno}  {p}  {name}  重调用: {','.join(heavy) or '（轻）'}")
+        failed = True
+    else:
+        print()
+        print("✅ 零 await 路由 0 个（--no-baseline：本文件不参与基线比对）")
 elif baseline is None:
     print()
     print(f"⚠️ 没有基线文件 {BASELINE.name}；用 --update-baseline 生成一次。")
