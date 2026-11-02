@@ -14,8 +14,10 @@
 
 import asyncio
 import os
+import sqlite3
 import sys
 import threading
+import time
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -664,3 +666,266 @@ def test_upload_swap_section_holds_write_lock():
         api._DB_PATH, api._landing_store = saved[0], saved[1]
         api.ScheduleDatabase, api._upload_target = saved[2], saved[3]
         api._db = saved[4]      # 换表真的替换了全局 _db，必须还原
+
+
+# ---------- R75：落地 / 撤销的锁必须在**工作线程**里拿 ----------
+#
+# R74 量出来的那条：真实 sqlite 锁下 `plan_landing.undo` 要等两次 busy_timeout
+# （单次 5.50s ⇒ 一次 undo 11.04s）。但 R74 只测了**函数**，端点层还是
+# `async def` 里同步 `with _land_lock:` —— 于是这 11 秒里整个事件循环停摆。
+#
+# 更隐蔽的是"等锁"这一半：`_land_lock` 同时是 `_db.entries` 的写锁
+# （`_DB_WRITE_LOCK`，R28），别的请求在锁内跑时，这里就在**事件循环线程**上原地等。
+# 所以正确的改法不是"把 undo 包进 run_in_threadpool"，而是**连拿锁一起**进去。
+#
+# R75 取证（`R75-new/probe_endpoint_loop.py`，同一份业务代码，只改跑在哪条线程）：
+#
+#     A 旧形状（事件循环） busy=0.15s  undo 0.469s  心跳最大滞后 **459.0 ms**
+#     B 新形状（线程池）   busy=0.15s  undo 0.484s  心跳最大滞后    6.0 ms
+#     B 生产值             busy=5s     undo 11.047s 心跳最大滞后   22.0 ms（714 拍）
+#
+# 耗时一模一样（同一段 sqlite 等待），差别只在事件循环有没有被按住。
+
+_LAND_PLAN = {"schedule": [
+    {"class_name": "甲班", "project": "项目A", "group": "1组",
+     "week": 3, "weekday": "周三", "time_slot": "91011",
+     "room": "A201", "teacher": "吴老师"},
+]}
+
+# busy_timeout 从 5s 调到 0.15s —— **只改等待时长，不改被测分支**（真锁、
+# 同一个 sqlite 异常、同一段 except）。不改的话一条用例白等 11s；
+# 生产值 11.047s 已在 probe 里量过，数字写在文档里。
+_LOCK_WAIT = 0.15
+
+
+class _ShortBusyStore(api.plan_landing.LandingStore):
+    """busy timeout 可调的 LandingStore（默认 5s 会让用例白等 11s）。"""
+
+    def __init__(self, path, timeout=_LOCK_WAIT):
+        super().__init__(path)
+        self._timeout = timeout
+
+    def _conn(self):
+        conn = sqlite3.connect(self.path, timeout=self._timeout)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def _land_env(tmp_path, monkeypatch, timeout=_LOCK_WAIT):
+    """把落地链路的依赖整体指向临时库（与 test_landing_endpoints 的 env 同构）。"""
+    from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
+
+    db = ScheduleDatabase()
+    db.entries = [
+        ScheduleEntry(1, "周一", "567", "甲班", "1组", "项目A", "A101", "吴老师"),
+        ScheduleEntry(1, "周二", "567", "甲班", "2组", "项目A", "A101", "吴老师"),
+    ]
+    db.pending = []
+    db.loaded = True
+    store = _ShortBusyStore(str(tmp_path / "land.db"), timeout=timeout)
+    store.init_schema()
+    monkeypatch.setattr(api, "_db", db)
+    monkeypatch.setattr(api, "_DB_PATH", str(tmp_path / "land.db"))
+    monkeypatch.setattr(api, "_landing_store", store)
+    return db, store
+
+
+def _hold_reserved(path):
+    """另一条连接拿 RESERVED 锁（`BEGIN IMMEDIATE`）：真锁，让 sqlite 自己抛错。"""
+    conn = sqlite3.connect(path, timeout=0.0, isolation_level=None)
+    conn.execute("BEGIN IMMEDIATE")
+    return conn
+
+
+def _land_once():
+    """先落一次地，撤销才有记录可撤。"""
+    asyncio.run(api.land_commit(api.LandPlanRequest(**_LAND_PLAN), land_by="admin"))
+
+
+def _run_with_heartbeat(coro_factory, beat=0.01):
+    """跑一段活儿，同时记录事件循环心跳的最大滞后（毫秒）。
+
+    返回 (结果, 异常文本, 耗时秒, 最大滞后毫秒)。
+    """
+    stop = False
+    lags = []
+
+    async def beat_loop():
+        while not stop:
+            t0 = time.monotonic()
+            await asyncio.sleep(beat)
+            lags.append(time.monotonic() - t0 - beat)
+
+    async def main():
+        nonlocal stop
+        task = asyncio.create_task(beat_loop())
+        await asyncio.sleep(0.05)          # 让心跳先跑起来，别把启动开销算进去
+        t0 = time.monotonic()
+        out, err = None, ""
+        try:
+            out = await coro_factory()
+        except Exception as e:              # 失败分型要照实看，别吞
+            err = "{}: {}".format(type(e).__name__, e)
+        dur = time.monotonic() - t0
+        stop = True
+        await task
+        return out, err, dur, max(lags) * 1000
+
+    return asyncio.run(main())
+
+
+def test_land_undo_runs_off_event_loop(monkeypatch, tmp_path):
+    """撤销的业务（含拿写锁）必须跑在工作线程上，不能在事件循环线程上。"""
+    _land_env(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_undo(db, store, actor=""):
+        seen["thread"] = threading.current_thread()
+        seen["actor"] = actor
+        return {"success": True, "landed_at": "2026-11-02T21:00:00",
+                "restored_entries": 2, "rolled_back_moves": 0}
+
+    monkeypatch.setattr(api.plan_landing, "undo", fake_undo)
+
+    out, loop_thread = _run(api.land_undo(actor="admin"))
+
+    assert out["success"] is True
+    assert seen["actor"] == "admin", "操作人没透到撤销里（要追责的写操作）"
+    assert seen["thread"] is not loop_thread, (
+        "撤销跑在事件循环线程上 —— 锁竞争时整站会跟着停摆（实测 11.08s）"
+    )
+    assert "已撤销" in out["message"], "回执丢了（R73 那条不许回退）"
+
+
+def test_land_commit_runs_off_event_loop(monkeypatch, tmp_path):
+    """落地同理：`apply_plan` + 落盘整段都在锁内，锁也不能在事件循环上等。"""
+    _land_env(tmp_path, monkeypatch)
+    seen = {}
+
+    real_apply = api.plan_landing.apply_plan
+
+    def fake_apply(db_arg, plan):
+        seen["thread"] = threading.current_thread()
+        return real_apply(db_arg, plan)
+
+    monkeypatch.setattr(api.plan_landing, "apply_plan", fake_apply)
+
+    out, loop_thread = _run(
+        api.land_commit(api.LandPlanRequest(**_LAND_PLAN), land_by="admin"))
+
+    assert out["success"] is True, out
+    assert out["landed_by"] == "admin"
+    assert seen["thread"] is not loop_thread, "落地的锁与写入跑在事件循环线程上"
+
+
+def test_land_undo_waiting_on_real_lock_does_not_stall_heartbeat(monkeypatch, tmp_path):
+    """真锁挡住撤销时：撤销**照样等**（~0.3s），但事件循环只滞后几毫秒。
+
+    这条是 R75 的**判据**，两半缺一不可：
+      · 只断言"滞后小" —— 撤销要是根本没等（提前返回），也能过；
+      · 只断言"等了"   —— 旧形状也等了，正是它的问题。
+    R75 实测同一段业务：旧形状滞后 459ms（≈ 耗时），新形状 6ms。
+    """
+    _land_env(tmp_path, monkeypatch)
+    _land_once()
+
+    holder = _hold_reserved(api._DB_PATH)
+    try:
+        out, err, dur, lag_ms = _run_with_heartbeat(
+            lambda: api.land_undo(actor="admin"))
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert not err, "撤销不该把异常漏出端点（失败分型要回 500 + 完整结构）：" + err
+    assert getattr(out, "status_code", None) == 500, (
+        "真锁下撤销应走 revoke_failed 的 500，实际 %r" % (out,))
+    assert dur >= 0.3, (
+        "撤销只用了 %.3fs —— 它没在等锁，那这条用例证明不了任何事情" % dur)
+    assert lag_ms < 0.15 * 1000, (
+        "撤销等锁期间事件循环被按住 %.1fms（耗时 %.3fs）—— 锁是在事件循环线程上等的"
+        % (lag_ms, dur))
+
+
+def test_land_undo_waiting_on_write_lock_does_not_stall_heartbeat(monkeypatch, tmp_path):
+    """另一条请求正持着写锁时：撤销**等在锁上**，事件循环照样能跑。
+
+    上一条守的是"锁内的 sqlite 等待"，这条守的是另一半 —— **等锁本身**。
+    两者是不同的失败面：
+
+        out = _locked_land_undo(actor)                    ← 锁与活都在事件循环上（旧形状）
+        with _land_lock:
+            out = await run_in_threadpool(...)            ← 看起来改了，**等锁还在事件循环上**
+
+    第二种是很自然的"顺手改法"，也确实是错的：`_land_lock` 同时是 `_db.entries`
+    的写锁（`_DB_WRITE_LOCK`，R28），一次慢落地（实测 11s）持锁期间，所有落地/撤销
+    入口都要在事件循环上原地排队。上一条用例对它**失明**（那条的锁是空的）。
+    """
+    _land_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        api.plan_landing, "undo",
+        lambda db, store, actor="": {"success": True,
+                                     "landed_at": "2026-11-02T21:00:00",
+                                     "restored_entries": 2,
+                                     "rolled_back_moves": 0})
+
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with api._land_lock:
+            acquired.set()
+            release.wait(2.0)          # 模拟"有人在锁内干慢活"
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert acquired.wait(2.0), "拿锁的辅助线程没起来，场景失效"
+    try:
+        # 0.35s 后放锁：撤销必须等这么久，但不许把事件循环一起按着
+        threading.Timer(0.35, release.set).start()
+        out, err, dur, lag_ms = _run_with_heartbeat(
+            lambda: api.land_undo(actor="admin"))
+    finally:
+        release.set()
+        t.join()
+
+    assert not err, err
+    assert out["success"] is True
+    assert dur >= 0.3, (
+        "撤销只用了 %.3fs —— 它没等在写锁上，这条用例证明不了任何事情" % dur)
+    assert lag_ms < 0.15 * 1000, (
+        "等锁期间事件循环被按住 %.1fms —— 锁是在事件循环线程上等的" % lag_ms)
+
+
+def test_two_concurrent_undos_still_serialize(monkeypatch, tmp_path):
+    """下沉线程池**不能顺手把锁丢了**：两个撤销并发进来仍然要排队。
+
+    变异体会写成"把 `with _land_lock:` 留在 async 端、只把 undo 丢线程池" ——
+    那样锁确实还在，但等锁发生在事件循环上；反过来"整段下沉但忘了带锁"更安静：
+    两个撤销同时改 `_db.entries`，后一个基于前一个的中间状态算快照。
+    """
+    _land_env(tmp_path, monkeypatch)
+    state = {"now": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def fake_undo(db, store, actor=""):
+        with guard:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        threading.Event().wait(0.08)        # 可被唤醒的 sleep，别卡死退出
+        with guard:
+            state["now"] -= 1
+        return {"success": True, "landed_at": "2026-11-02T21:00:00",
+                "restored_entries": 2, "rolled_back_moves": 0}
+
+    monkeypatch.setattr(api.plan_landing, "undo", fake_undo)
+
+    async def main():
+        return await asyncio.gather(
+            api.land_undo(actor="a"), api.land_undo(actor="b"))
+
+    outs = asyncio.run(main())
+
+    assert [o["success"] for o in outs] == [True, True]
+    assert state["peak"] == 1, (
+        "两个撤销同时在锁内跑（峰值 %d）—— 写锁没跟着下沉" % state["peak"])

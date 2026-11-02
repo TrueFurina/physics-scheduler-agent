@@ -1741,6 +1741,44 @@ async def land_preview(req: LandPlanRequest):
     return diff
 
 
+def _locked_land_commit(plan: List[dict], note: str, actor: str):
+    """落地的阻塞主体（跑在线程池里）：`with _land_lock:` 里全是同步活。
+
+    R75：为什么锁必须在**工作线程**里拿
+    ------------------------------------
+    这段以前直接写在 `async def land_commit` 体内 —— 而 `_land_lock` 是同步的
+    `threading.Lock`。于是事件循环会被按在地上，两种情形都算：
+
+    ① **等锁**：`_land_lock` 同时是 `_db.entries` 的写锁（`_DB_WRITE_LOCK`，R28）。
+       另一个请求（调课 / 审批 / 撤销）正在锁内跑，这里就在**事件循环线程**上原地等。
+    ② **锁内的 sqlite 写入**：`save()` 遇到锁竞争要等满 busy_timeout。R74 实测
+       单次 5.50 s、`undo` 两次尝试 11.04 s（`R74-new/probe_lock.py`）。
+
+    实测（R74 `probe_loop.py`，50 ms 心跳）：真锁 + 同步（即原来的形状）心跳最大滞后
+    **11076 ms**；同样时长的等待丢进工作线程后 **14 ms**。一次被锁的落地/撤销 =
+    整站 11 秒不响应，并发请求、健康检查、SSE 心跳全部排队。
+
+    ⚠️ 反例（很容易写错的那种）：把 `with _land_lock:` 留在 async 函数里，
+    再在锁内 `await run_in_threadpool(...)` —— 锁仍然是在**事件循环线程**上等到的，
+    ①②一个都没解决。锁一定要和被保护的活待在**同一条工作线程**里。
+
+    锁内顺序不能动：diff 现算（不信预览那一份，预览与采纳之间可能有审批调课生效）
+    → snapshot（撤销用）→ apply → save（失败 restore 再抛）。
+    """
+    with _land_lock:
+        diff = plan_landing.diff_plan(plan, _db.entries)
+        before = plan_landing.snapshot(_db)
+        applied = plan_landing.apply_plan(_db, plan)
+        try:
+            rec = _landings().save(plan, before, note=note, actor=actor)
+        except Exception as e:
+            plan_landing.restore(_db, before)
+            raise HTTPException(
+                status_code=500,
+                detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
+    return diff, rec, applied
+
+
 @router.post("/parallel/land", summary="落地采纳：把方案写回安排表（需管理员）",
              dependencies=_ADMIN_ONLY + [Depends(rate_limit("parallel-land"))])
 async def land_commit(req: LandPlanRequest, land_by: str = Depends(require_admin)):
@@ -1748,22 +1786,14 @@ async def land_commit(req: LandPlanRequest, land_by: str = Depends(require_admin
 
     为什么落盘失败要回滚内存：否则"内存已改、重启丢失"，教秘会在下一次刷新后
     看到方案神秘消失 —— 与 R-36「审批通过课表一个字节没变」同族的不实。
+
+    R75：锁 + 落盘整段下沉线程池（`_locked_land_commit`）。此前它是 `async def`
+    里同步 `with _land_lock:`，锁竞争时把**事件循环**一起按住（实测 11076 ms）。
     """
     await _ensure_loaded_async()
     plan = _land_plan_or_400(req)
-    with _land_lock:
-        # diff 现算，不信预览那一份：预览与采纳之间可能有审批调课生效
-        diff = plan_landing.diff_plan(plan, _db.entries)
-        before = plan_landing.snapshot(_db)
-        applied = plan_landing.apply_plan(_db, plan)
-        try:
-            rec = _landings().save(plan, before, note=req.note or "",
-                                   actor=land_by or "")
-        except Exception as e:
-            plan_landing.restore(_db, before)
-            raise HTTPException(
-                status_code=500,
-                detail=f"落地方案落盘失败，已回滚内存改动（安排表未被修改）：{e}")
+    diff, rec, applied = await run_in_threadpool(
+        _locked_land_commit, plan, req.note or "", land_by or "")
     diff.update({"success": True, "landed_at": rec["landed_at"],
                  "after_entries": applied["total"],
                  # R58：谁落的 —— 撤销/历史面板要能对上人
@@ -1774,6 +1804,28 @@ async def land_commit(req: LandPlanRequest, land_by: str = Depends(require_admin
     diff["message"] = plan_landing.landing_receipt(
         diff, landed_at=rec["landed_at"], actor=diff["landed_by"])
     return diff
+
+
+def _locked_land_undo(actor: str) -> dict:
+    """撤销的阻塞主体（跑在线程池里）。理由与 `_locked_land_commit` 同一条。
+
+    R75 实测（R74 取证脚本）：另一条连接 `BEGIN IMMEDIATE` 持锁时，`undo` 里的
+    `revoke` 单次等 **5.50 s** 后抛 `database is locked`，重试再一次 ⇒ 整个 `undo`
+    **11.04 s**；而这段时间原先整段压在事件循环上（心跳最大滞后 11076 ms）。
+    下沉之后 `undo` 仍要 11.04 s（sqlite 的 busy_timeout 没变），但事件循环只滞后 14 ms。
+
+    锁内做两件事：撤销本身 + **在锁内**读 `latest()` 算回执。
+    后者必须在锁内：锁外读会被并发落地插队，回执说的就不是"这次撤销之后"的状态。
+    """
+    with _land_lock:
+        out = plan_landing.undo(_db, _landings(), actor=actor)
+        if out.get("success"):
+            # R73：撤销是"弹一条"，不是"清空" —— 库里可能还留着**更早**的落地。
+            # 回执必须说清"撤销之后还剩什么"，否则横幅写"已撤销落地"、下面的状态栏
+            # 照旧写"已是落地方案"，同一屏两句话互相打脸（实测过的那个组合）。
+            out["message"] = plan_landing.undo_receipt(
+                out, remaining=_landings().latest())
+    return out
 
 
 @router.post("/parallel/land/undo", summary="撤销最后一次落地（需管理员）",
@@ -1798,17 +1850,13 @@ async def land_undo(actor: str = Depends(require_admin)):
     R73：成功分支补 `message`（`plan_landing.undo_receipt`）。此前成功只回字段，
     前端自己拼"已撤销落地，安排表恢复到 N 条" —— 既不说撤的是哪一次，也不说
     撤销之后**还有更早一次落地在生效**（此时 `/land/status` 仍报 landed=True）。
+
+    R75：锁 + 撤销整段下沉线程池（`_locked_land_undo`）。此前是 `async def` 里同步
+    `with _land_lock:`，而 `undo` 在锁竞争下要等两次 busy_timeout（实测 11.04 s）——
+    这 11 秒里事件循环完全停摆（心跳最大滞后 11076 ms）。
     """
     await _ensure_loaded_async()
-    with _land_lock:
-        out = plan_landing.undo(_db, _landings(), actor=actor or "")
-        if out.get("success"):
-            # R73：撤销是"弹一条"，不是"清空" —— 库里可能还留着**更早**的落地。
-            # 回执必须说清"撤销之后还剩什么"，否则横幅写"已撤销落地"、下面的状态栏
-            # 照旧写"已是落地方案"，同一屏两句话互相打脸（实测过的那个组合）。
-            # 在锁内读一次：锁外读会被并发落地插队，回执说的就不是这次撤销后的状态。
-            out["message"] = plan_landing.undo_receipt(
-                out, remaining=_landings().latest())
+    out = await run_in_threadpool(_locked_land_undo, actor or "")
     if out.get("success"):
         return out
     if out.get("error_kind") == "no_record":
