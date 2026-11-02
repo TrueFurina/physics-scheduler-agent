@@ -1794,10 +1794,21 @@ async def land_undo(actor: str = Depends(require_admin)):
       ③ 教秘以为撤销没生效，转头去"重新落地"，把刚退掉的方案又落回去。
       所以这一型返回 500 + 完整结构，只额外补一个 `detail` 字符串给通用
       `describeApiError` 读取（前端不认结构也能拿到人话）。
+
+    R73：成功分支补 `message`（`plan_landing.undo_receipt`）。此前成功只回字段，
+    前端自己拼"已撤销落地，安排表恢复到 N 条" —— 既不说撤的是哪一次，也不说
+    撤销之后**还有更早一次落地在生效**（此时 `/land/status` 仍报 landed=True）。
     """
     await _ensure_loaded_async()
     with _land_lock:
         out = plan_landing.undo(_db, _landings(), actor=actor or "")
+        if out.get("success"):
+            # R73：撤销是"弹一条"，不是"清空" —— 库里可能还留着**更早**的落地。
+            # 回执必须说清"撤销之后还剩什么"，否则横幅写"已撤销落地"、下面的状态栏
+            # 照旧写"已是落地方案"，同一屏两句话互相打脸（实测过的那个组合）。
+            # 在锁内读一次：锁外读会被并发落地插队，回执说的就不是这次撤销后的状态。
+            out["message"] = plan_landing.undo_receipt(
+                out, remaining=_landings().latest())
     if out.get("success"):
         return out
     if out.get("error_kind") == "no_record":

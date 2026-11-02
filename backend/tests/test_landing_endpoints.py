@@ -234,3 +234,74 @@ def test_undo_revoke_failure_is_500_and_says_rolled_back(env, monkeypatch):
     # 记录仍未被标撤销 —— 库与内存此刻不一致，这正是"必须重试"的理由
     h = client.get("/api/reschedule/parallel/land/history", headers=headers).json()
     assert h["history"][0]["revoked"] is False
+
+
+# ------------------------------------------------------------------ R73 追加
+
+def test_undo_success_returns_human_message(env):
+    """撤销成功也要有 `message`：R60 只补了落地那一步，撤销这一步一直是字段裸奔。
+
+    字段被回退时前端会渲染出兜底文案而不是报错 —— **这种缺失只有接线测试守得住**
+    （同 R60 两条的理由）。这里同时锁住"没有更早落地时可以说已回到落地前"。
+    """
+    client, headers = env
+    client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers)
+
+    u = client.post("/api/reschedule/parallel/land/undo", headers=headers)
+    assert u.status_code == 200, u.text
+    body = u.json()
+    msg = body.get("message")
+    assert isinstance(msg, str) and msg, f"撤销回执没有 message：{body.keys()}"
+    assert msg.startswith("↩️ 已撤销 "), msg
+    assert "由 admin 落地" in msg, msg
+    assert "已回到落地前的状态（现 2 条）" in msg, msg
+    assert "更早" not in msg, f"库里已无其它落地，不该提更早：{msg}"
+
+    # 事实核对：撤销之后确实没有落地在生效（回执这一句才对得上）
+    st = client.get("/api/reschedule/parallel/land/status", headers=headers).json()
+    assert st["landed"] is False, st
+
+
+def test_undo_message_admits_earlier_landing_still_active(env):
+    """连续落地两次再撤销一次：回执必须说"更早那次仍在生效"，且与 status 对得上。
+
+    实测病象：撤销第二次之后 `status.landed` 仍是 True，面板下半部分照旧显示
+    "当前安排表已是落地方案（更早那次的时刻）"。而横幅当时写的是"已撤销落地，
+    安排表恢复到 N 条"——一屏之内两句话互相打脸，教秘会以为回到了原始状态，
+    转头去重新落地。这条用例把"回执"与"状态"钉成同一个事实的两个说法。
+    """
+    client, headers = env
+    plan_b = {"schedule": [
+        {"class_name": "甲班", "project": "项目A", "group": "1组",
+         "week": 5, "weekday": "周五", "time_slot": "123",
+         "room": "A301", "teacher": "吴老师"},
+    ]}
+    first = client.post("/api/reschedule/parallel/land", json=PLAN, headers=headers)
+    assert first.status_code == 200, first.text
+    second = client.post("/api/reschedule/parallel/land", json=plan_b, headers=headers)
+    assert second.status_code == 200, second.text
+
+    u = client.post("/api/reschedule/parallel/land/undo", headers=headers)
+    assert u.status_code == 200, u.text
+    body = u.json()
+    msg = body["message"]
+    # 撤掉的是**第二次**（最新那条），回执里的时刻必须是它
+    assert body["landed_at"] == second.json()["landed_at"], body
+    assert second.json()["landed_at"].replace("T", " ")[:19] in msg, msg
+    assert "更早的一次落地" in msg, msg
+    assert "仍然生效" in msg, f"更早那次还在生效，回执必须说：{msg}"
+    assert "已回到落地前" not in msg, f"这句话此刻是假的：{msg}"
+
+    # 与状态栏对齐：仍然 landed，且指向第一次落地
+    st = client.get("/api/reschedule/parallel/land/status", headers=headers).json()
+    assert st["landed"] is True, f"更早那次落地未撤销，status 不该说没有：{st}"
+    assert st["landed_at"] == first.json()["landed_at"], (st, first.json())
+
+    # 再撤一次就该回到空：回执这次要说"已回到落地前"
+    u2 = client.post("/api/reschedule/parallel/land/undo", headers=headers)
+    assert u2.status_code == 200, u2.text
+    msg2 = u2.json()["message"]
+    assert "已回到落地前的状态" in msg2, msg2
+    assert "更早" not in msg2, msg2
+    assert client.get("/api/reschedule/parallel/land/status",
+                      headers=headers).json()["landed"] is False

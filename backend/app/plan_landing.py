@@ -308,6 +308,67 @@ def landing_receipt(diff: dict, landed_at: str = "", actor: str = "") -> str:
     return head
 
 
+def undo_receipt(out: dict, remaining: Optional[dict] = None) -> str:
+    """撤销回执：一句话说清"撤掉了哪一次、现在处在什么状态"。pure：只读入参。
+
+    为什么要这个函数（R73）
+    ----------------------
+    `/parallel/land` 有 `landing_receipt`（R60），`/parallel/land/undo` 没有对称的
+    回执：成功时只回一堆字段，前端 `doUndo` 自己拼一句话 ——
+
+        ↩️ 已撤销落地，安排表恢复到 2 条
+
+    实测把这句话的**三个缺口**全暴露出来（连续落地两次 A、B，再撤销一次）：
+
+    1. **不说撤的是哪一次**。落地两次之后，教秘要确认的正是"我刚才撤掉的是
+       不是刚才那次"。`landed_at` / `landed_actor` 就在响应里，界面一个都没念。
+    2. **不说撤销之后还剩什么**。撤销只弹一条记录，更早那次落地**仍然生效**：
+       实测撤销后 `GET /parallel/land/status` 依旧 `landed=True`，面板下半部分
+       照旧显示"当前安排表已是落地方案（更早那次的时刻）"。于是同一屏上，
+       横幅说"已撤销落地"、下面说"已是落地方案" —— 两句都真，读起来像 bug。
+       不把"还有更早的一次在生效"写进回执，教秘会以为已经回到原始状态。
+    3. **不说回滚掉的调课要怎么办**。`rolled_back_moves` 只给数字，界面上补了
+       "需重新审批"四个字；但那一句是前端硬编码的，字段一旦改名就静默消失。
+
+    与 R60 同一口径：**写路径的每个"看起来成功"都要人话兜住**，且措辞只描述
+    已发生的事实 —— 有更早落地时绝不写"已回到落地前"。
+    """
+    restored = int(out.get("restored_entries") or 0)
+    moves = int(out.get("rolled_back_moves") or 0)
+    landed_at = (out.get("landed_at") or "").strip()
+    landed_actor = (out.get("landed_actor") or "").strip()
+    revoked_at = (out.get("revoked_at") or "").strip()
+    revoked_by = (out.get("revoked_by") or "").strip()
+
+    when = landed_at.replace("T", " ")[:19]
+    head = f"↩️ 已撤销 {when} 那次落地" if when else "↩️ 已撤销最近一次落地"
+    head += f"，由 {landed_actor} 落地" if landed_actor else "（该记录没有留操作人）"
+
+    if remaining:
+        # 有更早的落地仍在生效：**不能**说"已回到落地前"，那是假的。
+        head += f"；安排表现 {restored} 条 —— 更早那次的落地结果，不是原始状态"
+    else:
+        head += f"；安排表已回到落地前的状态（现 {restored} 条）"
+
+    if moves > 0:
+        # 这是撤销唯一的**静默数据变更**：落地之后审批通过的调课一并退了。
+        head += (f"\n⚠️ 一并回滚了落地后生效的 {moves} 条调课 —— "
+                 f"这些申请需要重新审批，不会自动重放")
+
+    if remaining:
+        r_when = (remaining.get("landed_at") or "").replace("T", " ")[:19]
+        r_actor = (remaining.get("actor") or "").strip()
+        head += "\nℹ️ 更早的一次落地"
+        head += f"（{r_when}" if r_when else "（时刻未记录"
+        head += f"，由 {r_actor} 落地）" if r_actor else "，未记录操作人）"
+        head += "仍然生效：撤销入口还在，要回到更早的状态就再撤一次"
+
+    if revoked_at:
+        head += f"\n🕒 {revoked_at.replace('T', ' ')[:19]}"
+        head += f"，由 {revoked_by} 撤销" if revoked_by else " 撤销"
+    return head
+
+
 # ---------------------------------------------------------------------------
 # 快照（撤销用）
 # ---------------------------------------------------------------------------

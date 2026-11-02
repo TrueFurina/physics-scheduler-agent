@@ -173,10 +173,15 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       const r = await rescheduleApi.landUndo();
       setDiff(null);
       await loadStatus();
-      const extra = r.data.rolled_back_moves > 0
-        ? `；一并回滚了落地后生效的 ${r.data.rolled_back_moves} 条调课（需重新审批）`
-        : '';
-      onMsg(`↩️ 已撤销落地，安排表恢复到 ${r.data.restored_entries} 条${extra}`);
+      // R73：回执交给后端一次说完（撤的是哪一次 / 还剩不剩更早的落地 / 回滚了几条
+      // 调课）。原来这里自己拼"已撤销落地，安排表恢复到 N 条"——连续落地两次再撤销
+      // 一次时，那句漏掉了"更早那次仍在生效"，而状态栏此刻照旧写"已是落地方案"，
+      // 同一屏两句话互相打脸。兜底文案保留：老后端没有 message。
+      onMsg(r.data.message
+        || (r.data.rolled_back_moves > 0
+          ? `↩️ 已撤销落地，安排表恢复到 ${r.data.restored_entries} 条；`
+            + `一并回滚了落地后生效的 ${r.data.rolled_back_moves} 条调课（需重新审批）`
+          : `↩️ 已撤销落地，安排表恢复到 ${r.data.restored_entries} 条`));
     } catch (err: any) {
       if (isAuthError(err)) {
         onRequireLogin();

@@ -12,6 +12,8 @@
  *  7. 采纳横幅**用后端 message**，前端不再自拼数字（R60；无差异落地时尤其明显）。
  *  8. 撤销返回 500 + rolled_back=true（课表已退、标记没写进库）时，横幅必须说
  *     "只做了一半"并重拉状态 —— 否则界面还挂着"可撤销"而安排表已经变了（R61）。
+ *  9. 撤销成功的横幅原样用后端 message（R73）。自拼那版漏了"更早那次仍在生效"，
+ *     而状态栏此刻照旧显示"已是落地方案"——同一屏两句话互相打脸。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -229,6 +231,37 @@ describe('LandPlanPanel', () => {
 
     // 后端的两次失败原因要透到界面上（别只剩"撤销失败"四个字）
     await waitFor(() => expect(document.body.textContent).toContain('disk I/O error'));
+    confirmSpy.mockRestore();
+  });
+
+  it('撤销成功的横幅用后端 message，前端不再自拼（R73）', async () => {
+    vi.mocked(rescheduleApi.landUndo).mockClear();
+    vi.mocked(rescheduleApi.landStatus).mockClear();
+    // 连续落地两次再撤销一次：库里还有更早的一次在生效，回执由后端一次说完
+    const RECEIPT_UNDO = '↩️ 已撤销 2026-11-02 20:22:52 那次落地，由 admin 落地；'
+      + '安排表现 2 条 —— 更早那次的落地结果，不是原始状态\n'
+      + 'ℹ️ 更早的一次落地（2026-11-02 20:22:52，由 admin 落地）仍然生效：'
+      + '撤销入口还在，要回到更早的状态就再撤一次';
+    vi.mocked(rescheduleApi.landStatus).mockResolvedValue({
+      data: { landed: true, landed_at: '2026-10-23T18:00:00', plan_rows: 2, note: '测试' },
+    } as any);
+    vi.mocked(rescheduleApi.landUndo).mockResolvedValue({
+      data: {
+        success: true, landed_at: '2026-11-02T20:22:52.758902',
+        restored_entries: 2, rolled_back_moves: 1, message: RECEIPT_UNDO,
+      },
+    } as any);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { onMsg } = renderPanel(true);
+    await waitFor(() => expect(screen.getByRole('button', { name: /撤销落地/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /撤销落地/ }));
+    await waitFor(() => expect(rescheduleApi.landUndo).toHaveBeenCalledTimes(1));
+
+    // 原样透传：横幅说的必须就是后端那句（含"更早那次仍生效"这个关键事实）
+    await waitFor(() => expect(onMsg).toHaveBeenCalledWith(RECEIPT_UNDO));
+    // 自拼文案里没有"更早"这层信息，一旦回退到它，横幅就会与状态栏互相打脸
+    expect(onMsg).not.toHaveBeenCalledWith(
+      expect.stringContaining('已撤销落地，安排表恢复到'));
     confirmSpy.mockRestore();
   });
 
