@@ -24,6 +24,9 @@ from app.api import reschedule
 # landing 顶部要 `from app.api import reschedule` 取可变模块状态（`_db` / `_land_lock`），
 # 反过来 reschedule 只在 `__getattr__` 里惰性取 landing（导入期不成环）。
 from app.api import landing
+# R77：主数据维护端点族（/master/**）搬到 `app/api/master.py`，同样是"本模块 import
+# reschedule 取状态"的依赖方向，所以也排在 reschedule 之后。
+from app.api import master
 from app.engine import warmup
 
 _STARTED_AT = time.time()
@@ -182,6 +185,10 @@ app.include_router(reschedule.router, prefix="/api/reschedule", tags=["调课管
 # R76：落地方案（/parallel/land/**）搬到独立模块，prefix 与 tags 与搬迁前完全一致 ——
 # 对前端、对 /openapi.json 都是同一批路径，搬迁不改任何调用方。
 app.include_router(landing.router, prefix="/api/reschedule", tags=["调课管理"])
+# R77：主数据维护（/master/**）同样搬到独立模块，prefix 与 tags 与搬迁前一致。
+# 注意 `/master/import` 等**不是** `/parallel/**`：路径、方法、dependencies 全未动，
+# 免鉴权/需管理员的分界与搬迁前逐条相同（`/master/overview` 仍免鉴权）。
+app.include_router(master.router, prefix="/api/reschedule", tags=["调课管理"])
 
 
 @app.exception_handler(Exception)

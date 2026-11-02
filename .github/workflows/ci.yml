@@ -66,14 +66,16 @@ jobs:
         #   · 零 await 的轻查询（13 个，1–5ms）与基线快照比对，**只拦新增**；
         #   · 基线变化需 `--update-baseline` 显式更新并提交，评审能看见。
         #
-        # R76：落地方案端点族搬到 `backend/app/api/landing.py`，两个文件都要扫。
-        # 脚本一次只接受一个文件（多给会被它拒绝，不再静默只看第一个）。
-        # 少扫一个文件 = 这道门静默缩小覆盖面，而它看起来仍然是绿的。
-        # landing 带 `--no-baseline`：零 await 基线是按 reschedule.py 攒的，
-        # 拿它比 landing 只会打印一句假的"消除了 8 个"，而零 await 路由照样判红。
-        run: |
-          python scripts/audit_async_blocking.py backend/app/api/reschedule.py
-          python scripts/audit_async_blocking.py backend/app/api/landing.py --no-baseline
+        # R76：落地方案端点族搬到 `backend/app/api/landing.py`；R77 又把主数据维护
+        # 端点族搬到 `backend/app/api/master.py`。当时的做法是"CI 里多写一行 run"，
+        # 并注明"脚本一次只接受一个文件"。
+        #
+        # R77 推翻了那个做法：多写一行只是把"漏扫"变成"要记得加一行"，而每次搬家都
+        # 正好是那个会被忘掉的时刻 —— 门静默缩小覆盖面，却仍然是绿的。现在脚本自己
+        # 展开目录，**不给参数 = 扫整个 backend/app/api/**，新增模块自动进入覆盖面。
+        # 基线键是"路由路径 + 函数名"（与文件无关），所以多文件共用一个基线是对的，
+        # 也不会再打印那种假的"消除了 N 个"。
+        run: python scripts/audit_async_blocking.py
 
       - name: Pytest
         working-directory: backend

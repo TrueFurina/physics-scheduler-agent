@@ -553,18 +553,53 @@ def test_upload_under_limit_reaches_parser():
 
 
 def test_all_upload_endpoints_use_limited_reader():
-    """守卫：5 个上传端点都不得再用裸 await file.read()。"""
-    import inspect
+    """守卫：**所有**上传端点都不得用裸 `await file.read()` 全量读入。
+
+    R77 之前这条只读 `inspect.getsource(reschedule)`：把 3 个 `/master/*` 上传端点
+    搬到 `app/api/master.py` 之后，同一个判据数出来是 2（原为 5），用例直接红 ——
+    这条守卫**帮我们抓到了自己**，没有被搬空。红得对，但根因不在端点：判据的
+    扫描范围写死在一个文件上。
+
+    现在的判据改成"逐个端点查"，范围由 `app/api/*.py` 自己发现：
+      1. 任何 api 模块里都不许出现 `content = await file.read()`；
+      2. 凡是形参里有 `file` 的 async 端点，函数体必须调用受限读取；
+      3. 找到的上传端点**不少于 5 个** —— 这条防的是"守卫自己的覆盖面缩水"：
+         如果哪天再搬一次家而判据又写死了文件，数量会掉下来，它会先叫。
+    """
+    import ast
+    from pathlib import Path
 
     from app.api import reschedule as rs
 
-    src = inspect.getsource(rs)
-    assert "content = await file.read()" not in src, (
-        "仍有上传端点用裸 file.read() 全量读入，超大文件会顶爆内存"
-    )
-    assert src.count("await _read_upload_limited(file)") >= 5, (
-        "上传端点数与受限读取调用数不匹配"
-    )
+    api_dir = Path(rs.__file__).resolve().parent
+    checked, offenders, naked = [], [], []
+    for path in sorted(api_dir.glob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        if "content = await file.read()" in src:
+            naked.append(path.name)
+        tree = ast.parse(src, filename=str(path))
+        lines = src.splitlines()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if "file" not in [a.arg for a in node.args.args]:
+                continue
+            body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            checked.append(f"{path.name}::{node.name}")
+            if "_read_upload_limited(" not in body:
+                offenders.append(f"{path.name}::{node.name}")
+
+    assert not naked, (
+        "仍有上传端点用裸 file.read() 全量读入，超大文件会顶爆内存："
+        + "、".join(naked))
+    assert not offenders, (
+        "这些上传端点没走受限读取（分块 + 超限即 413）：\n  - "
+        + "\n  - ".join(offenders))
+    assert len(checked) >= 5, (
+        "只找到 %d 个上传端点（应为 5 个：/upload、/upload-master、"
+        "/master/import-preview、/master/tasks-preview、/master/import）。\n"
+        "数量掉了说明判据的扫描范围又缩水了，而不是端点真的变少。\n"
+        "实际找到：%s" % (len(checked), checked))
 
 
 # ---------------------------------------------------------------------------

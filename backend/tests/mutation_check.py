@@ -410,7 +410,7 @@ MUTANTS = [
     ),
     (
         "M38", "导入只报数量不点名新增实体",
-        "app/api/reschedule.py",
+        "app/api/master.py",
         '        msg += f"\\n🆕 本次新建：{shown}"',
         """        pass  # MUTANT: 不点名""",
         "names_newly_created",
@@ -475,7 +475,7 @@ MUTANTS = [
     ),
     (
         "M47", "导入不说明「预览之后数据变了」",
-        "app/api/reschedule.py",
+        "app/api/master.py",
         "    if flat_pre and (added == 0 or flat):",
         "    if False:  # MUTANT: 不提示已存在项",
         "reports_drift",
@@ -527,8 +527,8 @@ MUTANTS = [
     ),
     (
         "M54", "清单预览不报现有清单条数（看不出提交会整批换掉什么）",
-        "app/api/reschedule.py",
-        '    report["existing_tasks"] = len(_master_tasks)',
+        "app/api/master.py",
+        '    report["existing_tasks"] = len(_api._master_tasks)',
         '    report["existing_tasks"] = 0  # MUTANT: 预览不报现有条数',
         "will_replace",
     ),

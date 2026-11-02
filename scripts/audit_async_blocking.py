@@ -31,12 +31,16 @@ handler 里只是一行普通调用。①号判据对这种情况**永远报绿*
   冷的时候是 800ms。判据只能是"这段代码**可能**有多慢"，不是"这次有多慢"。
 
 用法：
-    python scripts/audit_async_blocking.py [path] [--no-baseline]
+    python scripts/audit_async_blocking.py [path ...] [--no-baseline]
+    # 不给路径 = 扫整个 backend/app/api/（目录会展开成该目录下的 *.py）
 退出码：有零 await 的 async 路由 或 有可疑阻塞调用 时为 1（可进 CI）。
 
-`--no-baseline`：不比对零 await 基线（基线是按单文件攒的，跨文件比会得到假的
-"消除 N 个"），但零 await 路由仍判红。给 R76 之后新增的 api 模块用。
-一次只接受一个文件 —— 多给会直接报错，不静默取第一个。
+`--no-baseline`：不比对零 await 基线，但零 await 路由仍判红。
+一次可以看多个文件 / 一个目录 —— R77 起默认看整个 api 目录：只看一个文件时，
+另一个模块里的端点**不在表里**，而脚本照样绿（R76 就踩过）。
+
+基线的键是"路由路径 + 函数名"，与文件无关，所以多文件共用一个基线文件是对的：
+扫描集合是全目录，路径在 FastAPI 里全局唯一，不会互相覆盖。
 """
 
 import ast
@@ -47,17 +51,13 @@ from pathlib import Path
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 update_baseline = "--update-baseline" in sys.argv[1:]
 skip_baseline = "--no-baseline" in sys.argv[1:]
-# R76：这里原本是 `path = args[0]` —— 多给一个文件时**静默只看第一个**。
-# 本轮把落地方案搬到 `app/api/landing.py` 后，第一次跑
-# `audit_async_blocking.py reschedule.py landing.py` 得到的表里只有 48 条
-# reschedule 路由，landing 的 5 条一条没出现，而脚本 rc=0「全绿」——
-# 一道门静默缩了半张表，比没有这道门更糟。宁可报错也不猜。
-if len(args) > 1:
-    sys.exit("本脚本一次只扫一个文件（收到 %d 个：%s）。\n"
-             "行号列与基线都按单文件计，多文件请分开跑："
-             "CI 里是两行 `run`，本地请串两条命令。" % (len(args), args))
-path = args[0] if args else "backend/app/api/reschedule.py"
-tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+
+# R76 曾在这里写"多给一个文件直接报错，多文件请分开跑"。R77 推翻了这个结论：
+# 分开跑只是把"漏扫"变成"要记得加一行"，而 R77 又搬出一个带 17 条路由的
+# `app/api/master.py` —— 谁忘了给 CI 加第三行，这道门就再瞎一次，且**看起来是绿的**。
+# 更彻底的修法是让脚本自己扫目录（见后面 `paths` 的展开），CI 只有一行。
+# 每个文件的解析与闭包展开仍在 `_analyse()` 内**互不影响**：判据口径没变，
+# 变的只是"看完一个文件之后继续看下一个"。
 
 ROUTE_DECOS = {"get", "post", "put", "delete", "patch"}
 
@@ -176,57 +176,91 @@ def threaded_calls(fn):
     return names
 
 
-# 本模块内的同步函数表（用于展开闭包）
-sync_fns = {}
-for n in ast.walk(tree):
-    if isinstance(n, ast.FunctionDef):
-        sync_fns.setdefault(n.name, []).append(n)
+def _analyse(tree, fname):
+    """单文件分析：返回该文件的路由行（语义与 R76 之前逐条一致，仍按单文件算）。"""
+    # 本模块内的同步函数表（用于展开闭包）
+    sync_fns = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef):
+            sync_fns.setdefault(n.name, []).append(n)
 
 
-def blocking_in_closure(fn, depth=0, seen=None):
-    """返回 (重活名集合, 展开到的同步函数名集合)。已下沉线程池的调用被跳过。"""
-    seen = seen or set()
-    if depth > MAX_DEPTH:
-        return set(), set()
-    thr = threaded_calls(fn)
-    heavy = set()
-    walked = set()
-    for name in calls_in(fn):
-        if name in thr:
+    def blocking_in_closure(fn, depth=0, seen=None):
+        """返回 (重活名集合, 展开到的同步函数名集合)。已下沉线程池的调用被跳过。"""
+        seen = seen or set()
+        if depth > MAX_DEPTH:
+            return set(), set()
+        thr = threaded_calls(fn)
+        heavy = set()
+        walked = set()
+        for name in calls_in(fn):
+            if name in thr:
+                continue
+            if name in HEAVY:
+                heavy.add(name)
+            if name in sync_fns and name not in seen:
+                seen.add(name)
+                walked.add(name)
+                sub_heavy, sub_walked = blocking_in_closure(sync_fns[name][0], depth + 1, seen)
+                heavy |= sub_heavy
+                walked |= sub_walked
+        return heavy, walked
+
+
+    rows = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        decos = [d for d in fn.decorator_list if is_route(d)]
+        if not decos:
             continue
-        if name in HEAVY:
-            heavy.add(name)
-        if name in sync_fns and name not in seen:
-            seen.add(name)
-            walked.add(name)
-            sub_heavy, sub_walked = blocking_in_closure(sync_fns[name][0], depth + 1, seen)
-            heavy |= sub_heavy
-            walked |= sub_walked
-    return heavy, walked
+        is_async = isinstance(fn, ast.AsyncFunctionDef)
+        linear = sorted(set(calls_in(fn)) & HEAVY)
+        deep, walked = blocking_in_closure(fn) if is_async else (set(), set())
+        # 闭包里命中的、且**不在**本函数直接调用清单里的，才算"藏在辅助函数里"
+        hidden = sorted(deep - set(linear))
+        rows.append((fname, fn.lineno, route_path(decos[0]), fn.name, is_async, has_await(fn),
+                     linear, hidden, sorted(walked)))
+    return rows
 
+
+# ---------------------------------------------------------------------------
+# R77：一次扫**多个文件**（默认整个 `backend/app/api/`）
+#
+# R76 的错误结论（本轮推翻）：当时我在参数检查里写"行号列与基线都按单文件计，
+# 多文件请分开跑"，并在 CI 里写了两行 `run`。实际上**基线是按"路由路径 + 函数名"
+# 做键的**（见下面 `_label`），跨文件天然不冲突 —— 一个基线文件可以同时管两三个
+# 模块。真正的问题只有一个：只扫一个文件时另一批端点**不在表里**，而脚本照样绿。
+#
+# 两行 `run` 只是把"漏扫"变成"要记得加一行"：R77 又搬出一个模块
+# （`app/api/master.py`，17 条路由），谁忘了加第三行，门就再瞎一次。改成
+# 一次调用扫全目录后，新增模块**自动**进入覆盖面，不需要任何人记得改 CI。
+# ---------------------------------------------------------------------------
+paths = []
+for a in args or ["backend/app/api"]:
+    pa = Path(a)
+    if pa.is_dir():
+        paths.extend(sorted(pa.glob("*.py")))
+    elif pa.is_file():
+        paths.append(pa)
+    else:
+        sys.exit(f"路径不存在：{a}")
+if not paths:
+    sys.exit("没有可扫描的文件（目录里没有 *.py？）")
 
 rows = []
-for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-    decos = [d for d in fn.decorator_list if is_route(d)]
-    if not decos:
-        continue
-    is_async = isinstance(fn, ast.AsyncFunctionDef)
-    linear = sorted(set(calls_in(fn)) & HEAVY)
-    deep, walked = blocking_in_closure(fn) if is_async else (set(), set())
-    # 闭包里命中的、且**不在**本函数直接调用清单里的，才算"藏在辅助函数里"
-    hidden = sorted(deep - set(linear))
-    rows.append((fn.lineno, route_path(decos[0]), fn.name, is_async, has_await(fn),
-                 linear, hidden, sorted(walked)))
-
+for _p in paths:
+    rows.extend(_analyse(ast.parse(_p.read_text(encoding="utf-8")), _p.name))
 rows.sort()
-print(f"{'line':>5s}  {'path':34s} {'handler':30s} {'async':5s} {'await':5s}  heavy / 闭包内隐藏")
-print("-" * 132)
+
+print(f"扫描 {len(paths)} 个文件：{', '.join(p.name for p in paths)}")
+print()
+print(f"{'file':22s} {'line':>5s}  {'path':34s} {'handler':30s} {'async':5s} {'await':5s}  heavy / 闭包内隐藏")
+print("-" * 152)
 zero_await, suspicious = [], []
-for lineno, p, name, is_async, aw, linear, hidden, walked in rows:
+for fname, lineno, p, name, is_async, aw, linear, hidden, walked in rows:
     flag = ""
     if is_async and not aw:
         flag = "  ← 零 await（纯阻塞）"
-        zero_await.append((lineno, p, name, linear))
+        zero_await.append((fname, lineno, p, name, linear))
     elif is_async and (linear or hidden):
         # ⚠️ 2026-10-29 修：原来只判 `hidden`（闭包内隐藏），于是**直接调用重活**反而漏判。
         # 实测：把 `/teachers` 的 `roles = await run_in_threadpool(_db.get_teacher_roles)`
@@ -235,19 +269,19 @@ for lineno, p, name, is_async, aw, linear, hidden, walked in rows:
         # 「重活藏在helper里」和「重活就摆在端点里」对事件循环是一样的伤害，不能只抓前者。
         culprit = ",".join(sorted(set(linear) | set(hidden)))
         flag = f"  ← 可疑：重活在事件循环上（{culprit}）"
-        suspicious.append((lineno, p, name, sorted(set(linear) | set(hidden)), walked))
+        suspicious.append((fname, lineno, p, name, sorted(set(linear) | set(hidden)), walked))
     shown = ",".join(linear) or "-"
     if hidden:
         shown += f"  |隐藏: {','.join(hidden)}"
-    print(f"{lineno:5d}  {p[:34]:34s} {name[:30]:30s} {is_async!s:5s} {aw!s:5s}  {shown}{flag}")
+    print(f"{fname[:22]:22s} {lineno:5d}  {p[:34]:34s} {name[:30]:30s} {is_async!s:5s} {aw!s:5s}  {shown}{flag}")
 
 print()
 print(f"共 {len(rows)} 个路由；零 await 的 async 路由 {len(zero_await)} 个；"
       f"重活藏在辅助函数里的 async 路由 {len(suspicious)} 个：")
-for lineno, p, name, heavy in zero_await:
-    print(f"  L{lineno:<5d} {p:34s} {name:26s} 重调用: {','.join(heavy) or '（轻）'}")
-for lineno, p, name, hidden, walked in suspicious:
-    print(f"  L{lineno:<5d} {p:34s} {name:26s} 隐藏: {','.join(hidden)}")
+for fname, lineno, p, name, heavy in zero_await:
+    print(f"  {fname[:20]:20s} L{lineno:<5d} {p:34s} {name:26s} 重调用: {','.join(heavy) or '（轻）'}")
+for fname, lineno, p, name, hidden, walked in suspicious:
+    print(f"  {fname[:20]:20s} L{lineno:<5d} {p:34s} {name:26s} 隐藏: {','.join(hidden)}")
     print(f"         展开路径: {' → '.join(walked)}")
 
 # ---------------------------------------------------------------------------
@@ -292,7 +326,7 @@ def save_baseline(names):
     )
 
 
-current = {f"{r[1]}  {r[2]}" for r in zero_await}
+current = {f"{r[2]}  {r[3]}" for r in zero_await}
 failed = False
 
 # 已登记的豁免：**确实会阻塞**，但经判定不改，且理由可复核。
@@ -331,17 +365,17 @@ if update_baseline:
     print(f"📝 已更新基线：{len(current)} 个零 await 轻查询 → {BASELINE.name}")
     print("   （把这个文件一起提交，让评审看见基线变化）")
 elif skip_baseline:
-    # R76：基线是**按单文件**攒出来的（当前是 reschedule.py 的 8 个轻查询）。
-    # 拿它去比对另一个文件，只会得到一句假的"✅ 有 8 个零 await 路由被消除"，
-    # 每个 PR 都打印，噪音还会掩盖真正被消除的那几个。
-    # 所以新搬出来的文件用 --no-baseline：**不比对**，但零 await 路由照样判红 ——
-    # 比"和别人的基线比"更严格。
+    # R76 当时的理由是"基线是按单文件攒的，拿它比另一个文件会得到假的消除数字"。
+    # 那句话对"只扫那一个文件"成立，但**不是**基线本身的限制：键是"路由路径 +
+    # 函数名"，路径在 FastAPI 里全局唯一，所以基线本来就能跨文件共用。
+    # R77 起默认扫整个 api 目录，这条分支退化成"临时跑一次、不想动基线"时的手动开关：
+    # **不比对**，但零 await 路由照样判红（比"和基线比"更严格）。
     if zero_await:
         print()
         print(f"❌ 本文件出现 {len(zero_await)} 个零 await 的 async 路由"
               f"（--no-baseline 下仍判红；要么改成有 await，要么登记进基线）：")
-        for lineno, p, name, heavy in zero_await:
-            print(f"   - L{lineno}  {p}  {name}  重调用: {','.join(heavy) or '（轻）'}")
+        for fname, lineno, p, name, heavy in zero_await:
+            print(f"   - {fname}:{lineno}  {p}  {name}  重调用: {','.join(heavy) or '（轻）'}")
         failed = True
     else:
         print()

@@ -508,44 +508,22 @@ def test_every_data_reading_route_self_heals():
     import ast
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1] / "app" / "api" / "reschedule.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    # 本模块内的同步说明符（用于展开"端点 → helper"这一层）
-    sync_fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-
-    def calls_of(node):
-        out = set()
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call):
-                f = n.func
-                if isinstance(f, ast.Name):
-                    out.add(f.id)
-                elif isinstance(f, ast.Attribute):
-                    out.add(f.attr)
-                elif isinstance(f, ast.Call):        # run_in_threadpool(_foo, ...) 的实参
-                    pass
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)                     and n.func.id == "run_in_threadpool" and n.args:
-                a = n.args[0]
-                if isinstance(a, ast.Name):
-                    out.add(a.id)
-        return out
-
-    def heals(node, depth=0, seen=None):
-        """node 里（含一层 helper 展开）是否调用了自愈。"""
-        seen = seen or set()
-        if depth > 2:
-            return False
-        body = ast.unparse(node)
-        if "_ensure_loaded_async" in body or "_ensure_loaded(" in body:
-            return True
-        for name in calls_of(node):
-            fn = sync_fns.get(name)
-            if fn is not None and name not in seen:
-                seen.add(name)
-                if heals(fn, depth + 1, seen):
-                    return True
-        return False
+    # R77：扫描范围从"只有 reschedule.py"改成"每个定义了 APIRouter 的 api 模块"。
+    #
+    # 写死一个文件时，把端点搬到新模块就等于让这条守卫静默少看一批端点：R77 把
+    # 17 个 `/master/**` 端点搬进 `app/api/master.py` 之后，本文件若还只读
+    # reschedule.py，那 17 个端点就再也不受"必须自愈"约束 —— 而它看起来仍然是绿的。
+    # 按目录自己发现（只认含 `APIRouter(` 的模块），新模块自动纳入，不用改清单。
+    api_dir = Path(__file__).resolve().parents[1] / "app" / "api"
+    modules = {}
+    for _path in sorted(api_dir.glob("*.py")):
+        _text = _path.read_text(encoding="utf-8")
+        if "APIRouter(" in _text:
+            modules[_path.name] = ast.parse(_text, filename=str(_path))
+    assert len(modules) >= 3, (
+        "只发现 %d 个带路由的 api 模块（当前是 reschedule / landing / master）：%s\n"
+        "数量掉了说明扫描范围又缩水了，而不是模块真的变少。"
+        % (len(modules), sorted(modules)))
 
     # 不需要排课数据的端点（逐条给理由，不能只是"懒得加"）
     EXEMPT = {
@@ -577,19 +555,61 @@ def test_every_data_reading_route_self_heals():
         "/auto-schedule/export": "导出前端传来的初稿，不读排课表",
     }
 
+    def _missing_in(tree):
+        """单个模块里"读了内存排课表但没自愈"的端点路径清单。"""
+        # 本模块内的同步函数（用于展开"端点 → helper"这一层）
+        sync_fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+        def calls_of(node):
+            out = set()
+            for n in ast.walk(node):
+                if isinstance(n, ast.Call):
+                    f = n.func
+                    if isinstance(f, ast.Name):
+                        out.add(f.id)
+                    elif isinstance(f, ast.Attribute):
+                        out.add(f.attr)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id == "run_in_threadpool" and n.args:
+                    a = n.args[0]
+                    if isinstance(a, ast.Name):
+                        out.add(a.id)
+            return out
+
+        def heals(node, depth=0, seen=None):
+            """node 里（含一层 helper 展开）是否调用了自愈。"""
+            seen = seen or set()
+            if depth > 2:
+                return False
+            body = ast.unparse(node)
+            if "_ensure_loaded_async" in body or "_ensure_loaded(" in body:
+                return True
+            for name in calls_of(node):
+                fn = sync_fns.get(name)
+                if fn is not None and name not in seen:
+                    seen.add(name)
+                    if heals(fn, depth + 1, seen):
+                        return True
+            return False
+
+        out = []
+        for node in tree.body:
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            decos = [ast.unparse(d) for d in node.decorator_list]
+            route = next((d for d in decos if "router." in d), None)
+            if route is None:
+                continue
+            path = route.split("'")[1] if "'" in route else ""
+            if path in EXEMPT:
+                continue
+            if not heals(node):
+                out.append(f"{path} ({node.name})")
+        return out
+
     missing = []
-    for node in tree.body:
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        decos = [ast.unparse(d) for d in node.decorator_list]
-        route = next((d for d in decos if "router." in d), None)
-        if route is None:
-            continue
-        path = route.split("'")[1] if "'" in route else ""
-        if path in EXEMPT:
-            continue
-        if not heals(node):
-            missing.append(f"{path} ({node.name})")
+    for name, tree in modules.items():
+        missing += ["%s:%s" % (name, m) for m in _missing_in(tree)]
 
     assert not missing, (
         "这些端点会读内存排课表但没有自愈，沙箱回收后会回「请先上传实验安排表」：\n  - "
