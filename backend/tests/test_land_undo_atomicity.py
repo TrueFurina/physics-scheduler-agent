@@ -51,7 +51,10 @@
 撤销过"，而那时记录本就处于已撤销状态 —— 与内存一致。校验它是无效的防御。
 """
 import os
+import sqlite3
 import sys
+import threading
+import time
 
 import pytest
 
@@ -224,3 +227,185 @@ def test_undo_happy_path_unchanged(tmp_path):
     hist = store.history(limit=5)
     assert len(hist) == 1 and hist[0]["revoked"] is True
     assert hist[0]["revoked_by"] == "tester", "撤销人要留痕"
+
+
+# ---------------------------------------------------------------------------
+# R74：真锁（上面几条全是 monkeypatch，一条都没碰 sqlite）
+# ---------------------------------------------------------------------------
+# 上面三条把 `revoke` 换成会抛 `RuntimeError` 的假函数，证明的是 `undo` 的**异常
+# 处理结构**。三件事因此一直没被证过：
+#   ① 真锁抛的是 `sqlite3.OperationalError: database is locked`，不是别的错；
+#   ② 两次尝试真的都在等锁（生产 busy timeout 5s ⇒ 一次 undo 卡 11s）；
+#   ③ 错误文案承诺的"请重试撤销"是真的能成功的 —— 从来没有人真去重试过。
+#
+# 实测（`R74-new/probe_lock.py`，生产连接 timeout=5s，另一条连接 BEGIN IMMEDIATE 持锁）：
+#
+#   正常撤销            0.008 s
+#   持锁期间 latest()   0.001 s   ← 只读不受 RESERVED 影响，undo 才会走到 revoke
+#   单次 revoke         5.50 s   ← 抛 sqlite3.OperationalError: database is locked
+#   一次 undo          11.04 s    success=False、rolled_back=True，
+#                                error 里 "database is locked" 出现 **2 次**（首次+重试）
+#   释放锁后再撤        0.017 s   success=True
+#
+# ⚠️ 下面把 busy timeout 从 5s 调成 0.15s（`_ShortBusyStore`）—— **只改等待时长，
+# 不改被测分支**：抛的仍是同一个 sqlite 异常、走同一段 except、重试还是那一次。
+# 否则一条用例白等 11s。生产的 11s 在 probe 里量过，数字写进文档。
+
+_LOCK_WAIT = 0.15
+
+
+class _ShortBusyStore(plan_landing.LandingStore):
+    """busy timeout 可调的 LandingStore（默认 5s 会让一条用例白等 11s）。"""
+
+    def __init__(self, db_path, timeout=_LOCK_WAIT):
+        super().__init__(db_path)
+        self._timeout = timeout
+
+    def _conn(self):
+        conn = sqlite3.connect(self.path, timeout=self._timeout)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def _db_and_short_store(tmp_path, timeout=_LOCK_WAIT):
+    from app.utils.excel_parser import ScheduleDatabase, ScheduleEntry
+
+    db = ScheduleDatabase()
+    db.entries = [
+        ScheduleEntry(1, "周一", "567", "甲班", "1组", "项目A", "A101", "吴老师"),
+        ScheduleEntry(1, "周二", "567", "甲班", "2组", "项目A", "A101", "吴老师"),
+    ]
+    db.pending = []
+    db.loaded = True
+
+    store = _ShortBusyStore(str(tmp_path / "land.db"), timeout=timeout)
+    store.init_schema()
+    return db, store
+
+
+def _hold_reserved(path):
+    """另一条连接拿 RESERVED 锁（`BEGIN IMMEDIATE`）：真锁，由 sqlite 自己抛错。"""
+    conn = sqlite3.connect(path, timeout=0.0, isolation_level=None)
+    conn.execute("BEGIN IMMEDIATE")
+    return conn
+
+
+def test_undo_under_real_lock_reports_real_sqlite_error_twice(tmp_path):
+    """真锁下 `undo` 必须走 `revoke_failed`，且两次原因都是 sqlite 的原话。
+
+    monkeypatch 版（R45）只能证明"抛异常时会走这支"。真实的
+    `OperationalError` 是 `sqlite3.Error` 的子类、文案是 sqlite 定的，
+    若哪天有人把 `except Exception` 收窄成 `except RuntimeError`，旧用例照样绿，
+    而锁竞争这条最常见的现实失败会直接 500 裸抛。
+    """
+    db, store = _db_and_short_store(tmp_path)
+    before_fp, before_n = _land_something(db, store)
+
+    locker = _hold_reserved(store.path)
+    try:
+        # 只读不受 RESERVED 影响 —— 这正是 undo 能走到 revoke 的前提
+        assert store.latest() is not None, "持锁期间连读都读不了，用例前提不成立"
+
+        t0 = time.perf_counter()
+        out = plan_landing.undo(db, store, actor="tester")
+        elapsed = time.perf_counter() - t0
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+
+    assert isinstance(out, dict), "真锁下不该裸抛 —— 调用方会不知道课表已经退了"
+    assert out.get("success") is False, f"标记没写成却报成功：{out}"
+    assert out.get("error_kind") == "revoke_failed", f"真锁必须归到这一型：{out}"
+    assert out.get("revoked") is False, out
+    assert out.get("rolled_back") is True, f"课表确实退了，这条事实不许丢：{out}"
+
+    err = str(out.get("error", ""))
+    # sqlite 的原话，不是用例里手写的文案
+    assert err.count("database is locked") == 2, f"两次尝试的原因要对得上：{err}"
+    assert "首次" in err and "重试" in err, err
+
+    # 两次尝试真的都在等锁（各等一个 busy timeout），不是立刻放弃
+    assert elapsed >= 2 * _LOCK_WAIT * 0.9, f"没等锁就返回了？{elapsed:.3f}s"
+    assert elapsed < 2 * _LOCK_WAIT + 1.0, f"尝试次数不止两次？{elapsed:.3f}s"
+
+    # 分裂态：课表已回到落地前，记录在库里仍是"已落地"（所以可重试）
+    assert _fingerprint(db) == before_fp
+    assert len(db.entries) == before_n
+    assert store.latest() is not None, "标记没写成 ⇒ 记录必须还在，否则无法重试"
+
+
+def test_undo_retry_after_real_lock_released_really_succeeds(tmp_path):
+    """错误文案里的"请重试撤销"必须真的能成 —— 第一次用真库验证这件事。
+
+    R45 的用例只断言了 `store.latest() is not None`（"可重试"），从没有人真的
+    再撤一次。而现实场景恰恰是：锁的持有者（另一台机器的运维脚本、备份进程）
+    几十秒后走了，教秘照着提示再点一次。这条把那一秒固定下来。
+    """
+    db, store = _db_and_short_store(tmp_path)
+    before_fp, before_n = _land_something(db, store)
+
+    locker = _hold_reserved(store.path)
+    try:
+        first = plan_landing.undo(db, store, actor="tester")
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+    assert first.get("success") is False, first
+
+    second = plan_landing.undo(db, store, actor="tester")
+
+    assert second.get("success") is True, f"锁释放后重试仍然失败：{second}"
+    assert second.get("revoked") is True, second
+    assert second.get("revoked_at"), "重试成功也要留撤销时间"
+    assert store.latest() is None, "重试成功后不该还有未撤销记录"
+    # 第一次的失败没有把内存搞脏：最终状态与一次干净撤销完全相同
+    assert _fingerprint(db) == before_fp
+    assert len(db.entries) == before_n
+    hist = store.history(limit=5)
+    assert len(hist) == 1, f"撤销是打标记不是删行，历史必须只有一条：{hist}"
+    assert hist[0]["revoked"] is True
+    assert hist[0]["revoked_by"] == "tester", "重试撤的人也要留痕"
+
+
+def test_lock_shorter_than_busy_timeout_never_reaches_retry(tmp_path):
+    """锁在 busy timeout 之内消失 ⇒ 第一次 UPDATE 自己等过去，except 根本不进。
+
+    这条是给 `plan_landing.py` 里"重试一次通常就能自愈"那句注释打的对照：
+    **自愈的是 sqlite 的 busy handler，不是重试**。真锁要想让重试有意义，两次
+    尝试之间必须留出间隔（sleep/退避）；现在是背靠背立刻重打 —— 锁要已经走了，
+    要还会再挡一个 busy timeout，重试只是在"多等 5s"和"本来就会成功"之间空转。
+
+    所以本用例断言的是：短锁 ⇒ 一次 undo 成功，且**耗时远小于**一个 busy timeout。
+    """
+    timeout = 1.0
+    db, store = _db_and_short_store(tmp_path, timeout=timeout)
+    _land_something(db, store)
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_briefly():
+        conn = sqlite3.connect(store.path, timeout=0.0, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        held.set()
+        release.wait(5)
+        conn.execute("ROLLBACK")
+        conn.close()
+
+    holder = threading.Thread(target=hold_briefly, daemon=True)
+    holder.start()
+    try:
+        assert held.wait(5), "持锁线程没起来，用例没测到东西"
+        threading.Timer(0.03, release.set).start()
+        t0 = time.perf_counter()
+        out = plan_landing.undo(db, store, actor="tester")
+        elapsed = time.perf_counter() - t0
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert out.get("success") is True, f"短锁应被 busy handler 吸收掉：{out}"
+    assert elapsed < timeout, (
+        f"耗了 {elapsed:.3f}s ≥ busy timeout {timeout}s —— 说明不是 busy handler"
+        f" 吸收的，用例的前提变了")
+    assert store.latest() is None
