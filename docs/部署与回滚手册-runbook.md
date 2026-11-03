@@ -132,7 +132,7 @@ DEMO_MODE=1 OPENBLAS_NUM_THREADS=1 python run.py
 - 口令与会话密钥**只存在于部署配置**，不写进仓库、不落盘、不入库。换口令＝改 `startCmd` 重发。
 - `DEMO_MODE=1` 才有 `/demo/reset`（演示前一键复位），该端点需管理员会话。
 
-### 11.3 三条实测约束（踩过的坑）
+### 11.3 四条实测约束（踩过的坑）
 
 1. **鉴权只能走 `X-Admin-Token`**：边缘代理会覆盖 `Authorization`。同一 token 实测
    `X-Admin-Token` → 200、`Authorization: Bearer` → 401「会话已失效」。前端本来就用自定义头，
@@ -141,17 +141,31 @@ DEMO_MODE=1 OPENBLAS_NUM_THREADS=1 python run.py
    之后 SPA 的 `/api/*` 凭 cookie 通行；**不带 cookie 直连接口一律 403**（2988B，非应用故障）。
 3. **上传的表是临时的**：`/upload` 只写进进程内存，重新发布立刻回落到镜像里的
    `schedule.xlsx`。实测「上传脱敏表→线上变教师H→重新发布→回落真实表」。
+4. **`/health` 的 `data` 字段会假阴性**：刚回收重启时实测 `uptime_s=0`、
+   `data.loaded=false / total_entries=0`，但同一时刻 `/api/reschedule/data-audit`
+   已返回 433 条。**判断数据是否加载请以 `/data-audit` 为准**，别拿 `/health` 的
+   `data` 子字段下结论（否则会误报「数据没加载」）。
 
 ### 11.4 数据在哪、什么会丢
 
 | 数据 | 位置 | 重新发布 | 沙箱回收 |
 |---|---|---|---|
-| 安排表（权威） | 镜像 `schedule.xlsx` | 被覆盖（＝发版） | 随镜像重建 |
+| 安排表（权威） | 发布目录 `schedule.xlsx` | 被覆盖（＝发版） | **自动从发布目录重建** |
 | 上传的表 | 进程内存 + data 目录 | **失效，回落镜像表** | 丢 |
-| 工单 `requests.db` / 主数据 `master_store.json` | 沙箱磁盘 | **保留**（实测） | 丢 |
+| 工单 `requests.db` / 主数据 `master_store.json` | 沙箱磁盘 | **保留**（进程存活期内实测） | **丢** |
 
-结论：**改数据 = 改本地表 → 重新导出发布目录 → 再发一次**；线上直接传只对当次有效。
-需要留档时用 `GET /api/reschedule/requests/export` 与 `/export/master-workbook` 导出。
+**回收后的实际行为（2026-11-04 实测）**：沙箱回收会杀掉进程并自动拉起新进程
+（`/health` 的 `uptime_s` 归零）。真实表因为**来自发布目录文件、每次启动重新加载**，
+所以无需人工干预即恢复为 433 条；强口令与管理员会话也因 `APP_SECRET_KEY` 在启动参数里而保留。
+但**工单库与主数据活在沙箱磁盘，回收即归零**——此前实测的「重新发布不丢工单」只在
+**进程存活期内**成立，扛不住回收。
+
+结论（两条铁律）：
+
+1. **改数据 = 改本地表 → 重新导出发布目录 → 再发一次**；线上直接传只对当次进程有效。
+2. **线上工单不是长期存档**：需要留痕的审批结果，必须在回收前用
+   `GET /api/reschedule/requests/export` 与 `/export/master-workbook` 导出到本地；
+   别把审批台当唯一台账。
 
 ### 11.5 演示前检查清单（云端，4 步约 10 秒）
 
