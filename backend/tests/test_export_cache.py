@@ -51,13 +51,18 @@ def test_export_cache_hits_and_invalidates(monkeypatch):
     monkeypatch.setattr(api, "_schedule_fp", None)
 
     builds = []
-    real_build = api._class_schedule_build
+    # R78：`_class_schedule_build` 跟着导出族搬到了 `app/api/export.py`。
+    # 重建计数必须打在**拥有 `_class_schedule_bytes` 的那个模块**上 —— 它内部是
+    # 模块级全局查找，打在 `reschedule` 上等于没打（`__getattr__` 只负责读，不负责写）。
+    # 用 `__module__` 自己找，下次再搬家也不用改这一行。
+    owner = sys.modules[api._class_schedule_bytes.__module__]
+    real_build = owner._class_schedule_build
 
     def counting_build(*args, **kwargs):
         builds.append(1)
         return real_build(*args, **kwargs)
 
-    monkeypatch.setattr(api, "_class_schedule_build", counting_build)
+    monkeypatch.setattr(owner, "_class_schedule_build", counting_build)
 
     # 1) 第一次建、第二次命中
     first = api._class_schedule_bytes()

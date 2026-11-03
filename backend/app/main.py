@@ -27,6 +27,11 @@ from app.api import landing
 # R77：主数据维护端点族（/master/**）搬到 `app/api/master.py`，同样是"本模块 import
 # reschedule 取状态"的依赖方向，所以也排在 reschedule 之后。
 from app.api import master
+# R78：导出族（/export/**、/auto-schedule/export、/parallel/export）搬到
+# `app/api/export.py`。依赖方向同上（顶部 `from app.api import reschedule as _api`）。
+# 它额外有一个反向的**惰性**依赖：`reschedule._load_default_schedule` 在数据就位后
+# 要调 `export.start_export_warmup()` —— 那一处是函数内 import，不是模块级。
+from app.api import export
 from app.engine import warmup
 
 _STARTED_AT = time.time()
@@ -189,6 +194,10 @@ app.include_router(landing.router, prefix="/api/reschedule", tags=["调课管理
 # 注意 `/master/import` 等**不是** `/parallel/**`：路径、方法、dependencies 全未动，
 # 免鉴权/需管理员的分界与搬迁前逐条相同（`/master/overview` 仍免鉴权）。
 app.include_router(master.router, prefix="/api/reschedule", tags=["调课管理"])
+# R78：导出族同样搬进独立模块，prefix 与 tags 与搬迁前一致（路径、方法、dependencies
+# 逐条相同：`/export/*` 仍走 `export_gate` + `standard-export` 限流，
+# `/parallel/export` 仍只有限流，`/auto-schedule/export` 仍走 `export_gate`）。
+app.include_router(export.router, prefix="/api/reschedule", tags=["调课管理"])
 
 
 @app.exception_handler(Exception)

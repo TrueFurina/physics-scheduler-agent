@@ -84,13 +84,27 @@ def _rows(n=40):
     ]
 
 
+def _owner_of(endpoint):
+    """端点所在的模块 —— `run_in_threadpool` 是**模块级**名字，得打在它自己的模块上。
+
+    R78：导出族搬到了 `app/api/export.py`，而这段桩原先打的是 `api.run_in_threadpool`
+    （`api` = reschedule）。搬家后导出端点早就不查那个名字了，桩打空 ⇒ 三条用例同时红。
+    这里改成从 `endpoint.__module__` 自己找：下次再搬，这条守卫仍然量的是真东西。
+
+    为什么不让生产代码把 `run_in_threadpool` 换成 `_api.run_in_threadpool` 来迁就测试：
+    那会把"这个模块依赖谁"写成一个可被 monkeypatch 的全局，平白多一条漂移路径。
+    """
+    return sys.modules[endpoint.__module__]
+
+
+# (名字, 端点函数, 调用工厂) —— 端点函数用来定位它所在的模块（见 `_owner_of`）
 HEAVY_EXPORTS = [
-    ("班级课表", lambda: api.export_class_schedule()),
-    ("场地课表", lambda: api.export_room_schedule()),
-    ("统计台账", lambda: api.export_master_data()),
-    ("可编辑台账", lambda: api.export_master_workbook()),
-    ("自动排课初稿", lambda: api.auto_schedule_export(
-        api.AutoScheduleExportRequest(schedule=_rows()))),
+    ("班级课表", api.export_class_schedule, lambda: api.export_class_schedule()),
+    ("场地课表", api.export_room_schedule, lambda: api.export_room_schedule()),
+    ("统计台账", api.export_master_data, lambda: api.export_master_data()),
+    ("可编辑台账", api.export_master_workbook, lambda: api.export_master_workbook()),
+    ("自动排课初稿", api.auto_schedule_export,
+     lambda: api.auto_schedule_export(api.AutoScheduleExportRequest(schedule=_rows()))),
 ]
 
 
@@ -101,18 +115,19 @@ def test_all_heavy_exports_dispatch_to_threadpool(monkeypatch, small_db):
     见模块 docstring 里"删除守卫"那段：本套件全量跑时，删除计数离沙箱阈值只差几次。
     """
     missing = []
-    for name, factory in HEAVY_EXPORTS:
+    for name, endpoint, factory in HEAVY_EXPORTS:
         calls = []
 
         async def spy(func, *args, _sink=calls, **kwargs):
             _sink.append(getattr(func, "__name__", repr(func)))
             return STUB_XLSX  # 不真建表（理由见模块 docstring）
 
-        monkeypatch.setattr(api, "run_in_threadpool", spy)
+        owner = _owner_of(endpoint)
+        monkeypatch.setattr(owner, "run_in_threadpool", spy)
         resp = asyncio.run(factory())
         assert resp is not None
         if not calls:
-            missing.append(name)
+            missing.append("%s（模块 %s）" % (name, owner.__name__))
 
     assert not missing, (
         f"这些导出没有把建表工作交给线程池：{'、'.join(missing)} —— "
@@ -163,14 +178,16 @@ def test_export_keeps_event_loop_responsive(small_db, monkeypatch):
     重活用 0.5 秒纯 CPU 忙等代替真实建表（见模块 docstring），
     派发路径仍然是真实的端点 + 真实的 `run_in_threadpool`。
     """
-    real = api.run_in_threadpool
+    endpoint = api.export_class_schedule
+    owner = _owner_of(endpoint)
+    real = owner.run_in_threadpool
 
     async def dispatch_to_burn(func, *args, **kwargs):
         # 端点要派发的"建表函数"被换成忙等：等价重活，零文件副作用
         return await real(_burn, 0.5)
 
-    monkeypatch.setattr(api, "run_in_threadpool", dispatch_to_burn)
-    gaps_ok = _measure_gaps(lambda: api.export_class_schedule())
+    monkeypatch.setattr(owner, "run_in_threadpool", dispatch_to_burn)
+    gaps_ok = _measure_gaps(lambda: endpoint())
     assert len(gaps_ok) > 3, f"心跳样本太少（{len(gaps_ok)}），测量无效"
     worst_ok = max(gaps_ok)
 

@@ -881,8 +881,16 @@ def test_land_undo_waiting_on_write_lock_does_not_stall_heartbeat(monkeypatch, t
     t.start()
     assert acquired.wait(2.0), "拿锁的辅助线程没起来，场景失效"
     try:
-        # 0.35s 后放锁：撤销必须等这么久，但不许把事件循环一起按着
-        threading.Timer(0.35, release.set).start()
+        # 0.6s 后放锁：撤销必须等这么久，但不许把事件循环一起按着
+        #
+        # R78 实测（全量跑到第 800 条时）：原来这里是 0.35s / 断言 0.3s，
+        # 结果 dur=0.297 —— **前置断言**先红了，报「它没等在写锁上」。
+        # 归因不是锁退化（单跑连过 3 次，每次 1.44s），而是这 50ms 的余量
+        # 比 `asyncio.run` 的启动开销还小：Timer 在 `_run_with_heartbeat` **之前**
+        # 起跑，等撤销真正去抢锁时计时已走掉一段，全量负载下实测走掉 53ms。
+        # 余量提到 150ms（持锁 0.6s / 断言 0.45s）：仍然只有"真等过"才可能过，
+        # 但机器抖动不再把结论翻成假红。
+        threading.Timer(0.6, release.set).start()
         out, err, dur, lag_ms = _run_with_heartbeat(
             lambda: api.land_undo(actor="admin"))
     finally:
@@ -891,8 +899,9 @@ def test_land_undo_waiting_on_write_lock_does_not_stall_heartbeat(monkeypatch, t
 
     assert not err, err
     assert out["success"] is True
-    assert dur >= 0.3, (
-        "撤销只用了 %.3fs —— 它没等在写锁上，这条用例证明不了任何事情" % dur)
+    assert dur >= 0.45, (
+        "撤销只用了 %.3fs（期望 ≥0.45s，锁持了 0.6s）—— 它没等在写锁上，"
+        "这条用例证明不了任何事情" % dur)
     assert lag_ms < 0.15 * 1000, (
         "等锁期间事件循环被按住 %.1fms —— 锁是在事件循环线程上等的" % lag_ms)
 
