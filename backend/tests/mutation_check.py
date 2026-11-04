@@ -203,7 +203,8 @@ MUTANTS = [
     ),
     (
         "M15", "不拦重复审批",
-        "app/api/reschedule.py",
+        # R80：工单族搬到 app/api/requests_board.py，锚点原文照搬、靶文件跟着改。
+        "app/api/requests_board.py",
         """    if row["status"] != "pending":
         conn.close()
         raise HTTPException(status_code=400,""",
@@ -214,10 +215,11 @@ MUTANTS = [
     ),
     (
         "M16", "审批不自动应用调课",
-        "app/api/reschedule.py",
+        # R80：靶文件随工单族搬家；两处状态改 `_api.xxx` 现取，锚点同步改写。
+        "app/api/requests_board.py",
         """                def _locked_apply_approve():
-                    with _DB_WRITE_LOCK:
-                        return _apply_reschedule(record_dict)
+                    with _api._DB_WRITE_LOCK:
+                        return _api._apply_reschedule(record_dict)
                 apply_result = await run_in_threadpool(_locked_apply_approve)""",
         """                apply_result = {"applied": 0, "skipped": 0, "details": []}""",
         "applies_move or reports_conflicts",

@@ -33,6 +33,9 @@ from app.api import master
 # 要调 `export.start_export_warmup()` —— 那一处是函数内 import，不是模块级。
 from app.api import export
 from app.api import insights
+# R80：工单族（/requests*）搬到 `app/api/requests_board.py`。依赖方向同上，
+# 且装饰器上的 `_api._ADMIN_ONLY` 在导入期求值，必须排在 reschedule 之后。
+from app.api import requests_board
 from app.engine import warmup
 
 _STARTED_AT = time.time()
@@ -201,6 +204,9 @@ app.include_router(master.router, prefix="/api/reschedule", tags=["调课管理"
 app.include_router(export.router, prefix="/api/reschedule", tags=["调课管理"])
 # R79：统计/体检族的四个只读视图（同一份 _db 的不同投影）
 app.include_router(insights.router, prefix="/api/reschedule", tags=["调课管理"])
+# R80：工单族（/requests* 五条）。`/requests/{id}/approve` 的自动应用仍取
+# reschedule 的 `_apply_reschedule` 与写锁，prefix / tags / 鉴权逐条未变。
+app.include_router(requests_board.router, prefix="/api/reschedule", tags=["调课管理"])
 
 
 @app.exception_handler(Exception)

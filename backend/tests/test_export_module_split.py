@@ -94,17 +94,27 @@ def test_openapi_paths_are_unchanged_and_unique():
     assert problems == [], "\n".join(problems)
 
 
-def test_requests_export_stays_in_reschedule():
-    """`/requests/export` **不**搬：它是 SQLite 工单的投影，不读排课表、不走导出缓存。
+def test_requests_export_belongs_to_the_requests_family():
+    """`/requests/export` 不进导出族：它是 SQLite 工单的投影，不读排课表、不走缓存。
 
-    这条是防止"看到 export 两个字就一起扫过来" —— 把它搬进 `export.py` 会让
-    "导出一族"这个概念变糊，而它本身一次建表只要 5–30ms（docstring 里有实测）。
+    R78 这里钉的是"留在 reschedule"；R80 把工单族整体搬进
+    `app/api/requests_board.py` 后按新事实改写 —— 不变量是**归属**（工单族），
+    不是文件名。若它哪天被"看到 export 就一起扫过来"搬进 `export.py`，
+    导出一族的概念就糊了：那六条共用字节缓存 + 预热，而它一次建表只要
+    5–30ms（docstring 里有实测），从不碰缓存。
     """
-    routes = [r for r in reschedule.router.routes if r.path == "/requests/export"]
-    assert len(routes) == 1, "工单导出路由不见了，或被注册了多次"
-    assert routes[0].endpoint.__module__ == "app.api.reschedule", (
+    from app.api import requests_board
+
+    in_export = [r for r in export.router.routes if r.path == "/requests/export"]
+    assert in_export == [], "`/requests/export` 被扫进导出一族了"
+    in_old = [r for r in reschedule.router.routes if r.path == "/requests/export"]
+    assert in_old == [], "旧模块仍留着第二份 `/requests/export`"
+    owned = [r for r in requests_board.router.routes if r.path == "/requests/export"]
+    assert len(owned) == 1, "工单导出路由不见了，或被注册了多次"
+    assert owned[0].endpoint.__module__ == "app.api.requests_board", (
         "`/requests/export` 被搬进 %s 了 —— 它属于工单族，不该进导出一族"
-        % routes[0].endpoint.__module__)
+        % owned[0].endpoint.__module__)
+    assert "get" in app.openapi()["paths"][_PREFIX + "/requests/export"]
 
 
 def test_old_modules_no_longer_serve_export_paths():

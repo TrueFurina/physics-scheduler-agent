@@ -23,14 +23,35 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.api.reschedule as api
-def _read_api_src() -> str:
-    """读 reschedule.py 源码。
+_FILE_BOUNDARY = "# ==== API MODULE "
 
-    4 条 AST-lite 检查共用 —— 原先 4 份 `open(...).read()` 各写一遍，
-    既漏 `with`（SIM115）也漏清理。收成一处。
+
+def _iter_api_sources():
+    """(文件名, 源码) —— `app/api/` 下每个模块。
+
+    R80：`_read_api_src()` 原先只读 `reschedule.__file__`。R76 起陆续搬出
+    landing / master / export / insights 四族时，这几条源码守卫都没红过 ——
+    直到 R80 把 `approve_request` 搬走，R28 的「每个 _apply_reschedule
+    调用点都持写锁」守卫视野里一个调用点都不剩，**绿着失守**。
+    目录自发现是唯一不靠人记得改清单的做法。
     """
-    with open(api.__file__, "r", encoding="utf-8") as f:
-        return f.read()
+    api_dir = os.path.dirname(api.__file__)
+    for name in sorted(os.listdir(api_dir)):
+        if not name.endswith(".py") or name == "__init__.py":
+            continue
+        with open(os.path.join(api_dir, name), "r", encoding="utf-8") as f:
+            yield name, f.read()
+
+
+def _read_api_src() -> str:
+    """4 条 AST-lite 检查共用的整目录源码（文件间插顶格哨兵行）。
+
+    哨兵行的作用：R28 的 `in_with_block` / `enclosing_def` 靠缩进往回找，
+    跨文件回退会把上一个模块的 `with` 误当成守护 ⇒ 假绿。三条守卫遇到
+    哨兵行都重置状态或停止回退。
+    """
+    return "\n".join(_FILE_BOUNDARY + name + " ====\n" + src
+                     for name, src in _iter_api_sources())
 
 
 def _fake_chat_result():
@@ -218,12 +239,16 @@ def test_no_async_route_calls_ensure_loaded_directly():
     src = _read_api_src()
     offenders = []
     cur = None
+    cur_file = ""
     for i, line in enumerate(src.splitlines(), 1):
+        if line.startswith(_FILE_BOUNDARY):
+            cur_file, cur = line, None
+            continue
         m = re.match(r"(async )?def (\w+)", line)
         if m:
             cur = (m.group(2), bool(m.group(1)))
         if line.strip() == "_ensure_loaded()" and cur and cur[1]:
-            offenders.append(f"{cur[0]}:{i}")
+            offenders.append(f"{cur_file} {cur[0]}:{i}")
 
     assert offenders == [], (
         "async 路由直接同步调用了 _ensure_loaded()（冷启动整表重解析会冻住事件循环）：\n"
@@ -299,13 +324,17 @@ def test_no_async_route_calls_blocking_io_directly():
     src = _read_api_src()
     offenders = []
     cur = None
+    cur_file = ""
     for i, line in enumerate(src.splitlines(), 1):
+        if line.startswith(_FILE_BOUNDARY):
+            cur_file, cur = line, None
+            continue
         m = re.match(r"(async )?def (\w+)", line)
         if m:
             cur = (m.group(2), bool(m.group(1)))
         s = line.strip()
         if cur and cur[1] and s in BLOCKING:
-            offenders.append(f"{cur[0]}:{i}  {s} → 应用 {BLOCKING[s]}")
+            offenders.append(f"{cur_file} {cur[0]}:{i}  {s} → 应用 {BLOCKING[s]}")
 
     assert offenders == [], (
         "async 路由直接同步调用了阻塞函数（会冻住事件循环）：\n"
@@ -487,6 +516,8 @@ def test_every_apply_reschedule_call_site_holds_write_lock():
 
     def enclosing_def(idx):
         for j in range(idx, max(0, idx - 200), -1):
+            if lines[j].startswith(_FILE_BOUNDARY):
+                return ""
             if lines[j].startswith("def "):
                 return lines[j]
         return ""
@@ -496,6 +527,8 @@ def test_every_apply_reschedule_call_site_holds_write_lock():
         target_indent = len(lines[idx]) - len(lines[idx].lstrip())
         for j in range(idx - 1, max(0, idx - 200), -1):
             line = lines[j]
+            if line.startswith(_FILE_BOUNDARY):
+                return False
             if not line.strip():
                 continue
             indent = len(line) - len(line.lstrip())

@@ -27,7 +27,11 @@
 3. `/impact-analysis` 的 `parse_request` 仍在线程池上（R-19 第 6 处：规则解析
    不出来时同步打 LLM，上限 60s，会拖死整个事件循环）。
 4. 旧名经 `reschedule.__getattr__` 惰性转发 —— 5 个测试文件里有 7 处模块属性直调。
-5. M50 变异锚点跟着搬：它的原文在 `/stats` 里，靶文件必须同步改成 insights.py。
+5. ~~M50 变异锚点跟着搬~~ —— **R80 更正：这是 R79 的错误推断**。M50 的锚点
+   （`if t.teacher: teacher_load[t.teacher] += 1`）实测在 `reschedule.py:929`
+   的教师角色补全里，从未离开旧模块；56 条锚点由
+   `test_master_module_split.py::test_every_mutation_anchor_still_matches_its_file`
+   逐条守着，本轮一条都没动。真正随 R80 工单族搬家迁移靶文件的是 **M15 / M16**。
 """
 
 from fastapi import APIRouter, Depends, HTTPException

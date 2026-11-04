@@ -21,9 +21,10 @@
 | 预热 | `_warm_export_cache` / `start_export_warmup` / `_EXPORT_WARM_THREAD` |
 | 成对拆分的同步主体 | `_*_bytes`（取缓存）/ `_*_build`（真建表，跑在线程池上） |
 
-**没搬**：`/requests/export`（工单留档）仍在 `reschedule.py`。它是 SQLite 工单的
-投影，不读排课表、不走这份缓存，跟着"工单"这一族走才对；把它塞进这里只会让
-"导出一族"这个概念变糊。
+**没搬**：`/requests/export`（工单留档）。它是 SQLite 工单的投影，不读排课表、
+不走这份缓存，跟着"工单"这一族走才对；把它塞进这里只会让"导出一族"变糊。
+R78 时它还在 `reschedule.py`，**R80 随工单族搬到了 `app/api/requests_board.py`**
+—— 归属判据见 `tests/test_export_module_split.py`：文件名变了，边界没变。
 
 不变量（搬完必须仍然成立）
 --------------------------
