@@ -32,6 +32,7 @@ from app.api import master
 # 它额外有一个反向的**惰性**依赖：`reschedule._load_default_schedule` 在数据就位后
 # 要调 `export.start_export_warmup()` —— 那一处是函数内 import，不是模块级。
 from app.api import export
+from app.api import insights
 from app.engine import warmup
 
 _STARTED_AT = time.time()
@@ -198,6 +199,8 @@ app.include_router(master.router, prefix="/api/reschedule", tags=["调课管理"
 # 逐条相同：`/export/*` 仍走 `export_gate` + `standard-export` 限流，
 # `/parallel/export` 仍只有限流，`/auto-schedule/export` 仍走 `export_gate`）。
 app.include_router(export.router, prefix="/api/reschedule", tags=["调课管理"])
+# R79：统计/体检族的四个只读视图（同一份 _db 的不同投影）
+app.include_router(insights.router, prefix="/api/reschedule", tags=["调课管理"])
 
 
 @app.exception_handler(Exception)
