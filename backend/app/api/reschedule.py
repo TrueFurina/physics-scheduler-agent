@@ -1659,8 +1659,10 @@ def _find_free_slot(e, target_week):
 # 指纹只取调课六字段做规范化 —— requests 表整行的 id / status /
 # admin_comment / created_at / reason 都不是调课内容；若不排除，两条闭环对
 # 同一调课会算出不同的键，跨路径照样重复应用。
-# 边界：库层「空串互不冲突」的约定一字未动，helper 只负责给调用方一个非空键；
-# 历史账本里已有的 '' 行不会与新 auto: 键互相命中（迁移缺口见 ROUND_LOG）。
+# 边界：库层「空串互不冲突」的约定一字未动，helper 只负责给调用方一个非空键。
+# R84 已把升级前账本里 '' / NULL 老行的迁移缺口关掉：`_apply_reschedule`
+# 精确查重落空后会走 `_find_legacy_applied_move()` 按内容指纹回认，
+# 不改数据、不改唯一索引；老行 JSON 坏了则保守跳过（宁可漏认，不误挡）。
 _IDEM_KEY_FIELDS = ("teacher", "course_name", "class_name", "original_time",
                     "target_week", "source_week")
 # 两个周次字段用 int 归一化：`/apply-move` 的请求体给 int，requests 表整行
@@ -1682,6 +1684,46 @@ def _resolve_idem_key(record: dict, explicit: str = "") -> str:
     canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=False,
                            separators=(",", ":"))
     return "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _find_legacy_applied_move(content_key: str):
+    """按内容指纹回认**升级前**写下的账本行（`idem_key=''` / NULL）。
+
+    R83 起两条闭环都带非空键，但 R83 之前 `applied_moves` 里可能已经攒下一批
+    空键行。精确查重的 SQL 带 `idem_key != ''`，这些行永远查不到：升级后重复
+    提交同一调课会绕过查重，探针实测第二次把第 5 周又移到第 7 周（账本变 2 行），
+    或撞目标周冲突后谎报「必须调整后再申请」。
+
+    只认**内容**不认调用方给的键：云端闭环传 `cloud-<工单id>`，本地闭环传
+    `auto:<指纹>`，两者都要能认回同一张老账 —— 所以入参是
+    `_resolve_idem_key(record)` 算出的纯内容指纹，而不是 `idem_key` 参数。
+
+    刻意保守：老行 JSON 坏了 / 不是 dict / 周次字段是脏值，一律跳过该行。
+    宁可漏认（多应用一次），也不误挡一张真正的新工单。只读，不改数据，
+    库层「空串互不冲突」的唯一索引约定一字未动。
+
+    返回命中行的 `applied_at`，未命中返回 `None`。扫描量上限 = 升级前的
+    账本行数；升级后新写的行都带键，不会让这个集合继续增长。
+    """
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT request_data, applied_at FROM applied_moves "
+            "WHERE idem_key IS NULL OR idem_key = ''"
+        ).fetchall()
+    finally:
+        conn.close()
+    for r in rows:
+        try:
+            old = json.loads(r["request_data"])
+            if not isinstance(old, dict):
+                continue
+            if _resolve_idem_key(old) != content_key:
+                continue
+        except (TypeError, ValueError):
+            continue
+        return r["applied_at"] or ""
+    return None
 
 
 def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") -> dict:
@@ -1710,6 +1752,16 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
             return {
                 "applied": 0, "skipped": 0, "already_applied": True,
                 "details": [f"该申请已于 {hit['applied_at']} 应用过，本次未重复移动"],
+            }
+
+        # R84：精确查重只认带键行，升级前的 `idem_key=''` 老行永远命中不了。
+        # 按内容指纹回认一次，让老账与新键互相认账；`already_applied` 是给
+        # 端点看的**结构化信号**，两条闭环的诚实文案都靠它，不许靠中文反解。
+        legacy_at = _find_legacy_applied_move(_resolve_idem_key(record))
+        if legacy_at is not None:
+            return {
+                "applied": 0, "skipped": 0, "already_applied": True,
+                "details": [f"该调课已于 {legacy_at} 应用过（历史账本），本次未重复移动"],
             }
 
     parsed = _parse_original_time(record.get("original_time", ""))

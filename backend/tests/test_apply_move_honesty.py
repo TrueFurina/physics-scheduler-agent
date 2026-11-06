@@ -226,6 +226,12 @@ def test_integrity_error_branch_marks_already_applied(ctx, monkeypatch):
                 def fetchone(self):
                     return None
 
+                def fetchall(self):
+                    # R84：查重后还会按内容回认升级前的空键老行。
+                    # 真实库里这张夹具表没有老行，fetchall() 就该是空列表；
+                    # 别让假连接因为少一个方法而把 IntegrityError 分支测丢。
+                    return []
+
             return _Row()
 
         def commit(self):

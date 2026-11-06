@@ -108,6 +108,13 @@ FILES = {
     "M69": ["tests/test_approval_idempotency.py", "tests/test_apply_move_honesty.py"],
     "M70": ["tests/test_approval_idempotency.py"],
     "M71": ["tests/test_approval_idempotency.py"],
+    # R84：升级前空键账本行的按内容回认。
+    "M72": ["tests/test_legacy_ledger_idempotency.py"],
+    "M73": ["tests/test_legacy_ledger_idempotency.py"],
+    "M74": ["tests/test_legacy_ledger_idempotency.py"],
+    "M75": ["tests/test_legacy_ledger_idempotency.py"],
+    "M76": ["tests/test_legacy_ledger_idempotency.py"],
+    "M77": ["tests/test_legacy_ledger_idempotency.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -730,6 +737,55 @@ MUTANTS = [
         """                        return _api._apply_reschedule(
                             record_dict, True, "approval:%s" % request_id)  # MUTANT: 不共用键""",
         "approval_after_apply_move or two_identical_tickets or helper_key_is_shared",
+    ),
+    # ------------------------------------------------------------------ R84
+    (
+        "M72", "升级前账本行不回认（重复提交又撬一周）",
+        "app/api/reschedule.py",
+        """        legacy_at = _find_legacy_applied_move(_resolve_idem_key(record))""",
+        """        legacy_at = None  # MUTANT: 升级前账本行不回认""",
+        "legacy_row_blocks_repeat_apply_with_auto_key or endpoint_reports_already_applied_for_legacy or approval_reports_already_applied_for_legacy",
+    ),
+    (
+        "M73", "回认按调用方的键比而不是按内容（云端 cloud- 键认不回老账）",
+        "app/api/reschedule.py",
+        """        legacy_at = _find_legacy_applied_move(_resolve_idem_key(record))""",
+        """        legacy_at = _find_legacy_applied_move(idem_key)  # MUTANT: 按调用方的键比""",
+        "legacy_row_blocks_repeat_apply_with_explicit_key",
+    ),
+    (
+        "M74", "helper 一行老账都不扫",
+        "app/api/reschedule.py",
+        "            \"WHERE idem_key IS NULL OR idem_key = ''\"",
+        "            \"WHERE 0\"  # MUTANT: 老账本行一行都不扫",
+        "helper_recognizes_legacy_row_by_content or helper_recognizes_null_idem_key_row or legacy_row_blocks_repeat_apply_with_auto_key",
+    ),
+    (
+        "M75", "一条脏老行让整段查重崩掉",
+        "app/api/reschedule.py",
+        "        except (TypeError, ValueError):\n            continue\n        return r[\"applied_at\"] or \"\"",
+        "        except (TypeError, ValueError):\n            raise  # MUTANT: 脏老行不许跳过\n        return r[\"applied_at\"] or \"\"",
+        "helper_ignores_corrupt_json or helper_ignores_non_dict_payload",
+    ),
+    (
+        "M76", "helper 越过职责边界把带键新行也当老账",
+        "app/api/reschedule.py",
+        "            \"WHERE idem_key IS NULL OR idem_key = ''\"",
+        "            \"WHERE 1\"  # MUTANT: 带键新行也按内容回认",
+        "helper_does_not_match_rows_with_a_real_key",
+    ),
+    (
+        "M77", "老账命中不带结构化信号（两条闭环又变回谎报）",
+        "app/api/reschedule.py",
+        """            return {
+                "applied": 0, "skipped": 0, "already_applied": True,
+                "details": [f"该调课已于 {legacy_at} 应用过（历史账本），本次未重复移动"],
+            }""",
+        """            return {
+                "applied": 0, "skipped": 0,
+                "details": [f"该调课已于 {legacy_at} 应用过（历史账本），本次未重复移动"],
+            }  # MUTANT: 老账命中丢掉结构化信号""",
+        "legacy_hit_returns_structured_signal_and_honest_detail or endpoint_reports_already_applied_for_legacy or approval_reports_already_applied_for_legacy",
     ),
 ]
 
