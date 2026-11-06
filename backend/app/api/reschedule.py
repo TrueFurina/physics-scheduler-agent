@@ -3,6 +3,7 @@
 import os
 import json
 import re
+import hashlib
 import sqlite3
 import threading
 import functools
@@ -1670,8 +1671,11 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
         finally:
             conn.close()
         if hit:
+            # R82：`already_applied` 是给端点看的**结构化信号**。此前端点只能靠
+            # applied=0/skipped=0 去猜，于是把"已应用过"误报成"未找到记录，请人工修改"
+            # （与 details 里那句"已应用过"自相矛盾）。不许靠中文文案反解状态。
             return {
-                "applied": 0, "skipped": 0,
+                "applied": 0, "skipped": 0, "already_applied": True,
                 "details": [f"该申请已于 {hit['applied_at']} 应用过，本次未重复移动"],
             }
 
@@ -1833,7 +1837,7 @@ def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") ->
             # 内存里这次移动已经做了（幂等地把该记录的 week 设成目标周，与赢家相同），
             # 所以课表状态是对的；只是账本不该有第二行。如实说明，别让教秘以为审批坏了。
             return {
-                "applied": 0, "skipped": 0,
+                "applied": 0, "skipped": 0, "already_applied": True,
                 "details": ["该申请已由另一个并发请求应用过，课表已是目标周状态，本次未重复记账"],
             }
         finally:
@@ -1872,18 +1876,38 @@ async def apply_move(req: ApplyMoveRequest):
         "target_week": req.target_week,
         "source_week": req.source_week,
     }
+    # R82：`key` 可省略（默认 ""），而库层唯一索引**刻意放过空串**
+    # （历史行 + 本来就没给键的调用都存 ''，见 test_apply_match.py 的守卫）。
+    # 后果是"不传 key"的 /apply-move 连查重都不做：第二次会去匹配目标周之前
+    # **更早一周**的同名课（探针实测第二次盯上第 4 周），只是恰好撞冲突被跳过；
+    # 目标周若另有空闲格，`_find_free_slot` 会自动改签成功 ⇒ 真的重复撬动。
+    # 端点层补一个内容指纹当隐式幂等键：库层"空串互不冲突"的约定一字不动，
+    # 显式 key（前端传 cloud-<工单id>）仍优先；内容变了就是另一张工单，指纹随之变。
+    key = (req.key or "").strip()
+    if not key:
+        canonical = json.dumps(record, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"))
+        key = "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
     # 与 land_commit 共用写锁（R28）：`_apply_reschedule` 的"读-判定-写"
     # 三步必须原子，否则并发调课会把两条课排进同一间教室。
     def _locked_apply():
         with _DB_WRITE_LOCK:
-            return _apply_reschedule(record, True, req.key or "")
+            return _apply_reschedule(record, True, key)
 
     result = await run_in_threadpool(_locked_apply)
 
     conflicts = result.get("conflicts") or []
     applied = result.get("applied", 0)
     skipped = result.get("skipped", 0)
-    if applied:
+    already_applied = bool(result.get("already_applied"))
+    if already_applied:
+        # R82：重复提交不是"没找到记录"。探针实测旧文案是
+        # 「⚠️ 未找到可自动移动的排课记录（请在教务系统中人工修改）」
+        # 紧跟一句「该申请已于 … 应用过」—— 教秘照前半句去教务系统再改一遍，
+        # 就是一次重复调课。这里只说实话，也不再叠加 details 里那句重复解释。
+        message = "ℹ️ 这条调课此前已应用过，本次未重复移动，无需人工处理"
+    elif applied:
         n_resched = result.get("rescheduled", 0)
         message = f"✅ 已移动 {applied} 条排课记录到第{req.target_week}周"
         if n_resched:
@@ -1898,12 +1922,12 @@ async def apply_move(req: ApplyMoveRequest):
         message = "⚠️ 调课已批准，但未找到可自动移动的排课记录（请在教务系统中人工修改）"
 
     details = result.get("details") or []
-    if details:
+    if details and not already_applied:
         message += "\n" + "\n".join(details[:6])
 
     return {"success": True,
             "data": {"applied": applied, "skipped": skipped, "details": details,
-                     "conflicts": conflicts},
+                     "conflicts": conflicts, "already_applied": already_applied},
             "message": message}
 
 

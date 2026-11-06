@@ -95,6 +95,12 @@ FILES = {
     "M58": ["tests/test_request_approval_integrity.py"],
     "M59": ["tests/test_request_approval_integrity.py"],
     "M60": ["tests/test_request_approval_integrity.py"],
+    # R82：/apply-move 重复提交的诚实性与「不带 key 也要幂等」。
+    "M61": ["tests/test_apply_move_honesty.py"],
+    "M62": ["tests/test_apply_move_honesty.py"],
+    "M63": ["tests/test_apply_move_honesty.py"],
+    "M64": ["tests/test_apply_move_honesty.py"],
+    "M65": ["tests/test_apply_move_honesty.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -312,9 +318,11 @@ MUTANTS = [
     ),
     (
         "M27", "调课写路径不拿写锁",
+        # R82：`req.key or ""` 改成端点层算好的 `key`（内容指纹），
+        # 锚点必须跟着改 —— 失配只会静默 SKIP，等于这道锁没人守。
         "app/api/reschedule.py",
-        "    def _locked_apply():\n        with _DB_WRITE_LOCK:\n            return _apply_reschedule(record, True, req.key or \"\")",
-        "    def _locked_apply():\n        return _apply_reschedule(record, True, req.key or \"\")",
+        "    def _locked_apply():\n        with _DB_WRITE_LOCK:\n            return _apply_reschedule(record, True, key)",
+        "    def _locked_apply():\n        return _apply_reschedule(record, True, key)",
         "holds_write_lock",
     ),
     (
@@ -606,6 +614,62 @@ MUTANTS = [
                 message = ("✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；"
 """,
         "unloaded_db_approval_says_data_not_loaded",
+    ),
+    # ---------------------------------------------------------------- R82 ---
+    # 五条都打在 app/api/reschedule.py：靶子是 test_apply_move_honesty.py 的
+    # HTTP 行为用例，不是"读源码看一眼"。
+    (
+        "M61", "不带 key 时不生成内容指纹（退回无保护的空串）",
+        "app/api/reschedule.py",
+        """    key = (req.key or "").strip()
+    if not key:
+        canonical = json.dumps(record, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"))
+        key = "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+""",
+        """    key = req.key or ""  # MUTANT: 没给键就不设防
+""",
+        "repeat_without_key or without_key_ledger or whitespace_key or concurrent_without_key",
+    ),
+    (
+        "M62", "端点忽略 already_applied 结构化信号",
+        "app/api/reschedule.py",
+        "    already_applied = bool(result.get(\"already_applied\"))",
+        "    already_applied = False  # MUTANT: 重复提交又变回「没找到记录」",
+        "repeat_with_key_says_already_applied or repeat_without_key",
+    ),
+    (
+        "M63", "查重命中不带结构化信号（端点只能靠文案反解）",
+        "app/api/reschedule.py",
+        """            return {
+                "applied": 0, "skipped": 0, "already_applied": True,
+                "details": [f"该申请已于 {hit['applied_at']} 应用过，本次未重复移动"],
+""",
+        """            return {
+                "applied": 0, "skipped": 0,
+                "details": [f"该申请已于 {hit['applied_at']} 应用过，本次未重复移动"],
+""",
+        "helper_marks_already_applied or repeat_with_key_says_already_applied",
+    ),
+    (
+        "M64", "并发撞唯一索引时不带结构化信号",
+        "app/api/reschedule.py",
+        """            return {
+                "applied": 0, "skipped": 0, "already_applied": True,
+                "details": ["该申请已由另一个并发请求应用过，课表已是目标周状态，本次未重复记账"],
+""",
+        """            return {
+                "applied": 0, "skipped": 0,
+                "details": ["该申请已由另一个并发请求应用过，课表已是目标周状态，本次未重复记账"],
+""",
+        "integrity_error_branch_marks_already_applied",
+    ),
+    (
+        "M65", "内容指纹退化成固定值（内容变了也被误挡）",
+        "app/api/reschedule.py",
+        "        key = \"auto:\" + hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()[:32]",
+        "        key = \"auto:constant\"  # MUTANT: 所有无 key 请求共用一个键",
+        "different_target_week_is_not_swallowed_as_repeat",
     ),
 ]
 
