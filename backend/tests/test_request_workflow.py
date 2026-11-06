@@ -170,7 +170,8 @@ def test_approve_applies_move_when_db_loaded(isolated, monkeypatch):
     # _apply_reschedule 依赖 _db 的索引方法；用真实调用但兜底改写结果
     calls = []
 
-    def fake_apply(rec, persist=True):
+    def fake_apply(rec, persist=True, idem_key=""):
+        # R83：审批现在会传第三个幂等键参数；替身签名跟真实函数对齐。
         calls.append(rec)
         return {"applied": 1, "skipped": 0, "details": []}
 
@@ -193,7 +194,7 @@ def test_approve_reports_conflicts_when_skipped(isolated, monkeypatch):
     monkeypatch.setattr(api, "_db", type("_D", (), {"loaded": True, "entries": []})())
     monkeypatch.setattr(
         api, "_apply_reschedule",
-        lambda rec, persist=True: {"applied": 0, "skipped": 2, "details": ["冲突"]},
+        lambda rec, persist=True, idem_key="": {"applied": 0, "skipped": 2, "details": ["冲突"]},
     )
 
     rid = isolated.post("/api/reschedule/requests", json=REQ_BODY, headers=ADMIN).json()["request"]["id"]
@@ -210,7 +211,7 @@ def test_approve_survives_apply_exception(isolated, monkeypatch):
 
     monkeypatch.setattr(api, "_db", type("_D", (), {"loaded": True, "entries": []})())
 
-    def boom(rec, persist=True):
+    def boom(rec, persist=True, idem_key=""):
         raise RuntimeError("模拟求解器崩溃")
 
     monkeypatch.setattr(api, "_apply_reschedule", boom)

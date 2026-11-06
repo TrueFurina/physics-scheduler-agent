@@ -100,7 +100,14 @@ FILES = {
     "M62": ["tests/test_apply_move_honesty.py"],
     "M63": ["tests/test_apply_move_honesty.py"],
     "M64": ["tests/test_apply_move_honesty.py"],
-    "M65": ["tests/test_apply_move_honesty.py"],
+    "M65": ["tests/test_apply_move_honesty.py", "tests/test_approval_idempotency.py"],
+    # R83：两条闭环共用幂等键 + 审批认 already_applied。
+    "M66": ["tests/test_approval_idempotency.py"],
+    "M67": ["tests/test_approval_idempotency.py"],
+    "M68": ["tests/test_approval_idempotency.py", "tests/test_apply_move_honesty.py"],
+    "M69": ["tests/test_approval_idempotency.py", "tests/test_apply_move_honesty.py"],
+    "M70": ["tests/test_approval_idempotency.py"],
+    "M71": ["tests/test_approval_idempotency.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -228,9 +235,17 @@ MUTANTS = [
         "M16", "审批不自动应用调课",
         # R80：靶文件随工单族搬家；两处状态改 `_api.xxx` 现取，锚点同步改写。
         "app/api/requests_board.py",
+        # R83：审批调用改成三参数（带共用幂等键），锚点跟着换。
         """                def _locked_apply_approve():
                     with _api._DB_WRITE_LOCK:
-                        return _api._apply_reschedule(record_dict)
+                        # R83：演示模式审批也必须带幂等键。原先只传 record_dict，
+                        # `idem_key` 落成 ''，而库层唯一索引刻意放过空串 ——
+                        # 两张内容相同的工单先后批准时第二条会去撬更早一周，
+                        # 也认不出 /apply-move 已经写下的 auto: 账。
+                        # 用共用 helper 按调课六字段算键，两条闭环互相认账；
+                        # 状态一律 `_api.xxx` 现取，别在模块里绑值副本。
+                        return _api._apply_reschedule(
+                            record_dict, True, _api._resolve_idem_key(record_dict))
                 apply_result = await run_in_threadpool(_locked_apply_approve)""",
         """                apply_result = {"applied": 0, "skipped": 0, "details": []}""",
         "applies_move or reports_conflicts",
@@ -621,14 +636,9 @@ MUTANTS = [
     (
         "M61", "不带 key 时不生成内容指纹（退回无保护的空串）",
         "app/api/reschedule.py",
-        """    key = (req.key or "").strip()
-    if not key:
-        canonical = json.dumps(record, sort_keys=True, ensure_ascii=False,
-                               separators=(",", ":"))
-        key = "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-""",
-        """    key = req.key or ""  # MUTANT: 没给键就不设防
-""",
+        # R83：指纹算法抽进 `_resolve_idem_key`，锚点改指端点调用行。
+        """    key = _resolve_idem_key(record, req.key or "")""",
+        """    key = req.key or ""  # MUTANT: 没给键就不设防""",
         "repeat_without_key or without_key_ledger or whitespace_key or concurrent_without_key",
     ),
     (
@@ -666,10 +676,60 @@ MUTANTS = [
     ),
     (
         "M65", "内容指纹退化成固定值（内容变了也被误挡）",
+        # R83：靶子随算法搬进 `_resolve_idem_key`；两条闭环都调它，检出面更广。
         "app/api/reschedule.py",
-        "        key = \"auto:\" + hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()[:32]",
-        "        key = \"auto:constant\"  # MUTANT: 所有无 key 请求共用一个键",
-        "different_target_week_is_not_swallowed_as_repeat",
+        "    return \"auto:\" + hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()[:32]",
+        "    return \"auto:constant\"  # MUTANT: 所有无 key 请求共用一个键",
+        "different_target_week_is_not_swallowed_as_repeat or helper_changes_when_any_content_field_changes or different_content_still_really_applies",
+    ),
+    # ------------------------------------------------------------------ R83
+    (
+        "M66", "审批不带幂等键（退回无保护的空串）",
+        "app/api/requests_board.py",
+        """                            record_dict, True, _api._resolve_idem_key(record_dict))""",
+        """                            record_dict)  # MUTANT: 审批退回空串键""",
+        "approval_passes_nonempty_idem_key or two_identical_tickets or approval_after_apply_move or approval_ledger_row",
+    ),
+    (
+        "M67", "审批忽略 already_applied（幂等命中又叫人手工改）",
+        "app/api/requests_board.py",
+        """        if apply_result.get("already_applied"):""",
+        """        if False:  # MUTANT: 幂等命中又变回「请人工修改」""",
+        "approval_reports_already_applied or approval_does_not_repeat_the_detail or two_identical_tickets",
+    ),
+    (
+        "M68", "目标周不参与内容指纹（不同周次被误判重复）",
+        "app/api/reschedule.py",
+        """                    "target_week", "source_week")""",
+        """                    "source_week")  # MUTANT: 目标周不参与指纹""",
+        "helper_changes_when_any_content_field_changes or different_target_week_is_not_swallowed_as_repeat or different_content_still_really_applies",
+    ),
+    (
+        "M69", "显式幂等键被内容指纹覆盖",
+        "app/api/reschedule.py",
+        """    key = (explicit or "").strip()
+    if key:
+        return key""",
+        """    key = (explicit or "").strip()
+    if False:  # MUTANT: 显式键被内容指纹覆盖
+        return key""",
+        "helper_explicit_key_wins or explicit_key_wins_over_fingerprint",
+    ),
+    (
+        "M70", "幂等命中又叠回「该申请已于…应用过」",
+        "app/api/requests_board.py",
+        """        if apply_result["details"] and not apply_result.get("already_applied"):""",
+        """        if apply_result["details"]:  # MUTANT: 诚实文案又变自相矛盾""",
+        "approval_does_not_repeat_the_detail or approval_reports_already_applied",
+    ),
+    (
+        "M71", "两条闭环各算各的键（跨路径重复应用）",
+        "app/api/requests_board.py",
+        """                        return _api._apply_reschedule(
+                            record_dict, True, _api._resolve_idem_key(record_dict))""",
+        """                        return _api._apply_reschedule(
+                            record_dict, True, "approval:%s" % request_id)  # MUTANT: 不共用键""",
+        "approval_after_apply_move or two_identical_tickets or helper_key_is_shared",
     ),
 ]
 

@@ -1651,6 +1651,39 @@ def _find_free_slot(e, target_week):
     return None
 
 
+# R83：两条闭环共用的幂等键解析。`/apply-move`（云端审批台）与
+# `/requests/{id}/approve`（演示模式本机工单）都会调 `_apply_reschedule`，
+# 但 R82 只给前者补了内容指纹，后者仍传 ""。库层唯一索引**刻意**放过空串
+# （历史行 + 本来就没给键的调用都存 ''，见 test_apply_match.py 的守卫），
+# 空串等于没防：探针实测两张内容相同的工单先后批准，第二次会去撬更早一周。
+# 指纹只取调课六字段做规范化 —— requests 表整行的 id / status /
+# admin_comment / created_at / reason 都不是调课内容；若不排除，两条闭环对
+# 同一调课会算出不同的键，跨路径照样重复应用。
+# 边界：库层「空串互不冲突」的约定一字未动，helper 只负责给调用方一个非空键；
+# 历史账本里已有的 '' 行不会与新 auto: 键互相命中（迁移缺口见 ROUND_LOG）。
+_IDEM_KEY_FIELDS = ("teacher", "course_name", "class_name", "original_time",
+                    "target_week", "source_week")
+# 两个周次字段用 int 归一化：`/apply-move` 的请求体给 int，requests 表整行
+# 读出来也是 int；若一边写 0、另一边写 "0"，JSON 里就会一个数字一个字符串，
+# 同一调课算出两个键 —— 跨路径幂等在最不起眼的地方漏掉。
+_IDEM_INT_FIELDS = frozenset({"target_week", "source_week"})
+
+
+def _resolve_idem_key(record: dict, explicit: str = "") -> str:
+    """显式键优先；否则按调课内容生成稳定的 `auto:` 隐式幂等键。"""
+    key = (explicit or "").strip()
+    if key:
+        return key
+    normalized = {
+        f: (int(record.get(f) or 0) if f in _IDEM_INT_FIELDS
+            else str(record.get(f) or ""))
+        for f in _IDEM_KEY_FIELDS
+    }
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"))
+    return "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
 def _apply_reschedule(record: dict, persist: bool = True, idem_key: str = "") -> dict:
     """审批通过后自动应用调课：把匹配的排课记录移动到目标周
 
@@ -1883,11 +1916,9 @@ async def apply_move(req: ApplyMoveRequest):
     # 目标周若另有空闲格，`_find_free_slot` 会自动改签成功 ⇒ 真的重复撬动。
     # 端点层补一个内容指纹当隐式幂等键：库层"空串互不冲突"的约定一字不动，
     # 显式 key（前端传 cloud-<工单id>）仍优先；内容变了就是另一张工单，指纹随之变。
-    key = (req.key or "").strip()
-    if not key:
-        canonical = json.dumps(record, sort_keys=True, ensure_ascii=False,
-                               separators=(",", ":"))
-        key = "auto:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    # R83：算法抽进 `_resolve_idem_key`，让演示模式审批也用同一把尺子算键 ——
+    # 否则 /apply-move 写下的 auto: 键挡不住审批路径，反之亦然。
+    key = _resolve_idem_key(record, req.key or "")
 
     # 与 land_commit 共用写锁（R28）：`_apply_reschedule` 的"读-判定-写"
     # 三步必须原子，否则并发调课会把两条课排进同一间教室。

@@ -218,7 +218,8 @@ def test_approve_uses_the_current_apply_reschedule(monkeypatch, tmp_path):
     monkeypatch.setattr(reschedule, "_db", type("_D", (), {"loaded": True})())
     calls = []
 
-    def fake_apply(rec):
+    def fake_apply(rec, persist=True, idem_key=""):
+        # R83：审批现在会传第三个幂等键参数；本用例只锁「状态现取」这一件事。
         calls.append(rec)
         return {"applied": 1, "skipped": 0, "details": []}
 

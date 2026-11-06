@@ -66,7 +66,9 @@ def _race(client, rid, monkeypatch, bodies, gate_select=False):
     select_gate = threading.Barrier(len(bodies)) if gate_select else None
     real_get_db = api._get_db
 
-    def fake_apply(rec, persist=True):
+    def fake_apply(rec, persist=True, idem_key=""):
+        # R83：审批现在会传第三个幂等键参数；替身签名跟真实函数对齐，
+        # 原有「只准调用一次」的断言强度不变。
         try:
             gate.wait(timeout=1.0)
         except threading.BrokenBarrierError:

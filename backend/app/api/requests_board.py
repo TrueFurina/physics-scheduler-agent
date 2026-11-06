@@ -222,11 +222,25 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
                 # 必须丢线程池（否则一次调课应用会占住事件循环，同 R25/R26）。
                 def _locked_apply_approve():
                     with _api._DB_WRITE_LOCK:
-                        return _api._apply_reschedule(record_dict)
+                        # R83：演示模式审批也必须带幂等键。原先只传 record_dict，
+                        # `idem_key` 落成 ''，而库层唯一索引刻意放过空串 ——
+                        # 两张内容相同的工单先后批准时第二条会去撬更早一周，
+                        # 也认不出 /apply-move 已经写下的 auto: 账。
+                        # 用共用 helper 按调课六字段算键，两条闭环互相认账；
+                        # 状态一律 `_api.xxx` 现取，别在模块里绑值副本。
+                        return _api._apply_reschedule(
+                            record_dict, True, _api._resolve_idem_key(record_dict))
                 apply_result = await run_in_threadpool(_locked_apply_approve)
         except Exception as e:
             apply_result = {"applied": 0, "skipped": 0, "details": [f"自动应用失败：{e}（可人工在教务系统调整）"]}
-        if apply_result["applied"] > 0:
+        if apply_result.get("already_applied"):
+            # R83：R82 给 `_apply_reschedule` 加了结构化信号，但审批路径没认。
+            # 幂等命中时 applied=0/skipped=0，旧分支会说「未找到可自动移动的
+            # 记录，请在教务系统中人工修改」—— 明明是重复调课，却叫教秘再去
+            # 改一遍。与 /apply-move 一样只说实话，也不叠加 details（见下方）。
+            message = ("ℹ️ 已同意调课申请，但这条调课此前已应用过，"
+                       "本次未重复移动，无需人工处理")
+        elif apply_result["applied"] > 0:
             n_resched = apply_result.get("rescheduled", 0)
             message = (f"✅ 已同意并自动应用调课：{apply_result['applied']} 条记录移至第{record_dict['target_week']}周"
                        + (f"（其中 {n_resched} 条因目标周冲突已自动改签到空闲时段）" if n_resched else "")
@@ -243,7 +257,9 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
                            "请刷新数据后重试，或人工在教务系统调整")
             else:
                 message = "✅ 已同意调课申请（未找到可自动移动的记录，请在教务系统中人工修改）"
-        if apply_result["details"]:
+        # R83：幂等命中时 details 里那句「该申请已于 … 应用过」是重复解释，
+        # 且 R82 之前正是「前半句叫人手工改 + 后半句说已应用过」的自相矛盾。
+        if apply_result["details"] and not apply_result.get("already_applied"):
             message += "\n" + "\n".join(apply_result["details"][:6])
     else:
         message = f"❌ 已驳回调课申请（原因：{comment}）"
