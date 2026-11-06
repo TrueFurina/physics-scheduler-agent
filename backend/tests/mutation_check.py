@@ -90,6 +90,11 @@ FILES = {
     "M54": ["tests/test_import_wizard.py"],
     "M55": ["tests/test_replay_outer_guard.py"],
     "M56": ["tests/test_teacher_roles_retry.py"],
+    # R81：审批台三处静默错误的守卫，测试集中在同一个文件里。
+    "M57": ["tests/test_request_approval_integrity.py"],
+    "M58": ["tests/test_request_approval_integrity.py"],
+    "M59": ["tests/test_request_approval_integrity.py"],
+    "M60": ["tests/test_request_approval_integrity.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -549,6 +554,58 @@ MUTANTS = [
         "        if path and opened:",
         "        if path:  # MUTANT: 退回只判路径非空",
         "open_failure_does_not_mark_loaded or open_failure_really_retries_next_time",
+    ),
+    # ---------------------------------------------------------------- R81 ---
+    # 四条都打在 app/api/requests_board.py：它们的靶子不是"读源码看一眼"，
+    # 而是 `test_request_approval_integrity.py` 里的并发/HTTP 行为用例。
+    # M57 / M58 必须靠 `test_cas_rejects_loser_when_both_read_pending` 检出 ——
+    # 那条用例在 SELECT 前拦 Barrier，强制两个请求都读到 pending 快照，
+    # 否则 M15 的 400 会先挡下第二个请求，CAS 根本没被执行（守卫假绿）。
+    (
+        "M57", "并发审批不做条件抢占（退回无条件 UPDATE）",
+        "app/api/requests_board.py",
+        """        "UPDATE requests SET status = ?, admin_comment = ? "
+        "WHERE id = ? AND status = 'pending'",
+""",
+        """        "UPDATE requests SET status = ?, admin_comment = ? "
+        "WHERE id = ?",
+""",
+        "cas_rejects_loser or concurrent_approvals",
+    ),
+    (
+        "M58", "抢占结果不检查 rowcount（输家照样继续应用调课）",
+        "app/api/requests_board.py",
+        """    if claimed.rowcount != 1:
+        conn.close()
+        raise HTTPException(status_code=409, detail="该申请已被其他管理员审批，请刷新后重试")
+""",
+        """    if False:  # MUTANT: 不检查抢占结果
+        conn.close()
+        raise HTTPException(status_code=409, detail="该申请已被其他管理员审批，请刷新后重试")
+""",
+        "cas_rejects_loser or concurrent_approvals",
+    ),
+    (
+        "M59", "导出状态过滤放回任意串（用户可控内容重新进响应头）",
+        "app/api/requests_board.py",
+        """    if status and status not in ("pending", "approved", "rejected"):
+        raise HTTPException(status_code=400, detail=f"不支持的状态过滤：{status}")
+""",
+        """    if False:  # MUTANT: 不校验状态白名单
+        raise HTTPException(status_code=400, detail=f"不支持的状态过滤：{status}")
+""",
+        "export_rejects_status_outside_whitelist",
+    ),
+    (
+        "M60", "数据未加载又谎报成「未找到匹配记录」",
+        "app/api/requests_board.py",
+        """            if not db_loaded:
+                message = ("✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；"
+""",
+        """            if False:  # MUTANT: 未加载与没匹配混为一谈
+                message = ("✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；"
+""",
+        "unloaded_db_approval_says_data_not_loaded",
     ),
 ]
 

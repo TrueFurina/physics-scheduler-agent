@@ -134,6 +134,15 @@ async def export_requests(status: str = ""):
     from fastapi.responses import StreamingResponse
     from urllib.parse import quote
 
+    # R81：status 原先原样拼进下载文件名，而 `quote` 默认 `safe='/'` 会保留斜杠。
+    # 探针实测 `?status=../../pwned` 返回
+    # `attachment; filename*=UTF-8''调课申请记录_../../pwned.xlsx` —— 下载器据此
+    # 可能把文件落到预期目录之外。SQL 侧本来就参数化，问题只在响应头。
+    # 白名单同时挡住大小写变形与任意串；`safe=""` 是纵深，别让以后有人放宽白名单
+    # 时连这层也一起丢掉。
+    if status and status not in ("pending", "approved", "rejected"):
+        raise HTTPException(status_code=400, detail=f"不支持的状态过滤：{status}")
+
     conn = _api._get_db()
     if status:
         rows = conn.execute("SELECT * FROM requests WHERE status = ? ORDER BY id", (status,)).fetchall()
@@ -162,8 +171,8 @@ async def export_requests(status: str = ""):
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
-    label = f"_{status_cn.get(status, status)}" if status else ""
-    filename = quote(f"调课申请记录{label}.xlsx")
+    label = f"_{status_cn[status]}" if status else ""
+    filename = quote(f"调课申请记录{label}.xlsx", safe="")
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -183,14 +192,32 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
         conn.close()
         raise HTTPException(status_code=400, detail=f"该申请已审批（状态：{row['status']}），不能重复操作")
 
+    # R81：并发审批的原子抢占（CAS，compare-and-set）。
+    # 原先是「先应用调课 → 末尾无条件 UPDATE status」：两个请求同时读到 pending
+    # 就各应用一次。探针实测（2026-11-05）两个响应都是 200、`_apply_reschedule`
+    # 调用 2 次；而它的源周是「目标周之前最近的匹配周」，重复执行会去移**更早一周**
+    # —— 一张工单能连撬好几周。顺序重复审批有 M15 的 400 挡着，并发没有。
+    # 现在把状态写成条件更新并**立刻提交**：只有 rowcount==1 的赢家能继续；
+    # 输家在应用调课之前就 409，不持有写事务、也不会覆盖赢家的批注。
+    status = "approved" if req.approve else "rejected"
+    comment = req.comment or ("同意调课" if req.approve else "未说明原因")
+    claimed = conn.execute(
+        "UPDATE requests SET status = ?, admin_comment = ? "
+        "WHERE id = ? AND status = 'pending'",
+        (status, comment, request_id),
+    )
+    conn.commit()
+    if claimed.rowcount != 1:
+        conn.close()
+        raise HTTPException(status_code=409, detail="该申请已被其他管理员审批，请刷新后重试")
+
+    record_dict = dict(row)
+    db_loaded = bool(_api._db.loaded)
     if req.approve:
-        status = "approved"
-        comment = req.comment or "同意调课"
         # 审批通过 → 自动应用调课（移动排课记录到目标周，冲突时段跳过）
-        record_dict = dict(row)
         apply_result = {"applied": 0, "skipped": 0, "details": []}
         try:
-            if _api._db.loaded:
+            if db_loaded:
                 # R28：与 apply_move / land_commit 共用写锁；且这是同步阻塞调用，
                 # 必须丢线程池（否则一次调课应用会占住事件循环，同 R25/R26）。
                 def _locked_apply_approve():
@@ -208,16 +235,21 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
             message = (f"✅ 已同意调课申请，但目标周该时段已有安排，{apply_result['skipped']} 条记录未自动移动"
                        f"（详见下方，请在教务系统中人工协调）")
         else:
-            message = "✅ 已同意调课申请（未找到可自动移动的记录，请在教务系统中人工修改）"
+            # R81：数据没加载时上面那段 try 连进都没进，此时的「未找到可自动移动的
+            # 记录」是谎报 —— 实际一条都没查过。探针实测返回体正是这句，工单却已
+            # 变成 approved。行为不变（审批仍成功），但把降级原因说清楚。
+            if not db_loaded:
+                message = ("✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；"
+                           "请刷新数据后重试，或人工在教务系统调整")
+            else:
+                message = "✅ 已同意调课申请（未找到可自动移动的记录，请在教务系统中人工修改）"
         if apply_result["details"]:
             message += "\n" + "\n".join(apply_result["details"][:6])
     else:
-        status = "rejected"
-        comment = req.comment or "未说明原因"
         message = f"❌ 已驳回调课申请（原因：{comment}）"
 
-    conn.execute("UPDATE requests SET status = ?, admin_comment = ? WHERE id = ?", (status, comment, request_id))
-    conn.commit()
+    # R81：status / admin_comment 已在 CAS 里写入并提交，末尾不再无条件 UPDATE ——
+    # 否则并发输家虽被 409 挡下，仍可能把赢家的状态与批注盖回去。
     record = dict(conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone())
     conn.close()
     return {"success": True, "message": message, "request": record}

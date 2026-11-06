@@ -269,12 +269,18 @@ def test_m15_m16_anchors_followed_the_move():
         assert m[2] == "app/api/requests_board.py", f"{tag} 靶文件没跟着搬"
         assert src.count(m[3]) == 1, f"{tag} 的锚点在新模块里命中 {src.count(m[3])} 次"
     moved = sorted(m[0] for m in muts if m[2] == "app/api/requests_board.py")
-    assert moved == ["M15", "M16"], f"不该跟着搬的锚点也被改了：{moved}"
+    # R80 收尾时 MUTANTS 恰好 56 条。M57 起是 R81 新增的防护（并发 CAS、
+    # 导出白名单、未加载文案），它们**本来就长在新模块上**，不算"跟着搬家
+    # 改了靶文件"。这条守卫管的是 R80 之前的那批：除 M15 / M16 外，
+    # 不许有任何老锚点指向新模块。按编号切分，比"总数恰好 2"稳。
+    legacy_moved = [t for t in moved if int(t[1:]) <= 56]
+    assert legacy_moved == ["M15", "M16"], (
+        f"R80 之前的老锚点不该指向新模块：{legacy_moved}")
     assert by_tag["M27"][2] == "app/api/reschedule.py", "M27（/apply-move）应留在旧模块"
 
 
 def test_every_mutation_anchor_still_matches_its_file():
-    """56 条锚点全表自检：任何一条失配都意味着对应防护暂时没人守。"""
+    """全表锚点自检（条数随轮次增长）：任何一条失配都意味着对应防护暂时没人守。"""
     _need()
     problems = []
     for tag, title, rel, old, _new, _expect in _mutants():
