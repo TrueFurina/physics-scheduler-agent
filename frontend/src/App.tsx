@@ -11,7 +11,7 @@ import {
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
 import { describeApiError } from './utils/apiError';
-import { clearStaleLoadBanner } from './utils/msg';
+import { clearStaleLoadBanner, loadWarningOf } from './utils/msg';
 import { downloadBlob } from './utils/download';
 import { EXPORT_KINDS } from './utils/exportKinds';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -630,10 +630,13 @@ function App() {
   // 否则"刷新能好、点重试不好"这类差异会在演示现场才被发现。
   const loadTeacherList = useCallback(async () => {
     setLoadError('');
+    // R86：接住 load-default 的降级信号。/status.loaded 转 true 后首屏不会再调
+    // 那个端点，重放失败/中断的警告只在这一次响应里，丢了就永久消失。
+    let loadWarning = '';
     try {
       const t = await withRetry(async () => {
         const st = await rescheduleApi.getStatus();
-        if (!st.data.loaded) await rescheduleApi.loadDefault();
+        if (!st.data.loaded) loadWarning = loadWarningOf((await rescheduleApi.loadDefault()).data);
         return rescheduleApi.getTeachers();
       });
       setTeachers(t.data.teachers);
@@ -642,6 +645,9 @@ function App() {
       // （冷启动沙箱上 /status 可拖数秒），无条件清空会把用户刚看到的错误提示静默
       // 吞掉 —— 提示出现又消失等于没提示（R-30 同族，probe_faults solve 场景抓到）。
       setMsg((prev) => clearStaleLoadBanner(prev));
+      // 只填空白横幅：用户点击产生的消息可能比这次后台加载更晚出现，
+      // 无条件覆盖等于把刚看到的错误吞掉（R-30 同族）。
+      if (loadWarning) setMsg((prev) => prev || loadWarning);
     } catch (err: any) {
       const why = describeApiError(err);
       setLoadError(why);

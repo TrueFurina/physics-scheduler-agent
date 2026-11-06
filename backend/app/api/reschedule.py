@@ -752,6 +752,14 @@ def _load_default_schedule() -> tuple[str, int]:
         msg += f"（另有 {rep['pending']} 条待排任务：写了班级与实验项目但没排时间，可直接进并行排课）"
     if rep.get("skipped"):
         msg += f"（⚠️ {rep['skipped']} 条时段无法识别，未纳入冲突扫描）"
+    # R86：降级信号必须**结构化**，不能只拼在中文 message 里。
+    # `/load-default` 从这里读 degraded/warnings；前端此前把响应整个丢掉，
+    # 而 `/status.loaded` 转 true 后不会再调本端点 —— 只靠 message 等于永久丢失。
+    # 不改函数签名：既有 20+ 调用点（含测试里的 monkeypatch 夹具）零影响。
+    # 只记「已审批变更没生效」这两类；skipped 行本就常驻 demo 表，算进来会让
+    # 每次首屏都弹警告，狼来了比不报更糟（R62 test_good_replay_still_silent）。
+    rep["replay_failed"] = list(replay_failed)
+    rep["replay_aborted"] = replay_aborted
     # 数据就位后在后台把四份导出各建一次：让教秘第一次点导出也是热的（R-71）
     #
     # R78：预热搬到 `app/api/export.py`，这里**惰性导入**。不能写成模块级
@@ -1076,7 +1084,20 @@ async def load_default():
             return _load_default_schedule()
 
     msg, total = await run_in_threadpool(_locked_load)
-    return {"success": True, "message": msg, "total_entries": total}
+    # R86：把重放故障从 `_db.load_report` 的结构化状态读出来，另给一组
+    # degraded/warnings —— 前端与脚本不必解析中文文案就能判断要不要报警。
+    # success 保持 True：整表确实加载成功了，不因局部重放失败把可用数据说成失败。
+    rep = _db.load_report
+    warnings: list[str] = []
+    failed = rep.get("replay_failed") or []
+    aborted = rep.get("replay_aborted")
+    if failed:
+        warnings.append(
+            f"{len(failed)} 条已审批调课重放失败，它们的调整未生效（{failed[0]}）")
+    if aborted:
+        warnings.append(f"已审批调课重放中断，本期一条都未重放（{aborted}）")
+    return {"success": True, "message": msg, "total_entries": total,
+            "degraded": bool(warnings), "warnings": warnings}
 
 
 # 轻量知识源：从实验安排表提取实验项目信息（P1-3，不依赖外部文档）

@@ -172,7 +172,9 @@ export const rescheduleApi = {
   getStatus: () => api.get<ScheduleStatus>('/reschedule/status'),
 
   // 加载默认数据
-  loadDefault: () => api.post<{ success: boolean; message: string; total_entries: number }>('/reschedule/load-default'),
+  // degraded/warnings 是 R86 新增的结构化降级信号：重放失败/中断不能只藏在 message 里，
+  // 否则前端（首屏只调一次、/status.loaded 转 true 后不再调）会把警告永久丢掉。
+  loadDefault: () => api.post<{ success: boolean; message: string; total_entries: number; degraded: boolean; warnings: string[] }>('/reschedule/load-default'),
 
   // 上传文件
   upload: (file: File) => {

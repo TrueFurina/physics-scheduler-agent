@@ -124,6 +124,15 @@ FILES = {
     "M83": ["tests/test_approval_apply_failure.py"],
     "M84": ["tests/test_approval_apply_failure.py"],
     "M85": ["tests/test_approval_apply_failure.py"],
+    # R86：/load-default 的结构化降级信号（后端部分；前端接线由 vitest 源码守卫守）。
+    "M86": ["tests/test_load_default_degraded.py"],
+    "M87": ["tests/test_load_default_degraded.py"],
+    "M88": ["tests/test_load_default_degraded.py"],
+    "M89": ["tests/test_load_default_degraded.py"],
+    "M90": ["tests/test_load_default_degraded.py"],
+    "M91": ["tests/test_load_default_degraded.py"],
+    "M92": ["tests/test_load_default_degraded.py"],
+    "M93": ["tests/test_load_default_degraded.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -852,6 +861,74 @@ MUTANTS = [
         "                message = (\"✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；\"",
         "                message = (\"⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录；\"  # MUTANT: 未加载也说失败",
         "test_unloaded_db_still_says_data_not_loaded",
+    ),
+    # R86：/load-default 的降级信号必须来自结构化状态，且真的回到响应里。
+    (
+        "M86", "不把重放失败落进 load_report",
+        "app/api/reschedule.py",
+        "    rep[\"replay_failed\"] = list(replay_failed)\n"
+        "    rep[\"replay_aborted\"] = replay_aborted",
+        "    rep.pop(\"replay_failed\", None)  # MUTANT: 不落结构化失败列表\n"
+        "    rep[\"replay_aborted\"] = replay_aborted",
+        "test_replay_failure_is_structurally_degraded or test_load_report_holds_structured_replay_state",
+    ),
+    (
+        "M87", "丢掉重放中断的结构化原因",
+        "app/api/reschedule.py",
+        "    rep[\"replay_aborted\"] = replay_aborted",
+        "    rep[\"replay_aborted\"] = None  # MUTANT: 丢掉中断原因",
+        "test_replay_abort_is_structurally_degraded",
+    ),
+    (
+        "M88", "端点不看结构化状态（退化为嗅探中文）",
+        "app/api/reschedule.py",
+        "    rep = _db.load_report\n    warnings: list[str] = []",
+        "    rep = {}  # MUTANT: 不看结构化状态\n    warnings: list[str] = []",
+        "test_degraded_reads_report_not_message_wording or test_replay_failure_is_structurally_degraded",
+    ),
+    (
+        "M89", "老账本缺键时直接 500",
+        "app/api/reschedule.py",
+        "    failed = rep.get(\"replay_failed\") or []",
+        "    failed = rep[\"replay_failed\"]  # MUTANT: 老账本缺键直接 500",
+        "test_warnings_are_empty_list_when_no_replay_state",
+    ),
+    (
+        "M90", "少量重放失败不报警",
+        "app/api/reschedule.py",
+        "    if failed:\n"
+        "        warnings.append(\n"
+        "            f\"{len(failed)} 条已审批调课重放失败，它们的调整未生效（{failed[0]}）\")",
+        "    if len(failed) > 3:  # MUTANT: 少量失败不报\n"
+        "        warnings.append(\n"
+        "            f\"{len(failed)} 条已审批调课重放失败，它们的调整未生效（{failed[0]}）\")",
+        "test_replay_failure_is_structurally_degraded or test_replay_failure_count_is_not_lost",
+    ),
+    (
+        "M91", "重放中断不报警",
+        "app/api/reschedule.py",
+        "    if aborted:\n"
+        "        warnings.append(f\"已审批调课重放中断，本期一条都未重放（{aborted}）\")",
+        "    if False:  # MUTANT: 重放中断不报\n"
+        "        warnings.append(f\"已审批调课重放中断，本期一条都未重放（{aborted}）\")",
+        "test_replay_abort_is_structurally_degraded",
+    ),
+    (
+        "M92", "degraded 恒为 False",
+        "app/api/reschedule.py",
+        "            \"degraded\": bool(warnings), \"warnings\": warnings}",
+        "            \"degraded\": False, \"warnings\": warnings}  # MUTANT: 恒不降级",
+        "test_replay_failure_is_structurally_degraded or test_replay_abort_is_structurally_degraded",
+    ),
+    (
+        "M93", "响应里不回 warnings 明细",
+        "app/api/reschedule.py",
+        "    return {\"success\": True, \"message\": msg, \"total_entries\": total,\n"
+        "            \"degraded\": bool(warnings), \"warnings\": warnings}",
+        "    # MUTANT: 不回 warnings 明细\n"
+        "    return {\"success\": True, \"message\": msg, \"total_entries\": total,\n"
+        "            \"degraded\": bool(warnings)}",
+        "test_replay_failure_is_structurally_degraded or test_replay_abort_is_structurally_degraded",
     ),
 ]
 

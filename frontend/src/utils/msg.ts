@@ -18,3 +18,26 @@ export const LOAD_FAILED_PREFIX = '加载失败';
 export function clearStaleLoadBanner(prev: string): string {
   return prev.startsWith(LOAD_FAILED_PREFIX) ? '' : prev;
 }
+
+/** `/load-default` 的结构化降级信号（R86）。字段可选：老后端没有也不炸。 */
+export interface LoadDefaultDegraded {
+  degraded?: boolean;
+  warnings?: string[];
+}
+
+/**
+ * 降级信号 → 顶部横幅文案；无降级时返回空串。
+ *
+ * 为什么必须在这里转成 `⚠️` 开头：App 的 msgTone 按文案首字符分档，
+ * 不以 ⚠️ 开头会被渲染成灰色中性/绿色成功，警告等于没说。
+ *
+ * 为什么单独成纯函数：App.tsx 顶着 1500 行体量守卫，且这段判据需要
+ * 独立单测 —— 只写在组件里就没人能证明「degraded 缺失时保持安静」。
+ */
+export function loadWarningOf(data?: LoadDefaultDegraded): string {
+  if (data?.degraded !== true) return '';
+  const list = data.warnings ?? [];
+  return list.length
+    ? `⚠️ 排课表已加载，但存在异常：${list.join('；')}`
+    : '⚠️ 排课表已加载，但部分已审批变更可能未生效，请核对课表';
+}
