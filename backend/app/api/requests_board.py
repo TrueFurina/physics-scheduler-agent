@@ -232,7 +232,15 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
                             record_dict, True, _api._resolve_idem_key(record_dict))
                 apply_result = await run_in_threadpool(_locked_apply_approve)
         except Exception as e:
-            apply_result = {"applied": 0, "skipped": 0, "details": [f"自动应用失败：{e}（可人工在教务系统调整）"]}
+            # R85：调用崩了 ≠ 查过没找到。旧代码把 applied/skipped 都置 0，
+            # 末尾 else 于是说「未找到可自动移动的记录，请在教务系统中人工修改」，
+            # 而 details 里明明写着「自动应用失败」—— 一条记录都没查过却让教秘
+            # 以为查过了、去教务系统再改一遍（探针 `_r85_probe.py` 实测）。
+            # 给结构化信号，让文案分支与「真的查无记录」分开，别靠中文反解状态。
+            apply_result = {
+                "applied": 0, "skipped": 0, "apply_failed": True,
+                "details": [f"自动应用失败：{e}（可人工在教务系统调整）"],
+            }
         if apply_result.get("already_applied"):
             # R83：R82 给 `_apply_reschedule` 加了结构化信号，但审批路径没认。
             # 幂等命中时 applied=0/skipped=0，旧分支会说「未找到可自动移动的
@@ -240,6 +248,11 @@ async def approve_request(request_id: int, req: RescheduleRequestApprove):
             # 改一遍。与 /apply-move 一样只说实话，也不叠加 details（见下方）。
             message = ("ℹ️ 已同意调课申请，但这条调课此前已应用过，"
                        "本次未重复移动，无需人工处理")
+        elif apply_result.get("apply_failed"):
+            # R85：失败就是失败，不许借用「查无记录」那句（那是真的查过才说的）。
+            # 仍保留 details 里的具体异常，让管理员能定位账本/写库问题。
+            message = ("⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录；"
+                       "请在教务系统中人工调整或稍后重试")
         elif apply_result["applied"] > 0:
             n_resched = apply_result.get("rescheduled", 0)
             message = (f"✅ 已同意并自动应用调课：{apply_result['applied']} 条记录移至第{record_dict['target_week']}周"

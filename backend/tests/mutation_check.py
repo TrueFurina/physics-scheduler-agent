@@ -115,6 +115,15 @@ FILES = {
     "M75": ["tests/test_legacy_ledger_idempotency.py"],
     "M76": ["tests/test_legacy_ledger_idempotency.py"],
     "M77": ["tests/test_legacy_ledger_idempotency.py"],
+    # R85：审批自动应用失败的结构化信号与诚实文案。
+    "M78": ["tests/test_approval_apply_failure.py"],
+    "M79": ["tests/test_approval_apply_failure.py"],
+    "M80": ["tests/test_approval_apply_failure.py"],
+    "M81": ["tests/test_approval_apply_failure.py"],
+    "M82": ["tests/test_approval_apply_failure.py"],
+    "M83": ["tests/test_approval_apply_failure.py"],
+    "M84": ["tests/test_approval_apply_failure.py"],
+    "M85": ["tests/test_approval_apply_failure.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -786,6 +795,63 @@ MUTANTS = [
                 "details": [f"该调课已于 {legacy_at} 应用过（历史账本），本次未重复移动"],
             }  # MUTANT: 老账命中丢掉结构化信号""",
         "legacy_hit_returns_structured_signal_and_honest_detail or endpoint_reports_already_applied_for_legacy or approval_reports_already_applied_for_legacy",
+    ),
+    # R85：审批自动应用调课失败时，不许把「调用崩了」伪装成「查无记录」。
+    (
+        "M78", "应用失败不带结构化信号",
+        "app/api/requests_board.py",
+        "                \"applied\": 0, \"skipped\": 0, \"apply_failed\": True,",
+        "                \"applied\": 0, \"skipped\": 0,  # MUTANT: 丢掉失败信号",
+        "test_apply_failure_first_line_does_not_claim_no_matching_record or test_apply_failure_first_line_says_failed_not_success",
+    ),
+    (
+        "M79", "失败文案分支永不进入",
+        "app/api/requests_board.py",
+        "        elif apply_result.get(\"apply_failed\"):",
+        "        elif False:  # MUTANT: 失败分支永不进入",
+        "test_apply_failure_first_line_does_not_claim_no_matching_record or test_apply_failure_first_line_says_failed_not_success",
+    ),
+    (
+        "M80", "失败文案改回查无记录谎报",
+        "app/api/requests_board.py",
+        "            message = (\"⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录；\"",
+        "            message = (\"✅ 已同意调课申请（未找到可自动移动的记录，请在教务系统中人工修改）；\"  # MUTANT: 失败伪装成查无记录",
+        "test_apply_failure_first_line_does_not_claim_no_matching_record or test_apply_failure_first_line_says_failed_not_success",
+    ),
+    (
+        "M81", "失败文案丢掉失败二字",
+        "app/api/requests_board.py",
+        "            message = (\"⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录；\"",
+        "            message = (\"⚠️ 已同意调课申请，但自动应用未生效，本次未移动任何记录；\"  # MUTANT: 失败二字消失",
+        "test_apply_failure_first_line_says_failed_not_success",
+    ),
+    (
+        "M82", "失败时丢掉具体异常原因",
+        "app/api/requests_board.py",
+        "                \"details\": [f\"自动应用失败：{e}（可人工在教务系统调整）\"],",
+        "                \"details\": [\"自动应用失败\"],  # MUTANT: 丢掉具体异常原因",
+        "test_apply_failure_keeps_exception_reason",
+    ),
+    (
+        "M83", "失败时把 details 一起吞掉",
+        "app/api/requests_board.py",
+        "        if apply_result[\"details\"] and not apply_result.get(\"already_applied\"):",
+        "        if apply_result[\"details\"] and not apply_result.get(\"already_applied\") and not apply_result.get(\"apply_failed\"):  # MUTANT: 失败不叠原因",
+        "test_apply_failure_keeps_exception_reason",
+    ),
+    (
+        "M84", "真查无记录也说自动应用失败",
+        "app/api/requests_board.py",
+        "                message = \"✅ 已同意调课申请（未找到可自动移动的记录，请在教务系统中人工修改）\"",
+        "                message = \"⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录\"  # MUTANT: 真查无记录也说失败",
+        "test_real_no_match_still_says_no_record",
+    ),
+    (
+        "M85", "未加载降级也说自动应用失败",
+        "app/api/requests_board.py",
+        "                message = (\"✅ 已同意调课申请，但排课数据尚未加载，本次未自动应用调课；\"",
+        "                message = (\"⚠️ 已同意调课申请，但自动应用调课失败，本次未移动任何记录；\"  # MUTANT: 未加载也说失败",
+        "test_unloaded_db_still_says_data_not_loaded",
     ),
 ]
 
