@@ -166,6 +166,20 @@ export interface RescheduleRequest {
   created_at: string;
 }
 
+/**
+ * 主数据写入回执（R87）。
+ *
+ * 后端落盘是「尽力而为」：save() 失败不抛异常也不回滚内存，只返回 False。
+ * 从 R87 起这类响应会附 `persisted: false` + `warning`，字段可选是为了
+ * 兼容还没有这两个字段的老后端。读接口复用同一形状也无害（TS 结构化类型）。
+ */
+type MasterWriteResult = {
+  success: boolean;
+  data: MasterOverview;
+  persisted?: boolean;
+  warning?: string;
+};
+
 // ---- API 函数 ----
 export const rescheduleApi = {
   // 获取状态
@@ -364,29 +378,29 @@ export const rescheduleApi = {
   // 主数据五张实体表（课程/实验项目/教师/场地/班级）—— 导师一号行动项"重构数据库"。
   // 读免鉴权（纯实体清单，不含学生 PII）；写（增删改）挂 require_admin，凭 admin 会话令牌放行。
   masterOverview: () =>
-    api.get<{ success: boolean; data: MasterOverview }>('/reschedule/master/overview'),
+    api.get<MasterWriteResult>('/reschedule/master/overview'),
   masterInit: () =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/init'),
+    api.post<MasterWriteResult>('/reschedule/master/init'),
   masterUpsertCourse: (payload: { name: string }) =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/courses', payload),
+    api.post<MasterWriteResult>('/reschedule/master/courses', payload),
   masterDeleteCourse: (name: string) =>
-    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/courses/${encodeURIComponent(name)}`),
+    api.delete<MasterWriteResult>(`/reschedule/master/courses/${encodeURIComponent(name)}`),
   masterUpsertExperiment: (payload: { name: string; course?: string; teachers?: string[]; rooms?: string[]; classes?: string[] }) =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/experiments', payload),
+    api.post<MasterWriteResult>('/reschedule/master/experiments', payload),
   masterDeleteExperiment: (name: string) =>
-    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/experiments/${encodeURIComponent(name)}`),
+    api.delete<MasterWriteResult>(`/reschedule/master/experiments/${encodeURIComponent(name)}`),
   masterUpsertTeacher: (payload: { name: string; projects?: string[] }) =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/teachers', payload),
+    api.post<MasterWriteResult>('/reschedule/master/teachers', payload),
   masterDeleteTeacher: (name: string) =>
-    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/teachers/${encodeURIComponent(name)}`),
+    api.delete<MasterWriteResult>(`/reschedule/master/teachers/${encodeURIComponent(name)}`),
   masterUpsertRoom: (payload: { name: string; capacity?: number }) =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/rooms', payload),
+    api.post<MasterWriteResult>('/reschedule/master/rooms', payload),
   masterDeleteRoom: (name: string) =>
-    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/rooms/${encodeURIComponent(name)}`),
+    api.delete<MasterWriteResult>(`/reschedule/master/rooms/${encodeURIComponent(name)}`),
   masterUpsertClass: (payload: { name: string; groups?: string[]; weekday?: string; time_slots?: string[]; week_min?: number; week_max?: number }) =>
-    api.post<{ success: boolean; data: MasterOverview }>('/reschedule/master/classes', payload),
+    api.post<MasterWriteResult>('/reschedule/master/classes', payload),
   masterDeleteClass: (name: string) =>
-    api.delete<{ success: boolean; data: MasterOverview }>(`/reschedule/master/classes/${encodeURIComponent(name)}`),
+    api.delete<MasterWriteResult>(`/reschedule/master/classes/${encodeURIComponent(name)}`),
 
   // 可编辑主数据台账：导出后在 Excel 里批量维护，改完导回（导回只增补，不删实体）。
   // 与 exportMasterData 的区别：那份是统计台账（核对用），这份是实体台账（维护用）。
@@ -398,6 +412,7 @@ export const rescheduleApi = {
     return api.post<{
       success: boolean; message: string; data: MasterOverview;
       report: { warnings: string[] };
+      persisted?: boolean; warning?: string;
     }>('/reschedule/master/import', fd);
   },
 
@@ -428,6 +443,7 @@ export const rescheduleApi = {
     return api.post<{
       success: boolean; message: string; total_tasks: number;
       classes: string[]; report: { warnings: string[] };
+      persisted?: boolean; warning?: string;
     }>('/reschedule/upload-master', fd);
   },
 

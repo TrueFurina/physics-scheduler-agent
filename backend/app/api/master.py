@@ -115,8 +115,10 @@ async def master_init():
     """幂等：清空主数据后从当前安排表重新反推。"""
     await _api._ensure_loaded_async()
     _api._master_data.build_from_entries(_api._db.entries)
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/courses", summary="新建课程", dependencies=_api._ADMIN_ONLY)
@@ -128,8 +130,10 @@ async def master_upsert_course(req: _CourseIn):
         _api._master_data.upsert_course(req.name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.delete("/master/courses/{name}", summary="删除课程", dependencies=_api._ADMIN_ONLY)
@@ -144,8 +148,10 @@ async def master_delete_course(name: str):
         _api._master_data.delete_course(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/experiments", summary="新建/更新实验项目", dependencies=_api._ADMIN_ONLY)
@@ -159,8 +165,10 @@ async def master_upsert_experiment(req: _ExperimentIn):
             rooms=req.rooms, classes=req.classes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.delete("/master/experiments/{name}", summary="删除实验项目", dependencies=_api._ADMIN_ONLY)
@@ -168,8 +176,10 @@ async def master_upsert_experiment(req: _ExperimentIn):
 async def master_delete_experiment(name: str):
     _api._ensure_master_data()
     _api._master_data.delete_experiment(name)
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/teachers", summary="新建/更新教师", dependencies=_api._ADMIN_ONLY)
@@ -181,8 +191,10 @@ async def master_upsert_teacher(req: _TeacherIn):
         _api._master_data.upsert_teacher(req.name, projects=req.projects)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.delete("/master/teachers/{name}", summary="删除教师", dependencies=_api._ADMIN_ONLY)
@@ -190,8 +202,10 @@ async def master_upsert_teacher(req: _TeacherIn):
 async def master_delete_teacher(name: str):
     _api._ensure_master_data()
     _api._master_data.delete_teacher(name)
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/rooms", summary="新建/更新场地", dependencies=_api._ADMIN_ONLY)
@@ -203,8 +217,10 @@ async def master_upsert_room(req: _RoomIn):
         _api._master_data.upsert_room(req.name, capacity=req.capacity)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.delete("/master/rooms/{name}", summary="删除场地", dependencies=_api._ADMIN_ONLY)
@@ -212,8 +228,10 @@ async def master_upsert_room(req: _RoomIn):
 async def master_delete_room(name: str):
     _api._ensure_master_data()
     _api._master_data.delete_room(name)
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/classes", summary="新建/更新班级", dependencies=_api._ADMIN_ONLY)
@@ -227,8 +245,10 @@ async def master_upsert_class(req: _ClassIn):
                                   week_max=req.week_max, weekdays=req.weekdays)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.delete("/master/classes/{name}", summary="删除班级", dependencies=_api._ADMIN_ONLY)
@@ -236,8 +256,10 @@ async def master_upsert_class(req: _ClassIn):
 async def master_delete_class(name: str):
     _api._ensure_master_data()
     _api._master_data.delete_class(name)
-    await _api._persist_master_state_async()
-    return {"success": True, "data": _api._master_data.overview()}
+    persisted = await _api._persist_master_state_async()
+    return _api._master_persist_result(
+        persisted, {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/import-preview", summary="预览主数据台账导入（只读，不写入）",
@@ -332,7 +354,7 @@ async def master_import(file: UploadFile = File(...)):
         stats = apply_tables(_api._master_data, tables)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"台账写入失败：{e!s}")
-    await _api._persist_master_state_async()
+    persisted = await _api._persist_master_state_async()
 
     total = sum(s.get("rows", 0) for s in stats.values())
     added = sum(s.get("added", 0) for s in stats.values())
@@ -395,5 +417,7 @@ async def master_import(file: UploadFile = File(...)):
 
     report["added_names"] = added_names
 
-    return {"success": total > 0, "message": msg,
-            "data": _api._master_data.overview(), "stats": stats, "report": report}
+    return _api._master_persist_result(persisted, {
+        "success": total > 0, "message": msg,
+        "data": _api._master_data.overview(), "stats": stats, "report": report,
+    })

@@ -41,3 +41,25 @@ export function loadWarningOf(data?: LoadDefaultDegraded): string {
     ? `⚠️ 排课表已加载，但存在异常：${list.join('；')}`
     : '⚠️ 排课表已加载，但部分已审批变更可能未生效，请核对课表';
 }
+
+/** 主数据写入端点的落盘结果（R87）。字段可选：老后端没有也不炸。 */
+export interface MasterPersistResult {
+  persisted?: boolean;
+  warning?: string;
+}
+
+/**
+ * 落盘失败 → 主数据管理页的警告横幅文案；成功路径返回空串。
+ *
+ * 判据必须是 `=== false`：`undefined`（老后端 / 读接口 / mock）不是失败，
+ * 否则每次正常保存都会弹「狼来了」。文案以 ⚠️ 开头，避免被渲染成中性提示。
+ * 后端刻意不回滚内存（内存态仍是权威），所以这里也不能叫「保存失败」。
+ */
+export function masterPersistWarningOf(data?: MasterPersistResult): string {
+  if (data?.persisted === false) {
+    const raw = (data.warning || '').trim();
+    if (!raw) return '⚠️ 本次修改未能写入磁盘，服务重启后会丢失，请尽快重试';
+    return raw.startsWith('⚠️') ? raw : `⚠️ ${raw}`;
+  }
+  return '';
+}

@@ -3,6 +3,7 @@ import { rescheduleApi } from '../api/client';
 import type { MasterOverview } from '../types';
 import ImportWizard, { type ImportKind } from '../components/ImportWizard';
 import { describeApiError } from '../utils/apiError';
+import { masterPersistWarningOf } from '../utils/msg';
 
 /**
  * 主数据管理（导师座谈一号行动项「基于教学大纲梳理实验课程属性、重构数据库」）。
@@ -43,6 +44,9 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
   const [data, setData] = useState<MasterOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // R87：落盘失败时后端回 persisted=false —— 修改已在内存生效，但重启会丢。
+  // 单独一条黄色横幅：既不冒充「操作失败」（红色 error 区），也不能静默吞掉。
+  const [persistWarning, setPersistWarning] = useState('');
   const [tab, setTab] = useState<TabKey>('experiments');
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -78,6 +82,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
     setBusy(true);
     try {
       const r = await rescheduleApi.masterInit();
+      setPersistWarning(masterPersistWarningOf(r.data));
       refresh(r.data.data);
       setShowForm(false);
     } catch (err: any) {
@@ -111,6 +116,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
         : kind === 'rooms' ? rescheduleApi.masterDeleteRoom(name)
         : kind === 'classes' ? rescheduleApi.masterDeleteClass(name)
         : rescheduleApi.masterDeleteCourse(name));
+      setPersistWarning(masterPersistWarningOf(r.data));
       refresh(r.data.data);
     } catch (err: any) {
       setError(describeApiError(err, '删除失败'));
@@ -155,6 +161,7 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       } else {
         r = await rescheduleApi.masterUpsertCourse({ name: form.name || '' });
       }
+      setPersistWarning(masterPersistWarningOf(r.data));
       refresh(r.data.data);
       setShowForm(false);
       setForm({});
@@ -241,6 +248,11 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       )}
       {error && (
         <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{error}</div>
+      )}
+      {persistWarning && (
+        <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg">
+          {persistWarning}
+        </div>
       )}
 
       {wizard && (

@@ -133,6 +133,16 @@ FILES = {
     "M91": ["tests/test_load_default_degraded.py"],
     "M92": ["tests/test_load_default_degraded.py"],
     "M93": ["tests/test_load_default_degraded.py"],
+    # R87：主数据落盘失败的结构化信号（前端接线由 vitest 纯函数 + 渲染用例守）。
+    "M94": ["tests/test_master_persist_failure.py"],
+    "M95": ["tests/test_master_persist_failure.py"],
+    "M96": ["tests/test_master_persist_failure.py"],
+    "M97": ["tests/test_master_persist_failure.py"],
+    "M98": ["tests/test_master_persist_failure.py"],
+    "M99": ["tests/test_master_persist_failure.py"],
+    "M100": ["tests/test_master_persist_failure.py"],
+    "M101": ["tests/test_master_persist_failure.py"],
+    "M102": ["tests/test_master_persist_failure.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -344,7 +354,7 @@ MUTANTS = [
     (
         "M25", "主数据落盘退回同步执行",
         "app/api/reschedule.py",
-        "    await run_in_threadpool(_persist_master_state)",
+        "    return await run_in_threadpool(_persist_master_state)",
         "    _persist_master_state()  # MUTANT",
         "persist_master_state",
     ),
@@ -929,6 +939,89 @@ MUTANTS = [
         "    return {\"success\": True, \"message\": msg, \"total_entries\": total,\n"
         "            \"degraded\": bool(warnings)}",
         "test_replay_failure_is_structurally_degraded or test_replay_abort_is_structurally_degraded",
+    ),
+    # R87：落盘结果必须一路透传到响应；只在内存生效 ≠ 已保存。
+    (
+        "M94", "同步落盘吞掉 save 的 False",
+        "app/api/reschedule.py",
+        "    return master_store.save({",
+        "    master_store.save({  # MUTANT: 吞掉 save 结果",
+        "test_sync_persist_returns_false_when_save_fails",
+    ),
+    (
+        "M95", "无事可做被当成落盘失败",
+        "app/api/reschedule.py",
+        "        return True  # 本来就不用写盘：无事可做 ≠ 写失败",
+        "        return False  # MUTANT: 无事可做也报失败",
+        "test_sync_persist_returns_true_when_nothing_to_save",
+    ),
+    (
+        "M96", "线程池版本不透传落盘结果",
+        "app/api/reschedule.py",
+        "    return await run_in_threadpool(_persist_master_state)",
+        "    await run_in_threadpool(_persist_master_state)  # MUTANT: 不透传",
+        "test_async_persist_propagates_false",
+    ),
+    (
+        "M97", "helper 用 not persisted 制造假警告",
+        "app/api/reschedule.py",
+        "    if persisted is False:",
+        "    if not persisted:  # MUTANT: None 也当成落盘失败",
+        "test_no_false_alarm_when_persist_result_is_none",
+    ),
+    (
+        "M98", "helper 恒加降级信号",
+        "app/api/reschedule.py",
+        "    if persisted is False:\n"
+        "        payload = dict(payload)\n"
+        "        payload[\"persisted\"] = False",
+        "    if True:  # MUTANT: 成功路径也报警\n"
+        "        payload = dict(payload)\n"
+        "        payload[\"persisted\"] = False",
+        "test_healthy_write_has_no_warning",
+    ),
+    (
+        "M99", "新建教师假装落盘成功",
+        "app/api/master.py",
+        "    try:\n"
+        "        _api._master_data.upsert_teacher(req.name, projects=req.projects)\n"
+        "    except ValueError as e:\n"
+        "        raise HTTPException(status_code=400, detail=str(e))\n"
+        "    persisted = await _api._persist_master_state_async()",
+        "    try:\n"
+        "        _api._master_data.upsert_teacher(req.name, projects=req.projects)\n"
+        "    except ValueError as e:\n"
+        "        raise HTTPException(status_code=400, detail=str(e))\n"
+        "    persisted = True  # MUTANT: 不看真实落盘结果",
+        "test_upsert_teacher_reports_persist_failure",
+    ),
+    (
+        "M100", "台账导入假装落盘成功",
+        "app/api/master.py",
+        "    except ValueError as e:\n"
+        "        raise HTTPException(status_code=400, detail=f\"台账写入失败：{e!s}\")\n"
+        "    persisted = await _api._persist_master_state_async()",
+        "    except ValueError as e:\n"
+        "        raise HTTPException(status_code=400, detail=f\"台账写入失败：{e!s}\")\n"
+        "    persisted = True  # MUTANT: 导入不接落盘结果",
+        "test_every_persist_call_consumes_its_result",
+    ),
+    (
+        "M101", "清空任务清单假装落盘成功",
+        "app/api/reschedule.py",
+        "    _master_tasks.clear()\n"
+        "    persisted = await _persist_master_state_async()",
+        "    _master_tasks.clear()\n"
+        "    persisted = True  # MUTANT: 清空清单不接落盘结果",
+        "test_clear_tasks_reports_persist_failure or test_every_persist_call_consumes_its_result",
+    ),
+    (
+        "M102", "警告文案谎称已安全保存",
+        "app/api/reschedule.py",
+        "    \"⚠️ 本次修改已在当前会话生效，但未能写入磁盘；\"\n"
+        "    \"服务重启或沙箱回收后会回退到安排表基线，请尽快重试或联系管理员检查磁盘。\"",
+        "    \"⚠️ 修改已安全保存，无需任何处理。\"  # MUTANT: 谎称已存住",
+        "test_upsert_teacher_reports_persist_failure",
     ),
 ]
 

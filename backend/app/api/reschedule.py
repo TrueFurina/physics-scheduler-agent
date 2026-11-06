@@ -476,18 +476,18 @@ async def upload_master(file: UploadFile = File(...)):
     replaced = len(_master_tasks)
     _master_tasks.clear()
     _master_tasks.extend(tasks)
-    await _persist_master_state_async()
+    persisted = await _persist_master_state_async()
     msg = f"✅ 已读入 {len(tasks)} 条主数据任务（可直接进并行排课）"
     if replaced:
         msg += f"\n♻️ 已整批替换原有 {replaced} 条清单（清单不累加，再传一份会整体覆盖）"
-    return {
+    return _master_persist_result(persisted, {
         "success": True,
         "message": msg,
         "total_tasks": len(tasks),
         "replaced_tasks": replaced,
         "classes": sorted({t.class_name for t in tasks}),
         "report": report,
-    }
+    })
 
 
 @router.delete("/master/tasks", summary="清空已导入的教学任务清单（需管理员）",
@@ -503,8 +503,10 @@ async def clear_master_tasks():
     await _ensure_loaded_async()
     _ensure_master_data()
     _master_tasks.clear()
-    await _persist_master_state_async()
-    return {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
+    persisted = await _persist_master_state_async()
+    return _master_persist_result(
+        persisted, {"success": True, "message": "已清空导入的教学任务清单", "master_tasks": 0}
+    )
 
 
 @router.post("/demo/reset", summary="演示一键复位（仅 DEMO_MODE=1 可用，需管理员）",
@@ -843,22 +845,48 @@ def _master_snapshot():
         return MasterData().from_dict(_master_data.to_dict())
 
 
-def _persist_master_state() -> None:
-    """把主数据 + 灰箱清单落盘（尽力而为：失败不阻塞排课，内存态仍是权威）。"""
+def _persist_master_state() -> bool:
+    """把主数据 + 灰箱清单落盘（尽力而为：失败不阻塞排课，内存态仍是权威）。
+
+    R87：返回 `master_store.save()` 的布尔结果。之前这里把返回值整个丢掉，
+    14 个写入端点于是无论如何都回 `success: True` —— 盘上没写成功时，
+    教秘以为存好了，重启/沙箱回收后修改全丢且无任何提示。
+    """
     global _schedule_fp
     if not _master_data.initialized and not _master_tasks:
-        return
+        return True  # 本来就不用写盘：无事可做 ≠ 写失败
     from app import master_store
 
     if _schedule_fp is None and _db.loaded and getattr(_db, "_filepath", None):
         _schedule_fp = master_store.schedule_fingerprint(_db._filepath)
     # 未初始化就不写 master：写一份空表出去，下次启动会把它当权威恢复，
     # 于是"重启一次主数据全没了"。只落清单，恢复时按表反推基线。
-    master_store.save({
+    return master_store.save({
         "schedule_fingerprint": _schedule_fp,
         "master": _master_data.to_dict() if _master_data.initialized else None,
         "tasks": master_store.tasks_to_rows(_master_tasks),
     })
+
+
+# 落盘失败时的统一回执。措辞必须同时说清两件事：修改**已生效**（内存态权威，
+# 不是操作失败），以及**没存住**（重启会回退），否则教秘要么白重试要么不知情。
+_MASTER_PERSIST_WARNING = (
+    "⚠️ 本次修改已在当前会话生效，但未能写入磁盘；"
+    "服务重启或沙箱回收后会回退到安排表基线，请尽快重试或联系管理员检查磁盘。"
+)
+
+
+def _master_persist_result(persisted: bool, payload: dict) -> dict:
+    """落盘结果 → 响应体。只在**确证失败**（`is False`）时附结构化信号。
+
+    用 `is False` 而不是 `not persisted`：老夹具 / monkeypatch 可能返回 None，
+    成功路径的响应必须逐字节不变（R86 防放宽同款），不许满屏假警告。
+    """
+    if persisted is False:
+        payload = dict(payload)
+        payload["persisted"] = False
+        payload["warning"] = _MASTER_PERSIST_WARNING
+    return payload
 
 
 def _master_derived_tasks() -> List:
@@ -1043,8 +1071,8 @@ async def _ensure_loaded_async() -> None:
     await run_in_threadpool(_ensure_loaded_sync)
 
 
-async def _persist_master_state_async() -> None:
-    """`_persist_master_state()` 的异步版本（R26）。
+async def _persist_master_state_async() -> bool:
+    """`_persist_master_state()` 的异步版本（R26），并透传落盘结果（R87）。
 
     实测（Windows）：每次落盘 28–88 ms，**与文件体积无关** —— 16 KB 和 512 KB
     一样慢，成本全在单次 write + os.replace 的固定开销上。
@@ -1060,10 +1088,11 @@ async def _persist_master_state_async() -> None:
     平台探活 `/health` 全部排在这一次写文件后面。而 admin 的 CRUD
     一次请求里还会连着调 `_ensure_master_data()` + CRUD + 落盘。
 
-    落盘本身是"尽力而为"的自愈层（失败也不阻塞排课），所以丢线程池
-    不需要额外的失败处理 —— 语义完全等价。
+    落盘本身是"尽力而为"的自愈层（失败也不阻塞排课），线程池里不做
+    额外失败处理；但 R87 起必须把 save() 的布尔结果**透传**给调用方，
+    否则端点会把"没存住"报成成功。
     """
-    await run_in_threadpool(_persist_master_state)
+    return await run_in_threadpool(_persist_master_state)
 
 
 @router.post("/load-default", summary="加载默认实验安排表",

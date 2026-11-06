@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { rescheduleApi } from '../api/client';
 import { describeApiError } from '../utils/apiError';
+import { masterPersistWarningOf } from '../utils/msg';
 import type { ImportTasksPreview, ImportWorkbookPreview } from '../types';
 
 /**
@@ -131,7 +132,16 @@ export default function ImportWizard({ kind: initKind, adminAuthed, onRequireLog
       const r = kind === 'workbook'
         ? await rescheduleApi.masterImport(file)
         : await rescheduleApi.uploadMaster(file);
-      setResult({ message: r.data.message, warnings: r.data.report?.warnings || [] });
+      // R87：落盘失败不改 HTTP 状态码（内存态已生效），只能靠结构化信号。
+      // 并进「导入告警」列表，否则教秘会以为这份清单已经存住了。
+      const persistWarning = masterPersistWarningOf(r.data);
+      setResult({
+        message: r.data.message,
+        warnings: [
+          ...(r.data.report?.warnings || []),
+          ...(persistWarning ? [persistWarning] : []),
+        ],
+      });
       setStep('done');
       onImported();
     } catch (err: any) {
