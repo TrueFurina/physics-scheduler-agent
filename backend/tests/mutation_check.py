@@ -143,6 +143,14 @@ FILES = {
     "M100": ["tests/test_master_persist_failure.py"],
     "M101": ["tests/test_master_persist_failure.py"],
     "M102": ["tests/test_master_persist_failure.py"],
+    "M103": ["tests/test_master_restore_degraded.py"],
+    "M104": ["tests/test_master_restore_degraded.py"],
+    "M105": ["tests/test_master_restore_degraded.py"],
+    "M106": ["tests/test_master_restore_degraded.py"],
+    "M107": ["tests/test_master_restore_degraded.py"],
+    "M108": ["tests/test_master_restore_degraded.py"],
+    "M109": ["tests/test_master_restore_degraded.py"],
+    "M110": ["tests/test_master_restore_degraded.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1022,6 +1030,84 @@ MUTANTS = [
         "    \"服务重启或沙箱回收后会回退到安排表基线，请尽快重试或联系管理员检查磁盘。\"",
         "    \"⚠️ 修改已安全保存，无需任何处理。\"  # MUTANT: 谎称已存住",
         "test_upsert_teacher_reports_persist_failure",
+    ),
+    # R88：主数据落盘恢复失败（用户已保存的修改被丢弃）不许静默。
+    # 三条异常分支各自记因、helper 只在真丢数据时加信号、overview 必须接线。
+    (
+        "M103", "落盘损坏分支不记降级原因",
+        "app/api/reschedule.py",
+        '        _note_master_restore_loss("落盘文件损坏，已丢弃")',
+        '        pass  # MUTANT: 坏了也不说',
+        "test_loss_branches_report_restored_false or test_every_loss_branch_records_the_reason",
+    ),
+    (
+        "M104", "恢复抛异常分支不记降级原因",
+        "app/api/reschedule.py",
+        '            _note_master_restore_loss(f"恢复时出错：{type(e).__name__}")',
+        '            pass  # MUTANT: 恢复失败也不说',
+        "test_from_dict_exception_reports_restored_false or test_every_loss_branch_records_the_reason",
+    ),
+    (
+        "M105", "空主数据分支不记降级原因",
+        "app/api/reschedule.py",
+        '            _note_master_restore_loss("落盘里是空的主数据，已丢弃")',
+        '            pass  # MUTANT: 空表也不说',
+        "test_loss_branches_report_restored_false or test_every_loss_branch_records_the_reason",
+    ),
+    (
+        "M106", "换表被误记成数据丢失（狼来了）",
+        "app/api/reschedule.py",
+        '        print("ℹ️ 安排表已更换，丢弃旧表上的主数据落盘，按新表反推基线")\n'
+        '        master_store.clear()',
+        '        print("ℹ️ 安排表已更换，丢弃旧表上的主数据落盘，按新表反推基线")\n'
+        '        master_store.clear()\n'
+        '        _note_master_restore_loss("换表")  # MUTANT: 正常降级也报警',
+        "test_normal_paths_keep_response_byte_shape or test_loss_note_is_not_attached_to_stale_fingerprint_branch",
+    ),
+    (
+        "M107", "helper 恒加降级信号（每次首屏都报警）",
+        "app/api/reschedule.py",
+        "    if not _master_restore_warning:\n"
+        "        return payload",
+        "    if False:  # MUTANT: 成功路径也报警\n"
+        "        return payload",
+        "test_helper_is_silent_and_does_not_copy_when_no_loss or test_normal_paths_keep_response_byte_shape",
+    ),
+    (
+        "M108", "helper 就地改写调用方的 payload",
+        "app/api/reschedule.py",
+        "    if not _master_restore_warning:\n"
+        "        return payload\n"
+        "    payload = dict(payload)\n"
+        '    payload["restored"] = False',
+        "    if not _master_restore_warning:\n"
+        "        return payload\n"
+        "    pass  # MUTANT: 不复制，就地改调用方的 dict\n"
+        '    payload["restored"] = False',
+        "test_helper_does_not_mutate_caller_payload",
+    ),
+    (
+        "M109", "overview 不接恢复降级 helper",
+        "app/api/master.py",
+        '    return _api._master_restore_result(\n'
+        '        {"success": True, "data": _api._master_data.overview()}\n'
+        '    )',
+        '    return {"success": True, "data": _api._master_data.overview()}  # MUTANT: 降级状态到不了界面',
+        "test_loss_branches_report_restored_false or test_overview_is_wired_to_the_restore_helper",
+    ),
+    (
+        "M110", "警告文案谎称已安全恢复（整段替换，R87 教训）",
+        "app/api/reschedule.py",
+        '_MASTER_RESTORE_WARNING_TEMPLATE = (\n'
+        '    "⚠️ 服务重启后未能恢复上次保存的主数据（{reason}）："\n'
+        '    "已回退到按当前安排表反推的基线，之前新增或调整的实验项目 / 教师 / 场地"\n'
+        '    "可能已丢失。请核对下方五张表是否完整，必要时重新维护并确认保存成功。"\n'
+        ')',
+        '_MASTER_RESTORE_WARNING_TEMPLATE = (\n'
+        '    "ℹ️ 主数据已从磁盘安全恢复（{reason}）："\n'
+        '    "五张表与上次保存时完全一致，没有任何改动被丢弃，无需核对。"\n'
+        ')  # MUTANT: 谎称已恢复',
+        "test_loss_branches_report_restored_false",
     ),
 ]
 

@@ -178,6 +178,10 @@ type MasterWriteResult = {
   data: MasterOverview;
   persisted?: boolean;
   warning?: string;
+  // R88：GET /master/overview 会在这里首次触发落盘恢复；若那份落盘被丢弃
+  // （损坏 / 恢复异常 / 空主数据），附 restored: false + warning。
+  // 与 persisted 互斥：一个是「没存住」，一个是「没恢复回来」，读接口复用同一形状。
+  restored?: boolean;
 };
 
 // ---- API 函数 ----

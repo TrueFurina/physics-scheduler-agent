@@ -103,10 +103,17 @@ class _ClassIn(BaseModel):
 
 @router.get("/master/overview", summary="主数据五张实体表总览")
 async def master_overview():
-    """五张实体表（课程/实验项目/教师/场地/班级）的完整状态。免鉴权：纯实体清单。"""
+    """五张实体表（课程/实验项目/教师/场地/班级）的完整状态。免鉴权：纯实体清单。
+
+    R88：`_ensure_master_data()` 会在这里首次触发落盘恢复；若那份落盘被丢弃
+    （损坏 / 恢复异常 / 空主数据），教秘保存过的修改已经没了，必须随本次总览
+    一起说清楚 —— 只 print 到服务端日志等于没说。成功路径响应一字不变。
+    """
     await _api._ensure_loaded_async()
     _api._ensure_master_data()
-    return {"success": True, "data": _api._master_data.overview()}
+    return _api._master_restore_result(
+        {"success": True, "data": _api._master_data.overview()}
+    )
 
 
 @router.post("/master/init", summary="从安排表反推主数据（一键初始化）", dependencies=_api._ADMIN_ONLY)

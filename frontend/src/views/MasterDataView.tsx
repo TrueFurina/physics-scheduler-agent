@@ -3,7 +3,7 @@ import { rescheduleApi } from '../api/client';
 import type { MasterOverview } from '../types';
 import ImportWizard, { type ImportKind } from '../components/ImportWizard';
 import { describeApiError } from '../utils/apiError';
-import { masterPersistWarningOf } from '../utils/msg';
+import { masterPersistWarningOf, masterRestoreWarningOf } from '../utils/msg';
 
 /**
  * 主数据管理（导师座谈一号行动项「基于教学大纲梳理实验课程属性、重构数据库」）。
@@ -47,6 +47,9 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
   // R87：落盘失败时后端回 persisted=false —— 修改已在内存生效，但重启会丢。
   // 单独一条黄色横幅：既不冒充「操作失败」（红色 error 区），也不能静默吞掉。
   const [persistWarning, setPersistWarning] = useState('');
+  // R88：首屏 total 里若后端丢了落盘、回退到反推基线，独立一条黄色横幅。
+  // 与「本次没存住」分开：一个是已经丢了，一个是可能会丢。
+  const [restoreWarning, setRestoreWarning] = useState('');
   const [tab, setTab] = useState<TabKey>('experiments');
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -60,6 +63,9 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
     try {
       const r = await rescheduleApi.masterOverview();
       setData(r.data.data);
+      // 进页面这一次总览就会触发后端恢复；丢了落盘必须当场说清楚（R86 教训：
+      // 后端说了前端不接等于没修，而且首屏只调这一次，丢了就永久消失）。
+      setRestoreWarning(masterRestoreWarningOf(r.data));
     } catch (err: any) {
       setError(describeApiError(err, '加载主数据失败'));
     } finally {
@@ -252,6 +258,11 @@ export default function MasterDataView({ adminAuthed, onRequireLogin }: Props) {
       {persistWarning && (
         <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg">
           {persistWarning}
+        </div>
+      )}
+      {restoreWarning && (
+        <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg">
+          {restoreWarning}
         </div>
       )}
 

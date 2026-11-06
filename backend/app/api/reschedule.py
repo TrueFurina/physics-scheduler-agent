@@ -791,9 +791,11 @@ def _ensure_master_data() -> None:
 
 def _ensure_master_data_locked() -> None:
     """真正的恢复/反推；调用方必须持有 `_master_lock`（见上：并发导出会同时进来）。"""
-    global _schedule_fp
+    global _schedule_fp, _master_restore_warning
     from app import master_store
 
+    # 每次真正跑恢复链路都重新判定：上次启动的降级结论不能带到这一轮。
+    _master_restore_warning = ""
     store = master_store.load()
     # R50：`load()` 用 `None` 表示三种情况 —— 文件不存在 / JSON 损坏 / 版本过旧。
     # 三者都不恢复，但**损坏的那份要丢弃**：否则它永久留在磁盘上，
@@ -801,6 +803,7 @@ def _ensure_master_data_locked() -> None:
     # 就等于让坏文件获得了永久豁免。
     if store is None and master_store.consume_corrupt_flag():
         master_store.clear()
+        _note_master_restore_loss("落盘文件损坏，已丢弃")
     if store and _schedule_fp and store.get("schedule_fingerprint") == _schedule_fp:
         try:
             _master_data.from_dict(store.get("master") or {})
@@ -813,9 +816,11 @@ def _ensure_master_data_locked() -> None:
             # 落盘里是**空主数据**（历史 bug：未初始化时也落盘）→ 不能当权威恢复，
             # 否则一次重启就把 17 个班/25 个项目全部清空（实测踩过）。丢弃后按表反推。
             print("⚠️ 落盘里的主数据为空（历史脏数据），丢弃并按安排表反推")
+            _note_master_restore_loss("落盘里是空的主数据，已丢弃")
             master_store.clear()
         except Exception as e:
             print(f"⚠️ 主数据落盘恢复失败（{e}），回退安排表反推基线")
+            _note_master_restore_loss(f"恢复时出错：{type(e).__name__}")
         master_store.clear()
     elif store and _schedule_fp and store.get("schedule_fingerprint") != _schedule_fp:
         print("ℹ️ 安排表已更换，丢弃旧表上的主数据落盘，按新表反推基线")
@@ -886,6 +891,44 @@ def _master_persist_result(persisted: bool, payload: dict) -> dict:
         payload = dict(payload)
         payload["persisted"] = False
         payload["warning"] = _MASTER_PERSIST_WARNING
+    return payload
+
+
+# R88：主数据从落盘**没能用上**时的结构化降级信号。
+# 只在三种异常分支（损坏 / 恢复异常 / 空主数据）里写；首次启动无落盘、
+# 安排表更换（旧表上的主数据本就作废）是正常路径，一律不写 —— 否则每次
+# 首屏都弹「狼来了」警告（R86 同款口径）。
+_MASTER_RESTORE_WARNING_TEMPLATE = (
+    "⚠️ 服务重启后未能恢复上次保存的主数据（{reason}）："
+    "已回退到按当前安排表反推的基线，之前新增或调整的实验项目 / 教师 / 场地"
+    "可能已丢失。请核对下方五张表是否完整，必要时重新维护并确认保存成功。"
+)
+_master_restore_warning: str = ""
+
+
+def _note_master_restore_loss(reason: str) -> None:
+    """记下「磁盘上有、但没能用上」这一事实；调用方须持有 `_master_lock`。
+
+    这不是报错：主数据已按安排表反推、系统可用；但**教秘保存过的修改确实没了**。
+    R87 在写失败时告诉用户「重启会回退」，这里补的是回退真发生时的那一半。
+    状态是「本次启动的恢复事实」，持续显示到重启，不因后续一次写盘就抹掉
+    —— 把「曾经丢过」清成「没丢过」同样是不实。
+    """
+    global _master_restore_warning
+    _master_restore_warning = _MASTER_RESTORE_WARNING_TEMPLATE.format(reason=reason)
+
+
+def _master_restore_result(payload: dict) -> dict:
+    """恢复降级 → 响应体；只在确实丢了落盘数据时附结构化信号。
+
+    成功 / 正常降级路径必须**原样返回同一个对象**：响应逐字节不变，
+    否则每次首屏都会多出字段（R86 防放宽同款）。
+    """
+    if not _master_restore_warning:
+        return payload
+    payload = dict(payload)
+    payload["restored"] = False
+    payload["warning"] = _master_restore_warning
     return payload
 
 

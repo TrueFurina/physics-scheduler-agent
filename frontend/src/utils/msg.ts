@@ -63,3 +63,31 @@ export function masterPersistWarningOf(data?: MasterPersistResult): string {
   }
   return '';
 }
+
+/**
+ * 主数据总览的恢复结果（R88）。字段可选：老后端 / 正常响应没有也不炸。
+ *
+ * `restored: false` 说的是「磁盘上有、但没能用上」——落盘损坏 / 恢复抛异常 /
+ * 空主数据脏数据。这三种都会丢掉教秘上次保存的修改并回退到反推基线，
+ * 却只 print 到服务端日志。与 `persisted: false`（没存住）是两件事，
+ * 所以单独一个纯函数、单独一条横幅，不许混成一个状态。
+ */
+export interface MasterRestoreResult {
+  restored?: boolean;
+  warning?: string;
+}
+
+/**
+ * 恢复降级 → 主数据管理页的警告横幅文案；正常响应返回空串。
+ *
+ * 判据必须是 `=== false`：`undefined`（老后端 / 恢复成功 / 首次启动无落盘）
+ * 不是故障，否则每次进页面都弹「狼来了」（R86/R87 同款口径）。
+ */
+export function masterRestoreWarningOf(data?: MasterRestoreResult): string {
+  if (data?.restored === false) {
+    const raw = (data.warning || '').trim();
+    if (!raw) return '⚠️ 服务重启后主数据未能恢复，已回退到安排表基线，请核对是否完整';
+    return raw.startsWith('⚠️') ? raw : `⚠️ ${raw}`;
+  }
+  return '';
+}
