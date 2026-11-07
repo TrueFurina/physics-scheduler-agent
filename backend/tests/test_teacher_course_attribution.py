@@ -196,6 +196,41 @@ def test_existing_card_fields_are_unchanged():
     assert card["original_time"] == "周一 345"
 
 
+# ==================== 三之续、adjustable 不许恒为 true（R90） ====================
+
+def test_ambiguous_course_card_is_not_adjustable():
+    """横跨多门课的卡片必须 adjustable=False 且带真实原因。
+
+    旧行为：adjustable 恒 true、adjustable_reason 恒空字符串。前端「不可调」分支
+    （⚠️ adjustable_reason）永远空着，所有课程都给「申请调课」入口 —— 而 apply-move
+    按 course_name 匹配，横跨多门课的卡片 course_name 是「A、B」拼名，匹配不到任何
+    单条，教师点了才会发现调不动。这就是 R35「说了可调其实不可调」的同族缺陷。
+    """
+    d = _db([
+        _e(3, "周一", "345", "24物理1班", "1组", "扭摆法测物体转动惯量", "A504", course=COURSE_B),
+        _e(5, "周二", "567", "24物理1班", "1组", "扭摆法测物体转动惯量", "A516", course=COURSE_3),
+    ])
+    card = _one(d)
+
+    assert card["course_ambiguous"] is True
+    assert card["adjustable"] is False, "横跨多门课的卡片不该被当成可调"
+    assert card["adjustable_reason"], "不可调必须说清原因，空原因等于没说"
+    assert COURSE_B in card["adjustable_reason"] and COURSE_3 in card["adjustable_reason"]
+
+
+def test_single_course_card_stays_adjustable_by_default():
+    """正向控制：只属一门课的卡片仍 adjustable=True、原因留空（默认可调）。"""
+    d = _db([
+        _e(3, "周一", "345", "24物理1班", "1组", "声速测量", "A504", course=COURSE_3),
+        _e(4, "周一", "345", "24物理1班", "1组", "声速测量", "A504", course=COURSE_3),
+    ])
+    card = _one(d)
+
+    assert card["course_ambiguous"] is False
+    assert card["adjustable"] is True, "单门课卡片应保持默认可调"
+    assert card["adjustable_reason"] == ""
+
+
 # ==================== 四、端点层：字段真的送出去了吗 ====================
 
 def test_endpoint_returns_course_attribution(monkeypatch):

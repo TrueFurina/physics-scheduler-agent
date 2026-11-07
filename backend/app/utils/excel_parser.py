@@ -1152,7 +1152,7 @@ class ScheduleDatabase:
                 "courses": course_list,
                 # 横跨多门课 ⇒ True。教师据此知道"这张卡片不是一门课"，
                 # 而不是被第一门课的名字骗过去。
-                "course_ambiguous": len(course_list) > 1,
+                "course_ambiguous": (course_ambiguous := len(course_list) > 1),
                 "original_time": f"{first['weekday']} {time_display}",
                 # R48：这张卡片真正占用的全部时段（人读文案，顺序同 original_time）。
                 # `original_time` 保持"最早一次"不变 —— 历史申请单与 apply-move 都按它匹配，
@@ -1168,9 +1168,18 @@ class ScheduleDatabase:
                 "week_range": format_week_span(weeks_sorted),
                 "weeks": weeks_sorted,  # 机器可读的真实周次
                 "total_slots": len(slots),
-                # 可调状态：实验轮次固定课程默认可调（由前端/后续规则细化）
-                "adjustable": True,
-                "adjustable_reason": "",
+                # R90：可调状态。实验轮次固定课程默认可调；但卡片横跨多门课时，
+                # 标准「按课程名调课」流程（apply-move 按 course_name 匹配）无法定位到
+                # 单一目标 —— course_name 是「A、B」拼名，匹配不到任何单条，教师点了才
+                # 发现调不动。这种卡片必须标不可调并说清原因（与 R35「说了可调其实不可调」
+                # 同族缺陷）。更深入的「到底有没有空位」校验需要求解器，超出本轮范围；
+                # 其余情况保持默认可调。
+                "adjustable": not course_ambiguous,
+                "adjustable_reason": (
+                    "该卡片横跨多门实验项目（%s），标准按课程名调课流程无法定位到"
+                    "单一目标，请先拆分或联系教务" % "、".join(course_list)
+                    if course_ambiguous else ""
+                ),
             })
         return cards
 

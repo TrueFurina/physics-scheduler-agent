@@ -151,6 +151,8 @@ FILES = {
     "M108": ["tests/test_master_restore_degraded.py"],
     "M109": ["tests/test_master_restore_degraded.py"],
     "M110": ["tests/test_master_restore_degraded.py"],
+    "M111": ["tests/test_teacher_course_attribution.py"],
+    "M112": ["tests/test_teacher_course_attribution.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1108,6 +1110,26 @@ MUTANTS = [
         '    "五张表与上次保存时完全一致，没有任何改动被丢弃，无需核对。"\n'
         ')  # MUTANT: 谎称已恢复',
         "test_loss_branches_report_restored_false",
+    ),
+    (
+        "M111", "可调性判定被反转（恒不可调）",
+        "app/utils/excel_parser.py",
+        '                "adjustable": not course_ambiguous,',
+        '                "adjustable": course_ambiguous,  # MUTANT: 恒不可调',
+        "test_single_course_card_stays_adjustable_by_default",
+    ),
+    (
+        "M112", "不可调却不给原因（谎称无碍）",
+        "app/utils/excel_parser.py",
+        '                "adjustable_reason": (\n'
+        '                    "该卡片横跨多门实验项目（%s），标准按课程名调课流程无法定位到"\n'
+        '                    "单一目标，请先拆分或联系教务" % "、".join(course_list)\n'
+        '                    if course_ambiguous else ""\n'
+        '                ),',
+        '                "adjustable_reason": (\n'
+        '                    "" if course_ambiguous else ""  # MUTANT: 不可调也不说原因\n'
+        '                ),',
+        "test_ambiguous_course_card_is_not_adjustable",
     ),
 ]
 
