@@ -155,6 +155,8 @@ FILES = {
     "M112": ["tests/test_teacher_course_attribution.py"],
     "M113": ["tests/test_export_warmup_state.py"],
     "M114": ["tests/test_export_warmup_state.py"],
+    "M115": ["tests/test_master_restore_warning.py"],
+    "M116": ["tests/test_master_restore_warning.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1147,6 +1149,20 @@ MUTANTS = [
         '        _EXPORT_WARM_STATE["status"] = "ok"',
         '        pass  # MUTANT: 成功不记 ok',
         "test_export_warmup_records_ok",
+    ),
+    (
+        "M115", "结构损坏 fail-closed 不记失败标志",
+        "app/master_data.py",
+        '            self._from_dict_failed = True',
+        '            pass  # MUTANT: 不记失败标志',
+        "test_from_dict_marks_failed_flag_on_corrupt",
+    ),
+    (
+        "M116", "损坏不报损坏（谎称空）",
+        "app/api/reschedule.py",
+        '                _note_master_restore_loss("落盘文件结构损坏，已丢弃")',
+        '                _note_master_restore_loss("落盘里是空的主数据，已丢弃")  # MUTANT: 谎称空',
+        "corrupt_store_warning_says_corrupt",
     ),
 ]
 

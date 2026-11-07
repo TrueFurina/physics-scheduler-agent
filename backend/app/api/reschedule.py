@@ -819,8 +819,14 @@ def _ensure_master_data_locked() -> None:
                 return
             # 落盘里是**空主数据**（历史 bug：未初始化时也落盘）→ 不能当权威恢复，
             # 否则一次重启就把 17 个班/25 个项目全部清空（实测踩过）。丢弃后按表反推。
-            print("⚠️ 落盘里的主数据为空（历史脏数据），丢弃并按安排表反推")
-            _note_master_restore_loss("落盘里是空的主数据，已丢弃")
+            if _master_data._from_dict_failed:
+                # from_dict 在结构损坏时 fail-closed 返回 self（initialized 仍是 False），
+                # 必须和"真·空主数据"区分开，否则用户会看到"空的"而真实原因是"损坏的"。
+                print("⚠️ 落盘文件结构损坏（from_dict fail-closed），丢弃并按安排表反推")
+                _note_master_restore_loss("落盘文件结构损坏，已丢弃")
+            else:
+                print("⚠️ 落盘里的主数据为空（历史脏数据），丢弃并按安排表反推")
+                _note_master_restore_loss("落盘里是空的主数据，已丢弃")
             master_store.clear()
         except Exception as e:
             print(f"⚠️ 主数据落盘恢复失败（{e}），回退安排表反推基线")

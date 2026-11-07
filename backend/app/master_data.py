@@ -72,6 +72,10 @@ class MasterData:
         self.rooms: Dict[str, dict] = {}
         self.classes: Dict[str, dict] = {}
         self.initialized = False
+        # `from_dict` 在结构损坏时 fail-closed 返回 self（不抛），调用方靠这个标志
+        # 区分「真的空主数据」与「落盘文件结构损坏」（两者都让 initialized=False）。
+        # 不设的话，损坏会被误报成"空的"，用户看不到真实的损坏原因（R92）。
+        self._from_dict_failed = False
 
     # ------------------------------------------------------------------ 反推
     def build_from_entries(self, entries) -> "MasterData":
@@ -376,6 +380,7 @@ class MasterData:
         断言不足让这个缺陷活了很久。本轮一并补上那几条断言。
         """
         try:
+            self._from_dict_failed = False  # 每次调用重新判定（防止上次失败的标志滞留）
             # 先build到**临时对象**上：任何一步失败都不会污染 self
             stage = MasterData()
             stage.courses = {n: {"experiments": set(v["experiments"])}
@@ -411,6 +416,7 @@ class MasterData:
             return self
         except (TypeError, AttributeError, KeyError) as e:
             print(f"⚠️ 主数据落盘文件损坏（{e}），回退到安排表反推基线")
+            self._from_dict_failed = True
             return self
 
     def overview(self) -> dict:
