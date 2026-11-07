@@ -65,6 +65,12 @@
 - 代码回滚：`git revert <commit>` 或 `git checkout <commit> -- <paths>`（**不要 `reset --hard` 混他人在途改动**）。
 - 数据：持久化目录 `PSA_DATA_DIR`（默认代码内定目录），回滚代码后旧数据仍可读；
   如需还原数据，请单独备份该目录后再操作。
+  - ⚠️ **Windows 上必须填本机绝对路径**（如 `E:\psa-data`）。填 POSIX 路径
+    （`/home/user/psa-data`，沙箱常用）在 2026-11-07 之前会被误判为可用，
+    数据静默写到盘根 `E:\home\user\psa-data`；R-113 已修为"非绝对路径一律回退
+    `backend/app/data`"。**回滚到 2026-11-07 之前的代码时，这个坑会回来** ——
+    届时请先把 `.env` 的 `PSA_DATA_DIR` 改成 Windows 绝对路径或留空。
+  - 判断数据实际落在哪：`python -c "import sys;sys.path.insert(0,'backend');from app.paths import DATA_DIR;print(DATA_DIR)"`
 - 不 `git add -A`：当前树混有并发会话在途改动，收口只提交自己的文件（见第 9 节）。
 
 ## 8. 验收 / 测试（冻结态复现闭环用）

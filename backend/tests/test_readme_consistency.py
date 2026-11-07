@@ -44,9 +44,16 @@ def test_readme_backend_test_count_matches():
     # 严格相等意味着每加一个测试都要改 README，否则 CI 红。
     # 这种约束会让人为了过闸而改数字，而不是去审视声明本身是否该存在。
     #
-    # 改用"下限 + 允许滞后 10%"：README 里的数字可以略旧（文档通常滞后于代码），
+    # 改用"下限 + 允许小幅滞后"：README 里的数字可以略旧（文档通常滞后于代码），
     # 但不能**严重低估**——那会让评审误判测试量。
-    TOLERANCE = 0.10
+    #
+    # R-113：容差从固定 10% 收紧为 `max(10, 2%)`。原先 10% 的实测后果：
+    # README.zh.md 写 735、实际 806（差 8.8%），**刚好落在容差内，一路绿**。
+    # 也就是说"10% 容差"在 800 个测试的规模下等于允许 80 个的空白，
+    # 这个尺度已经大到掩盖真实漂移了。改成"最多落后 10 个 / 2%"后，
+    # 806→735 这种必然被抓住，而正常"加了几个测试还没改文档"仍然放过。
+    TOLERANCE = 0.02
+    ALLOW_ABS = 10
 
     for name, pattern in (
         ("README.zh.md", r"后端 (\d+) 个测试"),
@@ -58,10 +65,10 @@ def test_readme_backend_test_count_matches():
         assert claimed <= actual, (
             f"{name} 声称后端 {claimed} 个测试，实际只有 {actual} 个 —— 夸大测试量"
         )
-        floor = int(actual * (1 - TOLERANCE))
+        floor = max(int(actual * (1 - TOLERANCE)), actual - ALLOW_ABS)
         assert claimed >= floor, (
-            f"{name} 声称后端 {claimed} 个测试，实际 {actual} 个（低估超过 "
-            f"{int(TOLERANCE*100)}%）。请同步 README 到 >= {floor}。"
+            f"{name} 声称后端 {claimed} 个测试，实际 {actual} 个"
+            f"（下限 {floor}）。请同步 README。"
         )
 
 
@@ -111,3 +118,36 @@ def test_readme_auditor_list_matches_scripts():
         text = _read(name)
         missing = [n for n in names if n not in text]
         assert not missing, f"{name} 漏列审计器：{missing}"
+
+
+def test_ci_comment_zero_await_count_matches_baseline():
+    """CI 注释里写的"零 await 轻查询 N 个"必须等于基线文件里的真实条数。
+
+    为什么需要（R-112 自查发现的自身错误）：
+    我在改造审计脚本、把 CI 目标从单文件改成目录时，**顺手留下了旧数字** ——
+    CI 注释写着"零 await 的轻查询（13 个）"，而 `scripts/async_blocking_baseline.json`
+    实测只有 **8** 条。注释不改不会让 CI 变红，所以它漂了整整一轮没人发现。
+
+    这类"注释里的数字"是最容易腐烂的断言：它长得像事实，却没有任何机器检查。
+    这里把它变成可验证的。
+    """
+    import json
+
+    baseline_path = os.path.join(REPO, "scripts", "async_blocking_baseline.json")
+    with open(baseline_path, encoding="utf-8") as fh:
+        baseline = json.load(fh)
+    real = len(baseline.get("routes") or [])
+
+    ci = _read(os.path.join(".github", "workflows", "ci.yml"))
+    hits = [ln for ln in ci.splitlines() if "零 await 的轻查询" in ln]
+    assert hits, "CI 里找不到'零 await 的轻查询'的说明行（措辞变了请同步本测试）"
+
+    import re
+    claimed = []
+    for ln in hits:
+        # 允许数量被 ** ** 包住（CI 注释里用粗体强调），先把标记去掉再取数
+        claimed.extend(int(n) for n in re.findall(r"(\d+)\s*个", ln.replace("**", "")))
+    assert claimed, f"说明行里解析不出数量：{hits}"
+    assert real in claimed, (
+        f"CI 注释声称零 await 轻查询为 {claimed} 个，实测基线是 {real} 个"
+    )
