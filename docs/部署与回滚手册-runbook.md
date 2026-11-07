@@ -77,15 +77,32 @@
 
 - 后端单测：
   `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **832 passed**。
-  - ⚠️ **在本沙箱里跑全量，必须同时换一个全新 `PYTEST_DEBUG_TEMPROOT`**，否则会偶发
-    "全绿但 1 个 failed"的假失败（2026-11-07 实测三次全量：`832 passed` / `1 failed
-    (test_api_auth)` / `1 failed (test_master_workbook)` —— 两次命中的是**不同**测试，
-    根因同一个）。原因是 pytest 会话结束会批量清理旧运行根目录，撞上沙箱的删除守卫，
-    报 `PermissionError: CHAT_REFERENCE_PROTECTED`。
-    正确做法（`scripts/_pytest_temproot.py` 就是为此写的）：
-    `PYTEST_DEBUG_TEMPROOT=$(mktemp -d) python -m pytest backend/tests -q`。
-    子进程调用请直接用 `_pytest_temproot.fresh_env()`；in-process 用 `install_inprocess()`。
-    **CI 不受影响**（GitHub runner 没有这个守卫）。
+  - ⚠️ **本沙箱里跑全量会偶发"全绿但 1 个 failed"，且每次命中的测试不同。不是代码问题。**
+    2026-11-07 实测四次全量：`832 passed` / `1 failed(test_api_auth)` /
+    `1 failed(test_master_workbook)` / `1 failed(test_full_table_exports...)`。
+
+    完整调用链（从 pytest 的 traceback 里读出来的，不是推测）：
+
+        openpyxl/worksheet/_writer.py:389  in cleanup
+            os.remove(self.out)          ← openpyxl 删自己写的临时 xml
+        <string>:56  in _audit           ← 本机 agent 运行时注入的 sys.addaudithook
+            PermissionError: CHAT_REFERENCE_PROTECTED
+
+    openpyxl 每写一个 worksheet 都会"建临时文件 → 写 → 删"。钩子在做删除前的
+    "引用保留扫描"时走 socket 与运行时通信，**长时间跑（13 分钟以上）后该通信会超时**，
+    于是拒绝这次删除并把 PermissionError 抛进业务代码。所以：
+      · 触发点是**任意一个会写 xlsx 的测试**（导出/工作簿/导入预览…），与具体用例无关；
+      · 与 `PYTEST_DEBUG_TEMPROOT` **无关** —— 我一开始误判成 pytest 清理旧根目录，
+        换了 temproot 后仍复现（第 4 次就是换了之后跑出来的）。
+        `scripts/_pytest_temproot.py` 解决的是另一个真实问题（pytest 会话结束批量
+        删 `%TEMP%/pytest-of-*`，报 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`），
+        那个仍应继续用 `fresh_env()`。
+
+    判定方法：**重跑一次全量**，若失败换了测试名、且 traceback 落在
+    `openpyxl ... cleanup → os.remove`，即可判为环境问题。
+    **CI 完全不受影响**（GitHub runner 上没有这个 audit 钩子）。
+    注意：换 temproot 时该目录**必须预先存在**（pytest 不建父目录），
+    否则会得到 `832 errors`（我第一次手拼路径就这么踩了）。
 - 前端：`cd frontend && npm run verify`（tsc -b + vitest）→ **129 passed**
   （`vite.config.ts` 已关文件级并行 `fileParallelism:false`，消除沙箱 brokered-fs 并发写 TEMP 的 EPERM flake）。
 - 活体完整验收（含独立审计 + UI 探针；**勿常态 `--skip-audit` / `--skip-ui`**）：
