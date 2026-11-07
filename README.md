@@ -86,17 +86,29 @@ Open **http://localhost:5173**
 6. **Admin approval** — approve/reject (requires admin login)
 7. **Lab-spec query** — experiment-spec Q&A for lab staff / teachers
 
+## Core Design Decisions
+
+One principle runs through the entire project: **the rule engine guarantees correctness, the LLM only enhances experience, and LLM output never directly modifies scheduling data**.
+
+Four concrete manifestations:
+
+1. **Conflict detection is never delegated to the LLM**. The three core conflicts (room / teacher / same-class-same-group) are judged by the rule engine at (class, group) granularity — so the 47 legitimate parallel-teaching slots in the real table produce **zero false positives**. The LLM parses natural-language intent and generates candidate plans, but its suggestions must pass rule-engine filtering before being shown to the user.
+
+2. **The solver only schedules what should be scheduled**. Intro/exam projects are visible in the master data and UI, but **never enter the CP-SAT solver** — they are not teaching units that need time-slot assignment. This is an explicit filter, not something handled by data cleaning.
+
+3. **No silent guessing when information is missing**. The gray-box mode of parallel batch scheduling auto-fills missing teachers (least-loaded first) / rooms / weeks, but **every assumption is reported to the user** — they can see what decisions the system made on their behalf.
+
+4. **Write operations are reversible**. Plan landing follows five steps: diff preview → admin approval → write-back → undo → restart replay. Every step is persisted; you can always return to the pre-adoption snapshot.
+
 ## Key Features
 
-- ✅ **Graded conflict detection**: core conflicts (room / teacher / same class+group) say *what* is hit and *how to fix it* — whole-group clashes are judged per (class, group), so 47 legitimate parallel-teaching slots in the real table cause zero false positives
-- ✅ **Master data as first-class citizens**: five entity tables, reverse-derived then editable; survives restarts (versioned JSON store, invalidated when the schedule changes); intro/exam projects are visible in the ledger but **never scheduled**
-- ✅ **Parallel batch scheduling**: CP-SAT over the whole class; gray-box mode fills missing teachers (least-loaded first) / rooms / weeks and reports every assumption it made
+- ✅ **Graded conflict detection**: core conflicts (room / teacher / same class+group) say *what* is hit and *how to fix it*
+- ✅ **Parallel batch scheduling**: CP-SAT over the whole class (all experiments × all student groups); gray-box mode auto-fills and reports assumptions
+- ✅ **Master data as first-class citizens**: five entity tables, reverse-derived then editable, survives restarts; intro/exam projects are visible but **never scheduled**
 - ✅ **Ledger round-trip**: export the five tables to Excel, edit offline, import back — with guards against stat-column masquerade and sharded class names
-- ✅ **Reason transparency**: every excluded slot shows why
-- ✅ **Natural language**: "I'm teacher Wu, move next week's class" → LLM intent parsing
-- ✅ **Multi-turn follow-up**: system asks for missing info
-- ✅ **SQLite persistence**: reschedule requests survive restart
-- ✅ **852 backend tests + 133 frontend tests**, plus independent auditors (`audit_conflicts`, `verify_graybox`, `verify_master_roundtrip`, `verify_intro_filter`, `probe_approval_chain`, `probe_land_plan`, `probe_restart_replay`, `probe_schedule_grid`, `probe_import_wizard`, `probe_ui_newviews`) that re-derive everything from the raw Excel with a separate parser
+- ✅ **Natural language rescheduling**: "I'm teacher Wu, move next week's class" → LLM intent parsing with multi-turn follow-up for missing info
+- ✅ **Plan landing**: whole-school plans show a four-category diff first; admin adoption writes back to the schedule, with undo and restart replay
+- ✅ **Weekly timetable grid**: visual overview of any week (day × slot), conflicts marked
 
 ## Project Structure
 
@@ -114,7 +126,7 @@ physics-scheduler-agent/
 │   │   ├── agent/                  # RescheduleAgent, LLM intent parser
 │   │   ├── engine/                 # Constraint-based auto scheduler (CP-SAT)
 │   │   └── utils/                  # Excel parser / time model
-│   └── tests/                      # 852 pytest tests
+│   └── tests/                      # pytest suite
 ├── frontend/
 │   └── src/                        # React UI (dashboard, master data, parallel, …)
 ├── scripts/                        # Independent auditors + release preflight
@@ -204,75 +216,47 @@ node ../scripts/probe_ui_newviews.cjs   # UI wiring of the two new views (local 
 - [ ] Multi-school data isolation
 - [ ] RAG knowledge base for lab materials
 
-## Deployment & Publishing
-
-> ⚠️ **Publishing is frozen (user decision, 2026-10-23).** The live site stays at the D-9 build
-> (`index-B6jUBL3e.js`, no R-59/R-60/landing). Local iteration continues; do not re-deploy or
-> propose publishing unless the user explicitly re-authorizes it.
-
-Live app: <https://physics-scheduler.app.workbuddy.host/>
+## Deployment
 
 Deployed as a **single-port, same-origin** service: FastAPI serves both the API and the built
 frontend, so the frontend's relative `API_BASE = '/api'` works unchanged.
 
 ```bash
-# 1) Build the frontend (output MUST be frontend/webui, not dist — see the two pitfalls below)
+# 1) Build the frontend (output goes to frontend/webui, not dist — see the two pitfalls below)
 cd frontend && npm run build
 
-# 2) Run in production form (the process reads PORT itself; defaults to 0.0.0.0:8000)
+# 2) Run in production form (the process reads PORT itself; defaults to 8000)
 python run.py
 # or with an explicit port:  PORT=8080 python run.py
 ```
 
-Publish parameters:
+Two pitfalls found the hard way, recorded here so nobody repeats them:
 
-| Parameter | Value |
-|---|---|
-| directory | repository root |
-| language | `python` |
-| installCmd | `python3 -m pip install -r backend/requirements.txt` |
-| startCmd | `python3 run.py` |
-| domainPrefix | `physics-scheduler` |
+1. **Do not use `$PORT` in the start command.** Some PaaS sandboxes do not expand shell
+   variables, so `--port $PORT` receives an empty value and fails outright. The port must be
+   read by the process itself — that is the sole reason `run.py` exists at the repo root.
+2. **Do not name the frontend output directory `dist/`.** Deployment uploads exclude common
+   build-output directories, so an `index.html` inside `dist/` gets stripped and the live site
+   shows a blank page. Hence `build.outDir: 'webui'` in `vite.config.ts` and
+   `FRONTEND_DIST = frontend/webui` in `main.py`.
 
-### Two pitfalls (both found the hard way)
+## Data & Privacy
 
-1. **The sandbox does not expand `$PORT`.** `--port $PORT` receives an empty value and fails with
-   `Option '--port' requires an argument` (`SITES_START_FAILED`). The port must be read by the
-   process itself — that is exactly why `run.py` exists at the repo root. Do not change it back to
-   `--port $PORT`.
-2. **Uploads exclude only `node_modules` / `.git` / build output — NOT `.gitignore` entries.**
-   - Frontend output left in `dist/` is treated as build output and **excluded**, leaving no
-     `index.html` in the sandbox. Hence `build.outDir: 'webui'` in `vite.config.ts` and
-     `FRONTEND_DIST = frontend/webui` in `main.py`.
-   - The gitignored `schedule.xlsx` **is still uploaded** (its 教师联系表 carries 17 real
-     teacher phone numbers — delivery-review P0-2; `scripts/preflight_release.py` blocks
-     release while it sits in the repo root). It **is** the default data source when
-     present — a product decision (docs/安全风险清单-…-20261015.md R-09): the
-     teaching-office demo must show real teacher names. `schedule.demo.xlsx` (sanitized,
-     `教师A…`) is only the fallback when the real table is absent. Use
-     `SCHEDULE_PATH=<path>` to point elsewhere.
+A scheduling system necessarily touches teacher names and contact details. The boundary:
 
-### Data & privacy
+| Data | In the system? | Why |
+|---|---|---|
+| Teacher names | ✅ | They are the business subject of scheduling ("move teacher Wu's class to week 6") |
+| Teacher phone / e-mail | ❌ **never** | Contact columns are stripped at parse time and never enter any API response; locked by `test_privacy_export.py` |
+| Student-level data | ❌ **never** | The system works at (class, group) granularity; student timetables are not served by any endpoint |
 
-- Default dataset is the **real** `schedule.xlsx` when present (product decision R-09: real
-  teacher names are the business data of the teaching-office demo), falling back to the
-  sanitized `schedule.demo.xlsx` (built by `scripts/make_demo_schedule.py`; teachers appear
-  as `教师A…`, no phone numbers) only when the real table is absent. So the live site shows
-  real teacher names (e.g. 吴琳) — expected behavior, not a leak. Teacher contact info
-  (phone / e-mail columns of 教师联系表) is never parsed into any API response; locked by
-  `backend/tests/test_privacy_export.py`.
-- Live check: `GET /api/reschedule/status` returns real teacher names (product decision R-09);
-  seeing aliases like `教师A…` means it fell back to the sanitized table (real table missing).
-- Read-interface data boundary (what an anonymous caller can see): teacher **names**, class
-  **names**, rooms, week / weekday / slot, experiment project names. Never: teacher phone or
-  e-mail, and no student-level data (student timetables are not served by any public endpoint).
-  `/master-status` may include class names in its unscheduled-sample list — no student PII.
-- Cloud capabilities (auth / database / LLM) are gated by **exact server-side Origin match**:
-  only the published domain is allowed, other origins get 403. So `localhost` can only verify the
-  public data plane — WeChat login must be verified on the live domain.
+What an anonymous caller can see: teacher **names**, class **names**, rooms, week / weekday /
+slot, experiment project names. Nothing else.
 
-> Re-publishing requires the user to explicitly ask for it ("publish / deploy"); publish consent
-> does not carry over between turns.
+Two datasets ship with the repo: the real `schedule.xlsx` (real teacher names, gitignored and
+not committed) and a sanitized `schedule.demo.xlsx` (teachers appear as `教师A…`). Whichever is
+present is used by default; `SCHEDULE_PATH` points elsewhere. Cloud capabilities (auth /
+database / LLM) are gated by exact server-side Origin matching — non-allowlisted origins get 403.
 
 ## Documentation
 
