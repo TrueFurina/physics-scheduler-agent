@@ -153,6 +153,8 @@ FILES = {
     "M110": ["tests/test_master_restore_degraded.py"],
     "M111": ["tests/test_teacher_course_attribution.py"],
     "M112": ["tests/test_teacher_course_attribution.py"],
+    "M113": ["tests/test_export_warmup_state.py"],
+    "M114": ["tests/test_export_warmup_state.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1130,6 +1132,21 @@ MUTANTS = [
         '                    "" if course_ambiguous else ""  # MUTANT: 不可调也不说原因\n'
         '                ),',
         "test_ambiguous_course_card_is_not_adjustable",
+    ),
+    # R91：导出预热状态（与 solver 预热对称）。原实现失败只 print，无任何结构化记录。
+    (
+        "M113", "导出预热失败却谎称成功",
+        "app/api/export.py",
+        '        _EXPORT_WARM_STATE["status"] = "failed"',
+        '        _EXPORT_WARM_STATE["status"] = "ok"  # MUTANT: 失败谎称成功',
+        "test_export_warmup_records_failure",
+    ),
+    (
+        "M114", "导出预热成功却不记 ok",
+        "app/api/export.py",
+        '        _EXPORT_WARM_STATE["status"] = "ok"',
+        '        pass  # MUTANT: 成功不记 ok',
+        "test_export_warmup_records_ok",
     ),
 ]
 

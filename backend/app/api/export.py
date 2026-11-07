@@ -190,19 +190,34 @@ def _cached_export(key: tuple, build) -> bytes:
 # 不占请求路径、失败只退回"首调慢一点"，绝不因为预热失败而影响任何功能。
 # ---------------------------------------------------------------------------
 _EXPORT_WARM_THREAD: Optional[threading.Thread] = None
+# 预热状态（R91）：与 engine/warmup.py 的 solver 预热对称 —— 失败不能只 print，
+# 否则和 R88 之前的主数据恢复一样，运维/前端看不到"预热失败过"，首调慢了还以为正常。
+_EXPORT_WARM_STATE: dict = {"status": "pending", "detail": None}
 
 
 def _warm_export_cache() -> None:
+    if not _api._db.loaded:
+        _EXPORT_WARM_STATE["status"] = "pending"
+        return
+    _EXPORT_WARM_STATE["status"] = "running"
+    _EXPORT_WARM_STATE["detail"] = None
     try:
-        if not _api._db.loaded:
-            return
         _api._ensure_master_data()
         _class_schedule_bytes()
         _room_schedule_bytes()
         _master_data_bytes()
         _master_workbook_bytes()
     except Exception as exc:  # 预热失败绝不能影响服务可用性
+        _EXPORT_WARM_STATE["status"] = "failed"
+        _EXPORT_WARM_STATE["detail"] = f"{type(exc).__name__}: {exc}"
         print(f"⚠️ 导出预热失败（不影响功能，只是首调会慢一点）：{type(exc).__name__}: {exc}")
+    else:
+        _EXPORT_WARM_STATE["status"] = "ok"
+
+
+def export_warmup_state() -> dict:
+    """导出预热状态：pending/running/ok/failed（与 solver 预热对称，供 /health、/status 读取）。"""
+    return dict(_EXPORT_WARM_STATE)
 
 
 def start_export_warmup() -> bool:

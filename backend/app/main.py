@@ -263,6 +263,8 @@ def health_check():
         "data": reschedule.data_state(),
         # pending/running/ok/failed —— 判断"首次排课慢"是否因为预热没跑成
         "solver": warmup.state(),
+        # R91：导出预热状态与 solver 对称，失败不再只 print。
+        "export": export.export_warmup_state(),
         # 进程内累计（重启清零）：total / errors(>=400) / slow(>=SLOW_REQUEST_MS) / throttled(429)
         "http": metrics(),
     }

@@ -631,6 +631,7 @@ async def get_status():
     用于线上核验"后端 LLM 到底接的哪个渠道、有没有读到密钥"——
     排查配置问题时不必翻沙箱日志。它**不包含任何密钥值**。
     """
+    from app.api import export as _export_mod
     parser = getattr(_agent, "llm_parser", None)
     return {
         "loaded": _db.loaded,
@@ -647,6 +648,9 @@ async def get_status():
             else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
         ),
         "ai": parser.describe() if parser is not None else {"configured": False},
+        # 导出预热状态（R91）：与 solver 预热对称，失败不再只 print —— 前端首屏轮询
+        # /status 时就能看到，不会把"首调慢"误当成正常。
+        "export_warmup": _export_mod.export_warmup_state(),
     }
 
 
@@ -2175,6 +2179,7 @@ _EXPORT_MOVED = frozenset({
     "_EXPORT_CACHE", "_EXPORT_CACHE_MAX", "_EXPORT_FORMAT_VERSION",
     "_entries_digest", "_master_digest", "_cached_export",
     "_EXPORT_WARM_THREAD", "_warm_export_cache", "start_export_warmup",
+    "_EXPORT_WARM_STATE", "export_warmup_state",
 })
 
 
