@@ -76,7 +76,7 @@
 ## 8. 验收 / 测试（冻结态复现闭环用）
 
 - 后端单测：
-  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **846 passed**。
+  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **852 passed**。
   - ✅ **本沙箱"偶发 1 failed"已于 R-122 修掉**（2026-11-07）。
     症状是"全绿但 1 个 failed、每次命中的测试不同"，实测四次都撞上。
     根因（从 traceback 读出，不是推测）：

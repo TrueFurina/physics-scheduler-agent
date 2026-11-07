@@ -59,7 +59,33 @@ os.environ.setdefault(
 
 import pytest
 
-from app import master_store as _master_store
+# ---------------------------------------------------------------------------
+# 临时文件落在**专用的空目录**里，不写系统 TEMP（R-122 / R-127）
+# ---------------------------------------------------------------------------
+# 本机 TEMP 实测 48805 个顶层条目 / 115032 个文件（别的程序的残留，遍历一遍 70.5s）。
+# 而本机 agent 给 `os.remove` 挂了 audit 钩子，删除前做"保留扫描"（走 socket），
+# 规模一大就超时 → `PermissionError: CHAT_REFERENCE_PROTECTED`。
+#
+# 谁受害：openpyxl 每写一个 worksheet 都建临时 xml 再删它（`_writer.py:389`），
+# 于是任意"导出/工作簿/导入预览"测试都可能随机红，报的还是 PermissionError，
+# 完全看不出根因。
+#
+# ⚠️ R-122 时这个修复只加在 `scripts/run_acceptance.py` 里 —— 那是**验收脚本的入口**，
+# 但人们更常直接 `pytest backend/tests`。所以它在最常见的用法下**没生效**，
+# 本轮又红了一次（`test_full_table_exports_stay_open_by_default[master-data]`）。
+# conftest 是 pytest 的唯一入口，放这里才能覆盖所有跑法。
+#
+# 用**专用子目录**而非 `.tmp/` 本身：后者已积累 286 个条目 / 27MB 的历史残留，
+# 扫描规模仍然偏大。（那 286 个条目不归本任务清理，不动。）
+_TMP_FOR_TESTS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp", "pytest-tmp"
+)
+os.makedirs(_TMP_FOR_TESTS, exist_ok=True)
+tempfile.tempdir = _TMP_FOR_TESTS
+for _k in ("TMPDIR", "TEMP", "TMP"):
+    os.environ.setdefault(_k, _TMP_FOR_TESTS)
+
+from app import master_store as _master_store  # noqa: E402 —— 必须在上面的 os.environ 设好之后导入，否则读到旧配置
 
 
 # ⚠️ R-123：上面这些 `setdefault` **只在模块导入时生效一次**，不足以保证全程有效。
