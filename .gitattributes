@@ -1,0 +1,77 @@
+# 行尾统一（R-111）
+#
+# 为什么需要这份文件
+# ----------------
+# 本仓库在 Windows 上开发、在 Linux 上跑 CI，但此前**没有** .gitattributes，
+# 依赖各人 `core.autocrlf` 的本地设置（本机为 true）。实测后果（抽样 200 个文件）：
+#
+#     i/lf    w/lf     92   正常
+#     i/lf    w/crlf   75   工作区被本地转成 CRLF
+#     i/crlf  w/crlf    2   已入库 CRLF（历史污染）
+#
+# 即同一仓库里三种状态并存。两个具体危害：
+#
+#   1. **假脏**：`git status` 长期显示 3 个 .py 被修改，但
+#      `git hash-object` 与索引哈希逐字节相同、`git diff` 全空。
+#      这不是内容变化，是 `core.autocrlf=true` 下 stat 缓存与过滤器来回
+#      换算产生的陈旧标记。它训练人"忽略 git status"，真改动因此被漏看。
+#
+#   2. **CI 与本地不一致**：Linux 上 checkout 出 LF，Windows 上是 CRLF。
+#      ruff/flake8 对行尾敏感，本地过、CI 挂（或反之）时极难定位。
+#
+# 策略：仓库内**一律存 LF**，检出时由 Git 按平台决定是否转 CRLF。
+# 二进制文件显式标 binary，避免 Git 尝试做行尾换算损坏内容。
+
+# --- 默认：文本文件存 LF ---------------------------------------------------
+* text=auto eol=lf
+
+# --- 明确为文本的源码/配置：强制 LF ---------------------------------------
+*.py      text eol=lf
+*.pyi     text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+*.jsx     text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.json    text eol=lf
+*.json5   text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.sh      text eol=lf
+*.txt     text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+ruff.toml text eol=lf
+Dockerfile text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# --- 必须在 Windows 上保持 CRLF 的脚本 ------------------------------------
+# 批处理/PowerShell 对 LF 结尾的解析存在历史坑（尤其 goto/label 与行尾），
+# 这里显式保留 CRLF，不做 auto 换算。
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# --- 二进制：禁止行尾换算 ------------------------------------------------
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.webp    binary
+*.svg     text eol=lf
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.eot     binary
+*.xlsx    binary
+*.xls     binary
+*.pdf     binary
+*.zip     binary
+*.gz      binary

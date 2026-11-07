@@ -35,9 +35,19 @@ backend/app/data/
 schedule.xlsx
 (2024-2025-2)课表.pdf
 
-# WorkBuddy 本地记忆：个人工作日志，含真实联系人 PII / 会议转写，不入库
-# （应用注册信息 .workbuddy/applications.yaml 需保留，故只忽略 memory 子目录）
-.workbuddy/memory/
+# WorkBuddy 本地状态：整目录不入库（2026-11-07 修正，R-118）
+#
+# 两条理由，都是实测出来的：
+#   1. `memory/` 是个人工作日志，含真实联系人 PII / 会议转写；
+#   2. `applications.yaml` 是**发布平台的本地绑定**（locator=wbapp_xxx）。
+#      它看着像配置，实则记录"这台机器上这个工程绑到了哪个线上应用"。
+#      入库的后果有据可查：提交 cfd5d33「删除已废弃发布应用的绑定文件，切断死链」
+#      里写明"残留的 .genie 与 .workbuddy/applications.yaml 会让平台拒绝本工程重新发布"。
+#      也就是说，别人 clone 后会拿到一个指向**你的**应用的绑定，发布时报死链。
+#
+# 原先这里只忽略 memory/，注释还写着"applications.yaml 需保留"——那句与 cfd5d33
+# 的实证相反。现改为整目录忽略。
+.workbuddy/
 
 # Scratch
 server.log
@@ -51,3 +61,7 @@ server.err.log
 .ruff_cache/
 .pytest_cache/
 .wbapp_*.genie
+
+# Vite 配置转译残留（含本机绝对路径，机器特定，绝不入库）
+vite.config.ts.timestamp-*.mjs
+frontend/vite.config.ts.timestamp-*.mjs
