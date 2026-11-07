@@ -35,7 +35,10 @@ describe('App.tsx 体量守卫', () => {
     // 谁要往 App 里加超过 10 行，就得先停下来问"它是不是页面级的"。
     // 真要突破，改这个数字并在提交信息里写理由，让评审看见。
     const lines = appSource().split('\n').length;
-    expect(lines).toBeLessThanOrEqual(1470);
+    // R-117 的调整说明：修首屏加载态时 App.tsx 到 1477 行（1470 + 1 行 prop + 6 行注释）。
+    // 那不是"又长回去了"，而是修一个真实缺陷必须付的代价。放宽到 1480 后仍有 3 行余量，
+    // 阈值依然贴在"下一次想加就得先解释"的位置 —— 不是把红线挪去够不着的地方。
+    expect(lines).toBeLessThanOrEqual(1480);
   });
 
   it('useState 数量不得超过 70（当前 68，余量 2）', () => {

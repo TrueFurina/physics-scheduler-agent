@@ -76,6 +76,50 @@ describe('IdentityView', () => {
     expect(screen.getByText(/暂无教师数据/)).toBeTruthy();
   });
 
+  it('加载中不能显示"暂无教师数据"（R-117）', () => {
+    // `teachers.length === 0` 有三种原因，组件必须分开说：
+    //   ① 正在加载  ② 服务端真没数据  ③ 请求失败
+    // 原来只区分了 ② 和 ③，于是 ① 被说成「暂无教师数据，请先加载实验安排表」——
+    // 而那时系统**正在加载**，界面上也没有任何"加载安排表"的入口，
+    // 教秘会去找一个不存在的东西。冷启动时这个错话可挂十几秒（三次重试最坏 17s）。
+    render(
+      <IdentityView
+        teachers={[]}
+        loadError=""
+        loading={true}
+        onRetryLoad={() => {}}
+        autoScheduleLoading={false}
+        autoScheduleMsg=""
+        onOpenAdmin={() => {}}
+        onAutoSchedule={() => {}}
+        onSelectTeacher={() => {}}
+      />,
+    );
+    expect(screen.getByText(/正在读取实验安排表/)).toBeTruthy();
+    expect(screen.queryByText(/暂无教师数据/)).toBeNull();
+    expect(screen.queryByText(/请先加载实验安排表/)).toBeNull();
+  });
+
+  it('加载中即使有 loadError 也先说"正在加载"（重试中不打上一次的错误）', () => {
+    // 场景：第一次失败 → 用户点「🔄 重新加载」→ 正在重试。
+    // 此时 loadError 还是上一轮的值，但界面应当先表示"正在重试"，
+    // 而不是把旧错误再摊一次（旧错误会让人以为这次也立刻失败了）。
+    render(
+      <IdentityView
+        teachers={[]}
+        loadError="服务端出错（HTTP 500），请稍后重试或刷新页面。"
+        loading={true}
+        onRetryLoad={() => {}}
+        autoScheduleLoading={false}
+        autoScheduleMsg=""
+        onOpenAdmin={() => {}}
+        onAutoSchedule={() => {}}
+        onSelectTeacher={() => {}}
+      />,
+    );
+    expect(screen.getByText(/正在读取实验安排表/)).toBeTruthy();
+  });
+
   it('加载失败时空态要说"失败"并给重试，不能说"请先加载实验安排表"', () => {
     // 界面上根本没有任何加载安排表的入口，让用户去找它是把人送进死路。
     const onRetryLoad = vi.fn();

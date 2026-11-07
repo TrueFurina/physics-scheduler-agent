@@ -337,7 +337,12 @@ export interface LandPlanDiff {
   warnings: string[];
   has_changes: boolean;
   /** 仅采纳响应带 */
-  landed_at?: string;
+  landed_at?: string | null;
+  /**
+   * 仅采纳响应带：true 表示"方案已与当前安排一致，本次没有重复写入"。
+   * 此时 `landed_at` 为 null、撤销栈没有增长（R-116）。
+   */
+  idempotent?: boolean;
 }
 
 /** `/parallel/land/status`：当前落地状态（供界面显示撤销入口）。 */

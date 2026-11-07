@@ -620,6 +620,9 @@ function App() {
   // 否则"刷新能好、点重试不好"这类差异会在演示现场才被发现。
   const loadTeacherList = useCallback(async () => {
     setLoadError('');
+    // R-117：首屏也必须点亮 loading。原先只有用户操作会 setLoading(true)，
+    // 于是等待期间界面显示「暂无教师数据」而不是"加载中"（详见 IdentityView.loading 注释）。
+    setLoading(true);
     try {
       const t = await withRetry(async () => {
         const st = await rescheduleApi.getStatus();
@@ -636,6 +639,9 @@ function App() {
       const why = describeApiError(err);
       setLoadError(why);
       setMsg(`加载失败：${why}`);
+    } finally {
+      // 失败也要熄灯：否则重试按钮点了、请求回来了，转圈还在 —— 用户会以为卡死。
+      setLoading(false);
     }
   }, []);
 
@@ -1299,10 +1305,14 @@ function App() {
           )}
 
           {/* 页面1：身份选择（F1） */}
-          {view === 'identity' && (
+          {/* R-117：加载中不渲染 IdentityView —— 否则上面那个转圈和它内部的
+              「暂无教师数据，请先加载实验安排表」会同时出现在屏幕上，自相矛盾
+              （一边说"正在加载"，一边说"没有数据、请先去加载"）。 */}
+          {view === 'identity' && !(!dataLoaded && loading) && (
             <IdentityView
               teachers={teachers}
               loadError={loadError}
+              loading={!dataLoaded && loading}
               autoScheduleLoading={autoScheduleLoading}
               autoScheduleMsg={autoScheduleMsg}
               autoScheduleCount={autoScheduleRows.length}

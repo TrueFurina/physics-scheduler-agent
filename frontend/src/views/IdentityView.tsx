@@ -4,6 +4,16 @@ interface Props {
   teachers: Teacher[];
   /** 首屏加载失败的原因；非空表示"老师一个都没有"不是因为没数据，而是因为出错了 */
   loadError: string;
+  /**
+   * 首屏正在加载（R-117）。
+   *
+   * 为什么组件需要知道这件事：`teachers.length === 0` 有三种完全不同的原因 ——
+   * ① 正在加载（马上会有）② 服务端真没数据 ③ 请求失败。
+   * 组件原来只能区分 ② 和 ③，于是 ① 会说成「暂无教师数据，请先加载实验安排表」，
+   * 而那时系统**正在加载**，界面上也没有任何"加载安排表"的入口。
+   * 让组件自己知道 ①，就不必依赖调用方记得隐藏它。
+   */
+  loading?: boolean;
   autoScheduleLoading: boolean;
   autoScheduleMsg: string;
   /** 初稿条数（0 表示没有可导出的方案） */
@@ -22,7 +32,8 @@ interface Props {
  * 教师姓名是业务主体（教秘按姓名发起调课），不做脱敏。
  */
 export default function IdentityView({
-  teachers, loadError, autoScheduleLoading, autoScheduleMsg, autoScheduleCount = 0,
+  teachers, loadError, loading = false, autoScheduleLoading, autoScheduleMsg,
+  autoScheduleCount = 0,
   onOpenAdmin, onAutoSchedule, onExportAutoSchedule, onRetryLoad, onSelectTeacher,
 }: Props) {
   return (
@@ -94,7 +105,12 @@ export default function IdentityView({
         //  - 接口报错了（loadError）→ 说清是加载失败，并给一个当场能点的重试。
         //    原先两种都写"请先加载实验安排表"，而界面上没有任何加载入口，
         //    教秘照做会卡死在一个不存在的按钮上（实测：把 /teachers 拦成 500 时就是这样）。
-        loadError ? (
+        loading ? (
+          // ① 正在加载：只说"在加载"，别下任何"没有数据"的结论。
+          <div className="text-center py-16">
+            <div className="text-gray-400">⏳ 正在读取实验安排表，请稍候…</div>
+          </div>
+        ) : loadError ? (
           <div className="text-center py-16">
             <div className="text-gray-500">教师列表没能加载出来</div>
             <div className="text-sm text-gray-400 mt-2 max-w-xl mx-auto break-words">{loadError}</div>

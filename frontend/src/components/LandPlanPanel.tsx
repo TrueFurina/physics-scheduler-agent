@@ -109,8 +109,16 @@ export default function LandPlanPanel({ schedule, adminAuthed, onRequireLogin, o
       const r = await rescheduleApi.landCommit(schedule);
       setDiff(r.data);
       await loadStatus();
-      onMsg(`✅ 已落地为正式安排表：${r.data.plan_rows} 行写入，安排表 ${r.data.before_entries} → ${r.data.after_entries} 条。`
-        + '其他模块重新进入即可看到最新安排；如需回退用「↩️ 撤销落地」。');
+      // 后端幂等短路（R-116）：方案已与当前安排一致时不会再写、也不会压撤销栈。
+      // 这时必须**换一句文案** —— 否则会告诉教秘"N 行写入"，而实际一个字节没动，
+      // 他再去按「撤销」会发现"按了没反应"（因为栈里那条是上一次的）。
+      if (r.data.idempotent) {
+        onMsg('ℹ️ 方案与当前安排表已一致，本次未重复写入（撤销栈未变化）。'
+          + '如仍要回退到落地前的状态，用「↩️ 撤销落地」。');
+      } else {
+        onMsg(`✅ 已落地为正式安排表：${r.data.plan_rows} 行写入，安排表 ${r.data.before_entries} → ${r.data.after_entries} 条。`
+          + '其他模块重新进入即可看到最新安排；如需回退用「↩️ 撤销落地」。');
+      }
     } catch (err: any) {
       if (isAuthError(err)) {
         onRequireLogin();

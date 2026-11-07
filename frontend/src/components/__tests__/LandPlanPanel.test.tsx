@@ -146,6 +146,31 @@ describe('LandPlanPanel', () => {
     confirmSpy.mockRestore();
   });
 
+  it('幂等短路（idempotent=true）时不能说"已落地 N 行"，要说未重复写入', async () => {
+    // R-116：后端在"方案已与当前安排一致"时不再写、不再压撤销栈，返回 idempotent=true。
+    // 若前端仍复用原来的成功文案，教秘会被告知"N 行写入"，而实际一个字节没动；
+    // 他再去按「撤销」会发现"按了没反应"（栈里那条是上一次的）。
+    vi.mocked(rescheduleApi.landStatus).mockResolvedValue({ data: { landed: false } } as any);
+    vi.mocked(rescheduleApi.landPreview).mockResolvedValue({ data: DIFF } as any);
+    vi.mocked(rescheduleApi.landCommit).mockResolvedValue({
+      data: { ...DIFF, has_changes: false, landed_at: null, idempotent: true },
+    } as any);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { onMsg } = renderPanel(true);
+    fireEvent.click(screen.getByRole('button', { name: /落地为正式安排表/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /确认采纳/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /确认采纳/ }));
+    // 注：不断言调用次数 —— 该用例的 DIFF.has_changes=false 会让面板走"无需落地"
+    // 的分支，按钮的可用性判断与常态用例不同，次数不是本用例的判据。
+    // 本用例只锁一件事：**文案不能说"已落地 N 行"**。
+    await waitFor(() => expect(rescheduleApi.landCommit).toHaveBeenCalled());
+
+    const said = vi.mocked(onMsg).mock.calls.map((c) => String(c[0])).join(String.fromCharCode(10));
+    expect(said).toContain('未重复写入');
+    expect(said).not.toContain('已落地为正式安排表');
+    confirmSpy.mockRestore();
+  });
+
   it('有落地记录时显示撤销入口；撤销成功且 rolled_back_moves>0 时横幅带出条数', async () => {
     vi.mocked(rescheduleApi.landStatus).mockResolvedValue({
       data: { landed: true, landed_at: '2026-10-23T18:00:00', plan_rows: 2, note: '测试' },
