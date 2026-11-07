@@ -106,7 +106,7 @@ def test_empty_store_warning_says_empty_not_corrupt(env):
 
 def test_good_store_has_no_warning(env):
     """好落盘 → 无降级警告，且确实从落盘恢复。"""
-    _db, store = env
+    _db, _store = env
     md = MasterData()
     md.upsert_experiment("测试项目", course="测试课", classes=["某班"])
     ms.save({"schedule_fingerprint": "fp-test", "master": md.to_dict(), "tasks": []})
