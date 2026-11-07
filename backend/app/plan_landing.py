@@ -407,7 +407,13 @@ class LandingStore:
             finally:
                 conn.close()
         except sqlite3.Error:
-            return 0  # 库里还没有 applied_moves 表（全新临时库）
+            # R-120 注：原来的注释写"库里还没有 applied_moves 表（全新临时库）"，
+            # 那个场景其实**不存在** —— `_init_db()` 在 `reschedule.py` 模块导入时
+            # 就执行了建表。这里能落到的只有"库被锁/文件被外部破坏"，属于极罕见。
+            # 之所以仍然返回 0 而不抛：撤销流程不该因为"数不清回滚条数"而中断
+            # （表已经恢复好了，那才是主要目的）。后果是提示里少一句"一并回滚 N 条"，
+            # 属于可接受的降级 —— 与 R-120 修的"重放失败被吞"不同，那条会丢状态。
+            return 0
 
     def clear(self) -> int:
         """清空（换了安排表时调用：旧表上的方案对新表没有意义）。返回丢弃条数。"""
@@ -446,5 +452,17 @@ def undo(db, store: LandingStore) -> dict:
 
 
 def replay_landing(db, plan_rows: List[dict]) -> dict:
-    """重启重放：按单元差异重新应用（幂等，不写 store）。"""
+    """重启重放：按单元差异重新应用（幂等，不写 store）。
+
+    R-120：**非法输入必须炸，不能假装成功**。
+    原先直接转给 `apply_plan`，而它对非 list 的输入（比如 `{}`、`None`）
+    只是"遍历得到 0 行" —— 于是重放计数 +1、界面上显示"已重放落地方案 1 份"，
+    而实际一个字节都没恢复。`_load_default_schedule` 的 `except` 原本又能接住
+    真正的异常，两者一叠加，坏数据就彻底隐身了。
+    """
+    if not isinstance(plan_rows, list):
+        raise TypeError(
+            f"落地方案的 plan 必须是 list，实际是 {type(plan_rows).__name__}："
+            f"{str(plan_rows)[:80]}"
+        )
     return apply_plan(db, plan_rows)

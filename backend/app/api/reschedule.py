@@ -969,12 +969,20 @@ async def get_status():
             else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
         ),
         "ai": parser.describe() if parser is not None else {"configured": False},
+        # R-120：上次加载时重放失败了什么。为空表示全部恢复成功。
+        # 这是"重启后状态有没有丢"的唯一可查记录 —— 消息会被后续操作覆盖。
+        "replay_failed": list(_REPLAY_FAILED),
         # R-119：学期起始日的来源。界面靠它判断"那行小字日期可不可信"。
         # 解析失败时会回退到硬编码默认值（2025-02-24）—— 周次/星期/教室/教师
         # 全都正确，只有日期会错，而且原来没有任何提示。
         "semester": _agent.semester_start_state() if _db.loaded else None,
     }
 
+
+# R-120：上一次整表加载时**重放失败**的明细（进程内，重启清零）。
+# 为什么不能只在返回消息里报一次：`load-default` 的消息会被后续操作覆盖，
+# 而教秘未必当场读到。放进 `/status` 后，管理员随时可以回查"上次恢复有没有缺"。
+_REPLAY_FAILED: list = []
 
 _load_lock = threading.Lock()
 
@@ -1009,6 +1017,12 @@ def _load_default_schedule() -> tuple[str, int]:
     # 有落地记录时按**时间戳顺序**混排：后发生的事件赢 —— 调课不会被落地静默
     # 吞掉，落地也不会被后来的调课静默抹掉。无落地记录时逐字走旧路径。
     replay_applied, replay_skipped, replay_landed = 0, 0, 0
+    # R-120：失败必须计数。原来这里是 `except Exception: pass`（三条重放路径各一处、
+    # 外加最外层一处），于是**重启后没能恢复的调课/落地会被完全吞掉**，
+    # 而返回的消息仍然说"✅ 成功加载 433 条"—— 教秘看不出他上周采纳的方案没了。
+    # 这与 R-35（整行静默蒸发）、R-58（时段无法识别被丢）是同一族问题：
+    # 本项目已经反复吃过"静默丢弃"的亏，这里是最后一处。
+    replay_failed: list = []
     try:
         conn = _get_db()
         moves = conn.execute(
@@ -1022,8 +1036,8 @@ def _load_default_schedule() -> tuple[str, int]:
                     res = _apply_reschedule(rec, persist=False)
                     replay_applied += res["applied"]
                     replay_skipped += res["skipped"]
-                except Exception:
-                    pass
+                except Exception as e:
+                    replay_failed.append(("调课", r["id"], f"{type(e).__name__}: {e}"))
         else:
             events = [(r["applied_at"] or "0000-00-00", 0, r["id"], "move",
                        r["request_data"]) for r in moves]
@@ -1039,16 +1053,26 @@ def _load_default_schedule() -> tuple[str, int]:
                     else:
                         plan_landing.replay_landing(_db, payload)
                         replay_landed += 1
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    replay_failed.append(
+                        ("落地方案" if kind == "land" else "调课", _i,
+                         f"{type(e).__name__}: {e}"))
+    except Exception as e:
+        replay_failed.append(("读账本", 0, f"{type(e).__name__}: {e}"))
 
     msg = f"✅ 成功加载 {len(_db.entries)} 条排课记录"
     if replay_applied:
         msg += f"（已重放 {replay_applied} 条审批通过的调课）"
     if replay_landed:
         msg += f"（已重放落地方案 {replay_landed} 份）"
+    global _REPLAY_FAILED
+    _REPLAY_FAILED = [{"kind": k, "id": i, "why": w} for k, i, w in replay_failed]
+    if replay_failed:
+        # 必须给出条数与**第一例的具体原因**：只说"有 N 条失败"教秘无从下手，
+        # 而给出第一例通常就能判断是数据坏了还是代码坏了。
+        kinds = "、".join(f"{k} #{i}（{why}）" for k, i, why in replay_failed[:1])
+        msg += (f"（⚠️ {len(replay_failed)} 条未能重放：{kinds}"
+                + ("等" if len(replay_failed) > 1 else "") + "）")
     # 待排/丢弃都必须说出口：静默丢弃是本项目反复踩的坑（R-35、以及缺周次的整行蒸发）
     rep = _db.load_report
     if rep.get("pending"):
