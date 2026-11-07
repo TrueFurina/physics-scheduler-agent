@@ -118,7 +118,7 @@
     **CI 完全不受影响**（GitHub runner 上没有这个 audit 钩子）。
     注意：换 temproot 时该目录**必须预先存在**（pytest 不建父目录），
     否则会得到 `832 errors`（我第一次手拼路径就这么踩了）。
-- 前端：`cd frontend && npm run verify`（tsc -b + vitest）→ **129 passed**
+- 前端：`cd frontend && npm run verify`（tsc -b + vitest）→ **133 passed**
   （`vite.config.ts` 已关文件级并行 `fileParallelism:false`，消除沙箱 brokered-fs 并发写 TEMP 的 EPERM flake）。
 - 活体完整验收（含独立审计 + UI 探针；**勿常态 `--skip-audit` / `--skip-ui`**）：
   `python scripts/run_acceptance.py --skip-tests`（先起 `DEMO_MODE=1` 服务并跑 `prepare_demo.py`）→ **15/15 PASS**。

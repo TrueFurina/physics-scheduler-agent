@@ -27,6 +27,8 @@ declare module '*?raw' {
 declare module 'node:fs' {
   const fs: {
     readFileSync(path: string, encoding: 'utf-8' | 'utf8'): string;
+    // 依赖一致性守卫（R-125）需要：它只读两个 JSON，但要先判断文件在不在
+    existsSync(path: string): boolean;
   };
   export default fs;
 }
@@ -35,6 +37,8 @@ declare module 'node:path' {
   const path: {
     resolve(...parts: string[]): string;
     dirname(p: string): string;
+    // 同上：拼 package.json / package-lock.json 的路径
+    join(...parts: string[]): string;
   };
   export default path;
 }
