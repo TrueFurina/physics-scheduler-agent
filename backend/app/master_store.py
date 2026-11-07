@@ -19,7 +19,7 @@
 import json
 import os
 import tempfile
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 from app.paths import DATA_DIR
 
@@ -80,6 +80,9 @@ def load(store_path: Optional[str] = None) -> Optional[dict]:
             # 旧版本落盘：整体恢复会遮蔽新反推基线（基线逻辑已变），作废处理
             print(f"⚠️ 主数据落盘为旧版本格式（v{d.get('schema_version')} ≠ v{SCHEMA_VERSION}），"
                   f"作废并回退新反推基线")
+            # R93：旧版本 ≠ "没有落盘"。标记出来，让恢复路径如实告知用户
+            # "你存过、但升级后那份作废了"，而不是静默按空表重建让其编辑消失。
+            _mark_version_mismatch(store_path, d.get("schema_version"))
             return None
         return d
     except (OSError, ValueError) as e:
@@ -121,6 +124,39 @@ def consume_corrupt_flag() -> bool:
     hit = _LAST_CORRUPT is not None
     _LAST_CORRUPT = None
     return hit
+
+
+# 最近一次 `load()` 是否因为**版本过旧**而作废（区别于"文件不存在"与"损坏"）。
+#
+# 旧版本落盘不能直接恢复（基线逻辑已变，恢复会遮蔽新反推基线），只能作废后
+# 按安排表反推基线。这和"文件不存在"不同：后者是用户从没存过，前者是用户
+# 存过、但升级后那份作废了 —— 必须如实告知，否则用户看不到自己的编辑为何消失。
+# 与 `_LAST_CORRUPT` 同范式：标记而非改返回值类型，不动 `if store:` 契约。
+_LAST_VERSION_MISMATCH: Optional[Tuple[str, Any]] = None
+
+
+def _mark_version_mismatch(store_path: str, old_version: Any) -> None:
+    global _LAST_VERSION_MISMATCH
+    _LAST_VERSION_MISMATCH = (os.path.abspath(store_path), old_version)
+
+
+def last_load_was_version_mismatch(store_path: Optional[str] = None) -> bool:
+    """上一次 `load()` 是否命中了版本过旧的落盘（随后应如实告知用户）。"""
+    if _LAST_VERSION_MISMATCH is None:
+        return False
+    if store_path is None:
+        return True
+    return os.path.abspath(store_path) == _LAST_VERSION_MISMATCH[0]
+
+
+def consume_version_mismatch_flag() -> Optional[Any]:
+    """读一次并复位，返回作废的旧版本号（未命中返回 None）。"""
+    global _LAST_VERSION_MISMATCH
+    if _LAST_VERSION_MISMATCH is None:
+        return None
+    _, ver = _LAST_VERSION_MISMATCH
+    _LAST_VERSION_MISMATCH = None
+    return ver
 
 
 def clear(store_path: Optional[str] = None) -> None:

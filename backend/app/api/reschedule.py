@@ -808,6 +808,13 @@ def _ensure_master_data_locked() -> None:
     if store is None and master_store.consume_corrupt_flag():
         master_store.clear()
         _note_master_restore_loss("落盘文件损坏，已丢弃")
+    elif store is None:
+        _vm = master_store.consume_version_mismatch_flag()
+        if _vm is not None:
+            # 旧版本落盘作废：用户存过、但升级后那份不可用，被静默丢弃。
+            # R93 前这里和"文件不存在"混同，用户看不到自己的编辑为何消失。
+            _note_master_restore_loss(
+                f"落盘为旧版本格式（v{_vm} ≠ v{master_store.SCHEMA_VERSION}），已作废")
     if store and _schedule_fp and store.get("schedule_fingerprint") == _schedule_fp:
         try:
             _master_data.from_dict(store.get("master") or {})

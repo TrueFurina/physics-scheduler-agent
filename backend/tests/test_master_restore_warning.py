@@ -117,3 +117,52 @@ def test_good_store_has_no_warning(env):
     assert api._master_restore_warning == "", \
         f"好落盘不该有降级警告：{api._master_restore_warning}"
     assert "测试项目" in api._master_data.experiments, "没从落盘恢复"
+
+
+# ------------------------------------------- 版本过旧落盘：静默作废 → 如实告知
+
+def test_version_mismatch_store_surfaces_warning(env):
+    """旧版本落盘（schema_version 不符）→ 警告说'旧版本/作废'，绝不说成'空'或'损坏'。"""
+    _db, store = env
+    store.write_text(json.dumps({
+        "schema_version": ms.SCHEMA_VERSION - 1,  # 故意旧版本
+        "schedule_fingerprint": "fp-test",
+        "master": {"experiments": {"X": {"course": "课X"}}, "classes": {}},
+        "tasks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    api._master_data.__init__()
+    api._ensure_master_data()
+
+    warn = api._master_restore_warning
+    assert "旧版本" in warn and "作废" in warn, f"旧版本落盘应报'旧版本/作废'，却报：{warn}"
+    assert "空主数据" not in warn, f"旧版本被误报成'空'：{warn}"
+    assert "损坏" not in warn, f"旧版本被误报成'损坏'：{warn}"
+    # 行为不变：仍回退到安排表反推，主数据可用（不是空表）
+    assert api._master_data.initialized is True
+    assert len(api._master_data.experiments) > 0
+
+
+def test_missing_store_is_not_version_mismatch(env):
+    """文件根本不存在 → 不算版本不匹配（两者处置不同，必须分得开）。"""
+    _db, store = env  # store 未写入，等价于不存在
+    assert ms.last_load_was_version_mismatch(str(store)) is False
+    api._master_data.__init__()
+    api._ensure_master_data()
+    assert api._master_restore_warning == "", \
+        f"无落盘不该有降级警告：{api._master_restore_warning}"
+
+
+def test_version_mismatch_flag_reset_after_consume(env):
+    """标记被 consume 后复位，不会泄漏到后续一次正常恢复。"""
+    _db, store = env
+    store.write_text(json.dumps({
+        "schema_version": ms.SCHEMA_VERSION - 1,
+        "schedule_fingerprint": "fp-test",
+        "master": {"experiments": {"X": {"course": "课X"}}, "classes": {}},
+        "tasks": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    api._master_data.__init__()
+    api._ensure_master_data()
+    assert ms.last_load_was_version_mismatch(str(store)) is False, "consume 后标记应复位"
+

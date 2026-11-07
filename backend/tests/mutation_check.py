@@ -157,6 +157,8 @@ FILES = {
     "M114": ["tests/test_export_warmup_state.py"],
     "M115": ["tests/test_master_restore_warning.py"],
     "M116": ["tests/test_master_restore_warning.py"],
+    "M117": ["tests/test_master_restore_warning.py"],
+    "M118": ["tests/test_master_restore_warning.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1163,6 +1165,21 @@ MUTANTS = [
         '                _note_master_restore_loss("落盘文件结构损坏，已丢弃")',
         '                _note_master_restore_loss("落盘里是空的主数据，已丢弃")  # MUTANT: 谎称空',
         "corrupt_store_warning_says_corrupt",
+    ),
+    # R93：旧版本落盘作废 —— 原实现只 print，与"文件不存在"混同，用户看不到编辑为何消失。
+    (
+        "M117", "旧版本落盘不标记版本不匹配",
+        "app/master_store.py",
+        '            _mark_version_mismatch(store_path, d.get("schema_version"))',
+        '            pass  # MUTANT: 不标记版本不匹配',
+        "test_version_mismatch_store_surfaces_warning",
+    ),
+    (
+        "M118", "旧版本作废却谎称损坏",
+        "app/api/reschedule.py",
+        '                f"落盘为旧版本格式（v{_vm} ≠ v{master_store.SCHEMA_VERSION}），已作废")',
+        '                "落盘文件损坏，已丢弃")  # MUTANT: 谎称损坏',
+        "test_version_mismatch_store_surfaces_warning",
     ),
 ]
 
