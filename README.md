@@ -23,6 +23,22 @@ the data audit and standard-timetable export):
 
 **Design principle**: rule engine guarantees correctness (conflict filtering), LLM enhances experience (intent parsing, candidate plans, consultation).
 
+## Screenshots
+
+The following screenshots use **sanitized data** (teachers appear as "Teacher A/B/C…"; no names, no contact details, no student-level data) and are safe to display publicly.
+
+**Weekly timetable grid** — any week as a "weekday × slot" panorama, with ⚠ marks on clashing cells:
+
+![Weekly timetable grid](docs/screenshots/09-grid.png)
+
+**Data dashboard** — one-click audit that scans the three core conflict types (room / teacher / whole-group), and lists data-quality gaps (unrecognized slots, missing rooms) separately:
+
+![Data dashboard](docs/screenshots/08-dashboard.png)
+
+**Parallel batch scheduling** — one CP-SAT solve for a course's "all experiments × student groups", listed per class with project and grouping:
+
+![Parallel batch scheduling](docs/screenshots/07-school-plan.png)
+
 ## Why this project?
 
 - Paper research shows lab courses are rarely handled by university academic systems — scheduling relies on manual coordination.
