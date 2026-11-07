@@ -168,6 +168,18 @@ def main():
     step("audit_async_blocking（事件循环阻塞审计）",
          [PY, "scripts/audit_async_blocking.py", "backend/app/api"])
 
+    # 2b) 首屏加载态探针（R-117）—— **必须在任何会加载数据的步骤之前**。
+    #
+    # 它观察的是"数据还没进内存"那段窗口（内部用 CDP 把 /status 延迟 3s 制造）。
+    # 放在 UI 探针组里是错的：上面四个 `verify_*` 都会 `reset=True` → load-default，
+    # 等轮到它时 loaded 已是 true，探针会 SKIP 并 exit 3（判红）。
+    # 也不能放进 `if not args.skip_tests` 里 —— 它与单测无关，`--skip-tests`
+    # 时同样应当跑（那时更该跑：说明服务刚起、窗口正合适）。
+    if not args.skip_ui:
+        step("probe_first_paint（首屏加载态 4 项）",
+             ["node", "../scripts/probe_first_paint_loading.cjs"],
+             cwd=FRONTEND, timeout=300, env=probe_env)
+
     step("verify_intro_filter（绪论/考试不进求解器）",
          [PY, "scripts/verify_intro_filter.py"], reset=True)
     step("verify_master_roundtrip（台账可导回 + 清理）",
@@ -179,13 +191,6 @@ def main():
 
     # 3) UI 探针
     if not args.skip_ui:
-        # 首屏加载态探针**必须第一个跑、且不能 reset**（R-117）：
-        # 它要观察的是"数据还没加载"的那段窗口（用 CDP 延迟 /status 来制造），
-        # 而 `reset=True` 会先 load-default 把数据装进来，窗口就没了。
-        # 放在最前面可以确保此时服务刚起、内存里还没有表。
-        step("probe_first_paint（首屏加载态 4 项）",
-             ["node", "../scripts/probe_first_paint_loading.cjs"],
-             cwd=FRONTEND, timeout=300, env=probe_env)
         for name, script in [
             ("probe_ui_flow（主流程 16 项）", "probe_ui_flow.cjs"),
             ("probe_reschedule_flow（调课 11 项）", "probe_reschedule_flow.cjs"),

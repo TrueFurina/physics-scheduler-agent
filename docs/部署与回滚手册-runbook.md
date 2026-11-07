@@ -76,8 +76,17 @@
 ## 8. 验收 / 测试（冻结态复现闭环用）
 
 - 后端单测：
-  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **678 passed**。
-- 前端：`cd frontend && npm run verify`（tsc -b + vitest）→ **126 passed**
+  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **832 passed**。
+  - ⚠️ **在本沙箱里跑全量，必须同时换一个全新 `PYTEST_DEBUG_TEMPROOT`**，否则会偶发
+    "全绿但 1 个 failed"的假失败（2026-11-07 实测三次全量：`832 passed` / `1 failed
+    (test_api_auth)` / `1 failed (test_master_workbook)` —— 两次命中的是**不同**测试，
+    根因同一个）。原因是 pytest 会话结束会批量清理旧运行根目录，撞上沙箱的删除守卫，
+    报 `PermissionError: CHAT_REFERENCE_PROTECTED`。
+    正确做法（`scripts/_pytest_temproot.py` 就是为此写的）：
+    `PYTEST_DEBUG_TEMPROOT=$(mktemp -d) python -m pytest backend/tests -q`。
+    子进程调用请直接用 `_pytest_temproot.fresh_env()`；in-process 用 `install_inprocess()`。
+    **CI 不受影响**（GitHub runner 没有这个守卫）。
+- 前端：`cd frontend && npm run verify`（tsc -b + vitest）→ **129 passed**
   （`vite.config.ts` 已关文件级并行 `fileParallelism:false`，消除沙箱 brokered-fs 并发写 TEMP 的 EPERM flake）。
 - 活体完整验收（含独立审计 + UI 探针；**勿常态 `--skip-audit` / `--skip-ui`**）：
   `python scripts/run_acceptance.py --skip-tests`（先起 `DEMO_MODE=1` 服务并跑 `prepare_demo.py`）→ **15/15 PASS**。
