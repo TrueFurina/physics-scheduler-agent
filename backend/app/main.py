@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import reschedule
 from app.engine import warmup
+from app.ratelimit import heavy_stats
 
 _STARTED_AT = time.time()
 
@@ -167,6 +168,10 @@ def health_check():
         "solver": warmup.state(),
         # 进程内累计（重启清零）：total / errors(>=400) / slow(>=SLOW_REQUEST_MS) / throttled(429)
         "http": metrics(),
+        # R-114：求解并发占用。active 贴到 limit 说明机器正被 CPU 占满 ——
+        # 这时"排课很慢/偶尔 429"不是 bug，是容量到顶了。运维应当能一眼看出来，
+        # 而不是去翻日志猜。limit 由 CPU//4 推出（求解是纯 CPU 活）。
+        "heavy": heavy_stats(),
     }
 
 

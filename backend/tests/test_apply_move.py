@@ -189,3 +189,202 @@ def test_apply_move_endpoint_moves_data_with_token(db):
     assert body["data"]["applied"] == 1, body
     assert "已移动 1 条" in body["message"], body["message"]
     assert _weeks(db) == [3, 4, 7]
+
+
+# ---------- 3b. 幂等的**并发**路径（R-115） ----------
+#
+# 为什么单独补这一组（2026-11-07）：
+# `_init_db` 里已经记着一段实测 —— 查重与写入分在两个连接、两次 `execute` 之间
+# 没有互斥，8 线程加 barrier 同时进，同一 idem_key **落库 8 行（期望 1）**；
+# 放宽到 20 轮 × 6 线程仍有 1/20 轮重复。当时的修法是给 idem_key 加**部分唯一索引**
+# （`WHERE idem_key != ''`），并把 IntegrityError 翻译成"已由并发请求应用过"。
+#
+# 但上面那三条幂等用例全是**串行**的：第一次成功、第二次被"先查"拦住。
+# 也就是说，"先查"这条快速路径被锁住了，而**真正兜底的那道唯一索引没有任何测试**。
+# 危险在于：下次有人调整 `_apply_reschedule` 里的锁边界、或把唯一索引改成普通索引
+# （看起来更"兼容"），串行用例照样全绿，而并发重复会静默回来 ——
+# 污染账本（审计轨迹、撤销依据、`/demo/reset` 计数），且只在真实并发下出现。
+#
+# 这组用例按创建索引前的那次实测**原样复现**：8 线程、barrier 对齐、同一 idem_key。
+
+def test_concurrent_same_key_writes_one_row(db):
+    """8 线程同时应用同一个 idem_key：账本必须只有 **1 行**。
+
+    判据是**账本行数**，不是返回值。返回值可以撒谎（例如都返回成功），
+    而账本是撤销与审计的唯一依据 —— 多一行就多一次"撤销"。
+
+    与其他两条的分工（三条不是重复覆盖）：
+      · 本条 —— 按**端点真实调用方式**（含 `_DB_WRITE_LOCK`）跑，验"整条链路"；
+      · `test_unique_index_alone_blocks_duplicate_rows` —— **故意绕过锁**，
+        单独验数据库那道兜底（把 UNIQUE 改成普通索引会让它红，而本条仍绿）；
+      · `test_empty_key_is_not_deduplicated` —— 验部分索引的 `WHERE idem_key != ''`
+        条件（写成全覆盖唯一会让"不带键的新调课"被误判为重复）。
+    三条各守一层，缺哪条都会留下一个"改坏了也不红"的角落。
+    """
+    import threading
+
+    rec = _record(7)
+    n = 8
+    barrier = threading.Barrier(n)
+    results = []
+    errors = []
+
+    def work():
+        try:
+            barrier.wait(timeout=10)      # 尽量让 8 个线程同时进入临界区
+            # ⚠️ 必须按**真实调用方式**加锁：`/apply-move` 端点是在
+            # `with _DB_WRITE_LOCK` 里调它的（见 `_locked_apply`），
+            # 审批路径同理（`_locked_apply_approve`）。直接裸调函数测出来的"竞态"
+            # 在线上不可达 —— 第一版本测试就是这么写的，8 线程全裸调，
+            # 结果看到"误报冲突"，那是测试绕开了锁，不是产品缺陷。
+            with R._DB_WRITE_LOCK:
+                results.append(R._apply_reschedule(rec, persist=True, idem_key="cloud-concurrent"))
+        except Exception as exc:
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=work) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"并发调用抛了异常（不应把并发当故障报给上层）：{errors}"
+
+    conn = R._get_db()
+    try:
+        rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM applied_moves WHERE idem_key = ?",
+            ("cloud-concurrent",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert rows["c"] == 1, (
+        f"同一 idem_key 落库 {rows['c']} 行（期望 1）—— 唯一索引没生效或已被削弱"
+    )
+
+    # 返回语义：恰好一个说"应用了"，其余说"已应用过"，且**没有一个**报错
+    applied = sum(1 for r in results if r.get("applied"))
+    assert applied <= 1, f"有 {applied} 个请求都声称应用成功：{results}"
+    for r in results:
+        if not r.get("applied"):
+            assert any("应用过" in d for d in r.get("details") or []), (
+                f"未应用的那次没说清原因，教秘会以为审批坏了：{r}"
+            )
+
+
+def test_concurrent_same_key_leaves_schedule_idempotent(db):
+    """并发下**课表状态**也必须等价于"应用一次"。
+
+    `_apply_reschedule` 的注释断言过："内存里这次移动已经做了（幂等地把该记录的
+    week 设成目标周，与赢家相同）"。这条就是在验证那句注释 ——
+    若它不成立（比如某次把 week 累加而非赋值），并发下会把课挪到错误的周。
+    """
+    import threading
+
+    rec = _record(7)
+    n = 6
+    barrier = threading.Barrier(n)
+
+    def work():
+        barrier.wait(timeout=10)
+        with R._DB_WRITE_LOCK:      # 与端点一致，见上一条用例的说明
+            R._apply_reschedule(rec, persist=True, idem_key="cloud-concurrent-week")
+
+    threads = [threading.Thread(target=work) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    # 原表 3/4/5 周，把第 5 周那条（源周自动取"目标周之前最近的匹配周"=5）移到第 7 周。
+    # 无论并发多少次，结果都必须是 3/4/7 —— 不是 3/4/8、不是 3/4/9（累加），
+    # 也不是两条都留下来。
+    assert _weeks(db) == [3, 4, 7], (
+        f"并发后课表状态不对：{_weeks(db)}（期望 [3,4,7]，多次应用必须等价于一次）"
+    )
+
+
+def test_empty_key_is_not_deduplicated(db):
+    """空 idem_key 不参与去重（历史行与"本来就没给键"的调用都存 ''）。
+
+    这条守的是部分唯一索引的 `WHERE idem_key != ''` 条件：
+    若有人把它写成全覆盖唯一索引，第二次"不带键"的调用会撞约束、返回
+    "已应用过"，而实际上它是一次**全新的**调课 —— 教秘会看到"没生效"。
+    """
+    R._apply_reschedule(_record(7), persist=True, idem_key="")
+    # 换一条记录再应用一次，仍不带键：必须真的生效
+    R._apply_reschedule(_record(8), persist=True, idem_key="")
+
+    conn = R._get_db()
+    try:
+        rows = conn.execute("SELECT COUNT(*) AS c FROM applied_moves").fetchone()
+    finally:
+        conn.close()
+    assert rows["c"] == 2, f"空键被错误去重，应有 2 行：{rows['c']}"
+    assert _weeks(db) == [3, 4, 8], _weeks(db)
+
+
+def test_unique_index_alone_blocks_duplicate_rows(db):
+    """← 直接验**唯一索引本身**，不经业务锁。
+
+    为什么要绕过业务锁单独测（这不是重复覆盖）：
+    上面两条并发用例在 `with _DB_WRITE_LOCK` 里跑 —— 那测的是"锁生效"。
+    而 `_init_db` 里的注释记着另一件事：**当时根本没有这把锁**，
+    8 线程同时 `INSERT` 让同一 idem_key 落库 **8 行**，靠的正是后来加的
+    **部分唯一索引**（`WHERE idem_key != ''`）才收敛到 1 行。
+
+    如果哪天有人把索引从 UNIQUE 改成普通索引（"兼容性更好"），
+    上面两条用例仍会全绿（锁还在，串行化了），而这道兜底已经消失 ——
+    一旦有人绕过锁（或在锁外直接写库、或未来加了第二个写入口），
+    账本就会重新出现重复行，而没有任何测试会红。
+
+    所以这里**故意不用业务锁**，8 个线程直接 INSERT 同一个键，
+    断言数据库自己把重复挡下来。
+    """
+    import sqlite3
+    import threading
+
+    n = 8
+    barrier = threading.Barrier(n)
+    ok = []
+    violated = []
+
+    def insert():
+        conn = sqlite3.connect(R._DB_PATH, timeout=10)
+        try:
+            barrier.wait(timeout=10)
+            conn.execute(
+                "INSERT INTO applied_moves (request_data, applied_at, idem_key) "
+                "VALUES (?, ?, ?)",
+                ('{"probe": 1}', "2026-11-07T00:00:00.000000", "probe-dup"),
+            )
+            conn.commit()
+            ok.append(1)
+        except sqlite3.IntegrityError:
+            violated.append(1)
+            conn.rollback()
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=insert) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    conn = R._get_db()
+    try:
+        c = conn.execute(
+            "SELECT COUNT(*) AS c FROM applied_moves WHERE idem_key = 'probe-dup'"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+
+    assert c == 1, (
+        f"唯一索引没挡住重复：落库 {c} 行（期望 1）。"
+        f"成功的 {len(ok)} 次 / 被唯一约束挡下 {len(violated)} 次"
+    )
+    assert len(violated) == n - 1, (
+        f"应有 {n-1} 次被 IntegrityError 挡下，实际 {len(violated)} 次 —— "
+        "说明索引可能不是 UNIQUE，或者被改成了普通索引"
+    )

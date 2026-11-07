@@ -35,7 +35,28 @@ def _request(headers) -> Request:
     return Request({"type": "http", "headers": raw})
 
 
-NOW = int(time.time())
+def _now() -> int:
+    """取当前时间，**不要**把它提到模块级缓存成常量。
+
+    R-111：这行原本写的是模块级 `NOW = int(time.time())`，被 `_token(exp=NOW+600)`
+    当作签发时刻复用。`NOW` 在 pytest **收集**阶段求值一次，而全量回归实测要跑
+    822 秒（13m42s），`test_security_token_contract.py` 排在第 666 个执行 ——
+    轮到它时 `NOW+600` 已经真的过期，`_verify_identity` 按契约返回 None，
+    `test_legacy_token_without_role_defaults_to_admin` 与
+    `test_token_with_valid_signature_but_unknown_role_passes_verification`
+    就双双失败。
+
+    表现是「单跑 23 passed，全量 2 failed」，且**机器越慢越容易红**——最坏的那种
+    不稳定：它不会在开发机上暴露，只会在 CI 跑满 10 分钟以上时出现。
+
+    修法不是把有效期从 600 秒调大（那只是把炸弹引线接更长），而是让有效期
+    在**断言发生的时刻**才计算。
+    """
+    return int(time.time())
+
+
+# 坏令牌用例表在**导入时**构造，这里的 exp 只需落在过去即可，与时刻无关。
+NOW = _now()
 
 # (用例名, 令牌)
 BAD_TOKENS = [
@@ -82,7 +103,7 @@ def test_legacy_token_without_role_defaults_to_admin():
     不做这个默认，加角色的那一刻所有在线会话都会掉进 403 —— 这是刻意的向后兼容，
     不是漏洞：签名仍然要过。
     """
-    tok = _token({"u": "admin", "exp": NOW + 600})
+    tok = _token({"u": "admin", "exp": _now() + 600})
     assert S._verify_identity(tok) == {"u": "admin", "r": S.ROLE_ADMIN}
 
 
@@ -97,7 +118,7 @@ def test_token_with_valid_signature_but_unknown_role_passes_verification():
     这一条是防止"把角色检查偷偷塞进验签"——那样 401 与 403 就分不开了，
     而两者的处置完全不同（重登 vs 找管理员开权限）。
     """
-    tok = _token({"u": "admin", "exp": NOW + 600, "r": "some-new-role"})
+    tok = _token({"u": "admin", "exp": _now() + 600, "r": "some-new-role"})
     assert S._verify_identity(tok) == {"u": "admin", "r": "some-new-role"}
 
 

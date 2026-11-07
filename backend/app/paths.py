@@ -18,6 +18,32 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _usable(path: str) -> bool:
+    r"""这个路径能不能当数据目录用。
+
+    R-113：原实现只有"父目录或自身存在"一条判据：
+        parent = os.path.dirname(path.rstrip("/\\")) or os.sep
+        return os.path.isdir(parent) or os.path.isdir(path)
+
+    它在 Linux 上没问题，在 **Windows 上会把 POSIX 绝对路径误判为可用**，后果是
+    数据被写到一个谁也不知道的目录：
+
+        PSA_DATA_DIR=/home/user/psa-data        # .env 里的沙箱配置，随包分发
+        os.path.isdir("/home")        -> True   # Windows 把它当"当前盘符下的 \home"
+        os.path.isabs("/home/user")   -> False  # 因为根是 E:\
+        os.path.abspath(...)          -> E:\home\user\psa-data
+
+    实测（2026-11-07）：本地跑测试时，它在盘根建出了 `E:\home\user\psa-data`。
+    `.env` 第 29 行的注释写着"本机 Windows 不存在 /home/user，会自动回落到
+    backend/app/data"——**设计意图正确，实现没做到**。而这条路径一旦生效，
+    线上/本地数据就落到盘根，重发或换机启动都会"数据消失"，且当天看不出来。
+
+    修法：额外要求"该值本身是当前平台认可的绝对路径"。
+    这样 `/home/user` 在 Windows 上被判不可用 ⇒ 按设计回退到包内 data；
+    在 Linux 上仍照常可用，沙箱行为不变。
+    """
+    # 平台一致性前置：Windows 不认 POSIX 绝对路径（`/foo` 不是绝对路径）
+    if not os.path.isabs(path):
+        return False
     parent = os.path.dirname(path.rstrip("/\\")) or os.sep
     return os.path.isdir(parent) or os.path.isdir(path)
 

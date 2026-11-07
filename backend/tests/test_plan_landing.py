@@ -672,3 +672,64 @@ def test_concurrent_reader_sees_bounded_inconsistency():
         f"并发读者看到 {len(bad)} 次不一致（样本 {bad[:3]}）——"
         "实测修复后应为 7–8 次/30 轮；数量级上升说明退回了「先换表再建索引」"
     )
+
+
+# ---------------------------------------------------------------- 6b. 采纳的幂等（R-116）
+
+def test_repeated_landing_does_not_grow_undo_stack(env):
+    """← 同一份方案连采两次，撤销栈必须**保持 1 层**。
+
+    为什么（2026-11-07 实测）：`apply_plan` 本身幂等（先按单元剔除旧行再插新行），
+    所以连点两次课表结果是对的。但 `landed_plans` 是**撤销栈**，每次 `save` 压一条。
+    实测连采两次 → 栈深 **2**：
+      · 教秘按第一次「撤销」→ 恢复到"第 2 次落地前"的快照，而那时课表已经是新状态
+        ⇒ 界面上**什么都没变**，人会以为撤销坏了，然后反复按；
+      · 要按两次才真正回到原状。
+
+    双击 / 网络重试都会走到这里，所以这不是理论场景。
+    """
+    db, client, _ = env
+    store = api._landings()          # 落地存储（env fixture 已把它指到临时库）
+    plan = {"schedule": _plan_a()}
+
+    first = client.post("/api/reschedule/parallel/land", json=plan, headers=_admin())
+    assert first.status_code == 200, first.text
+    assert first.json()["has_changes"] is True
+    depth_after_first = len(store.all())
+    assert depth_after_first == 1, f"第一次落地后栈深应为 1，实际 {depth_after_first}"
+
+    second = client.post("/api/reschedule/parallel/land", json=plan, headers=_admin())
+    assert second.status_code == 200, second.text
+    body = second.json()
+
+    assert len(store.all()) == depth_after_first, (
+        f"重复落地又压了一条撤销栈（{depth_after_first} → {len(store.all())}）——"
+        "教秘要按两次撤销才能回原状"
+    )
+    assert body.get("idempotent") is True, f"应明确标记这是幂等短路：{body}"
+    assert body["has_changes"] is False
+    assert body["after_entries"] == len(db.entries)
+
+
+def test_repeated_landing_keeps_schedule_correct(env):
+    """幂等短路不能改变课表结果 —— 这是"跳过保存"而不是"跳过应用"。"""
+    db, client, _ = env
+    plan = {"schedule": _plan_a()}
+    client.post("/api/reschedule/parallel/land", json=plan, headers=_admin())
+    snapshot_after_first = sorted(
+        (e.week, e.weekday, e.time_slot, e.class_name, e.group, e.experiment, e.room, e.teacher)
+        for e in db.entries
+    )
+
+    client.post("/api/reschedule/parallel/land", json=plan, headers=_admin())
+    snapshot_after_second = sorted(
+        (e.week, e.weekday, e.time_slot, e.class_name, e.group, e.experiment, e.room, e.teacher)
+        for e in db.entries
+    )
+    assert snapshot_after_second == snapshot_after_first, "重复落地改变了课表"
+    # 撤销仍然可用，且一次就能回到原状
+    r = client.post("/api/reschedule/parallel/land/undo", headers=_admin())
+    assert r.status_code == 200 and r.json()["success"] is True, r.text
+    assert not any(e.experiment == "项目A" and e.week == 5 for e in db.entries), (
+        "一次撤销没能回到落地前状态"
+    )

@@ -34,7 +34,7 @@ from app.security import (
     require_scheduler,
     scheduler_enabled,
 )
-from app.ratelimit import rate_limit
+from app.ratelimit import heavy_slot, rate_limit
 from app import plan_landing
 
 router = APIRouter()
@@ -1564,14 +1564,17 @@ async def parallel_solve(req: ParallelSolveRequest):
     # 周次上限：请求显式传了 weeks（窗口宽度）则走原有窗口逻辑；否则用主数据该班结束周当上限
     week_max_override = None if req.weeks is not None else md_week_max
 
-    result = await run_in_threadpool(
-        ps.solve, req.class_name,
-        weekday=(req.weekday or cls_info.get("weekday") or None),
-        start_week=start_week,
-        weeks=(req.weeks if req.weeks is not None else 10),
-        time_slots=md_time_slots,
-        week_max_override=week_max_override,
-    )
+    # R-114：并发闸。单班求解也是纯 CPU 活，与全校一键共用同一个池 ——
+    # 否则"打 600 个单班"可以绕过全校那条闸把 24 核吃满。
+    async with heavy_slot("parallel-solve"):
+        result = await run_in_threadpool(
+            ps.solve, req.class_name,
+            weekday=(req.weekday or cls_info.get("weekday") or None),
+            start_week=start_week,
+            weeks=(req.weeks if req.weeks is not None else 10),
+            time_slots=md_time_slots,
+            week_max_override=week_max_override,
+        )
     # 灰箱补全假设：任务层（教师/场地自动补全）+ 求解层（星期/节次/周次默认值）。
     # 求解失败时错误信息本身就是结论，不必再叠一层假设。
     if task_assumptions and result.get("success"):
@@ -1611,7 +1614,10 @@ async def parallel_solve_all():
             "week_max": c.get("week_max"),
         })
 
-    result = await run_in_threadpool(ps.solve_school, specs)
+    # R-114：并发闸。求解单次最坏 280 CPU·秒，次数闸挡不住"同时来 600 个"
+    # （实测轮换 IP+UA 前 600 次全放行），超出的立刻 429 而不是排队到超时。
+    async with heavy_slot("parallel-solve-all"):
+        result = await run_in_threadpool(ps.solve_school, specs)
     if result.get("success") and task_assumptions:
         result["assumptions"] = task_assumptions
     return result
@@ -1715,6 +1721,28 @@ async def land_commit(req: LandPlanRequest):
     with _land_lock:
         # diff 现算，不信预览那一份：预览与采纳之间可能有审批调课生效
         diff = plan_landing.diff_plan(plan, _db.entries)
+
+        # R-116：**表现已一致就不写撤销栈**。
+        #
+        # 为什么（2026-11-07 实测）：`apply_plan` 本身是幂等的（先按单元剔除旧行再插新行），
+        # 所以连点两次「采纳」课表结果完全正确。但 `landed_plans` 是**撤销栈**，
+        # 每次 `save` 都压一条 —— 实测同一份方案连采两次，撤销栈深度 **2**。
+        # 教秘按一次「撤销」会看到"什么都没变"（它恢复到第 2 次落地前的快照，
+        # 而那时课表已经是新状态），必须按两次才真正回到原状。这是**可感知的困惑**：
+        # 按钮按了没反应，人会以为功能坏了，然后反复按。
+        #
+        # 网络重试/双击也会走到这里，所以这不是理论场景。
+        # 用 `has_changes`（diff_plan 已经算好）判断：无 added/changed 就是"已经是这个状态"。
+        if not diff.get("has_changes"):
+            diff.update({
+                "success": True,
+                "landed_at": None,
+                "after_entries": len(_db.entries),
+                "idempotent": True,
+                "note": "方案与当前安排表已一致，未重复落地（撤销栈未增长）",
+            })
+            return diff
+
         before = plan_landing.snapshot(_db)
         applied = plan_landing.apply_plan(_db, plan)
         try:
@@ -2549,13 +2577,16 @@ async def auto_schedule(req: Optional[AutoScheduleRequest] = None):
         _db,
         extra_tasks=extra_tasks,
     )
-    if req and req.max_sections:
-        result = await run_in_threadpool(scheduler.solve, max_sections=req.max_sections)
-        truncated = True
-    else:
-        chunk_size = (req.chunk_size if req else 60) or 60
-        result = await run_in_threadpool(scheduler.solve_all, chunk_size=chunk_size)
-        truncated = False
+    # R-114：并发闸（与 /parallel/solve-all 同一个池）。求解是纯 CPU 活，
+    # 同时来 N 个不会变快，只会把 24 核吃满并让只读接口一起变慢。
+    async with heavy_slot("auto-schedule"):
+        if req and req.max_sections:
+            result = await run_in_threadpool(scheduler.solve, max_sections=req.max_sections)
+            truncated = True
+        else:
+            chunk_size = (req.chunk_size if req else 60) or 60
+            result = await run_in_threadpool(scheduler.solve_all, chunk_size=chunk_size)
+            truncated = False
 
     real_entries = len(_db.entries)
     total_all = result.get("total_sections_all", 0)

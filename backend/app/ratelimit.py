@@ -247,3 +247,76 @@ def rate_limit(bucket: str):
             )
 
     return _guard
+
+
+# ---------------------------------------------------------------------------
+# 并发闸（R-114）：限制**同时进行**的重活请求数
+#
+# 为什么"次数闸"不够
+# ------------------
+# 上面 RULES 的数字全是"每窗口允许几次"，没有"每次多少 CPU 秒"的维度。
+# 求解类单次 10–280 秒，而只读查询 1–2ms，两者被同一套次数口径约束，于是：
+#   600 次/分钟 × 280 秒 = 168000 CPU·秒 —— 而机器只有 24 核。
+# 更关键的是单客户端维度挡不住：指纹 = sha1(UA+Accept-Language) 两行代码就能每请求变一次，
+# 源 IP 在网关下本就逐次变化（见 client_ip 注释）。实测轮换 IP+UA 时前 600 次全部放行。
+#
+# 次数闸管的是"总量"，管不了"同时"。而"同时"才是把机器打瘫的那个变量：
+# 求解走 run_in_threadpool，anyio 池上限 min(32, cpu+4)=28，600 个请求会全部
+# 挤进去排队，28 个吃满 24 核，其余 572 个挂到网关超时 —— 教秘看到的是"网站卡死"。
+#
+# 口径：全站同时进行的重活 ≤ CPU//4（24 核 → 6）。超出的**立刻** 429 而不是排队，
+# 因为排队只会把失败推迟到超时，并且继续占着连接。立刻拒绝让客户端知道"现在不行"。
+# ---------------------------------------------------------------------------
+
+# 进程内信号量：单进程部署够用（uvicorn 多 worker 时每个 worker 各自限，
+# 总量按 worker 数放大，仍是可接受的上界；要全局精确需上 Redis，本项目不引这个依赖）。
+_HEAVY_SEM_LIMIT = max(1, (os.cpu_count() or 4) // 4)
+_HEAVY_SEM = threading.BoundedSemaphore(_HEAVY_SEM_LIMIT)
+_HEAVY_ACTIVE = {"n": 0}
+_HEAVY_LOCK = threading.Lock()
+
+
+def heavy_slot(name: str):
+    """给单次"重活"占一个并发位；拿不到就 429（不排队）。
+
+    用法：
+        @router.post("/parallel/solve")
+        async def parallel_solve(...):
+            async with heavy_slot("parallel-solve"):
+                ...
+
+    ⚠️ 释放必须放在 `finally`（`async with` 已保证）：异常路径漏放会让信号量
+    永久少一个坑，跑满 `_HEAVY_SEM_LIMIT` 次失败后整个端点永久 429 —— 比不加闸更糟。
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _ctx():
+        got = _HEAVY_SEM.acquire(blocking=False)
+        if not got:
+            with _HEAVY_LOCK:
+                active = _HEAVY_ACTIVE["n"]
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"服务器正在处理 {active} 个排课计算（上限 {_HEAVY_SEM_LIMIT}），"
+                    "请稍后重试。"
+                ),
+                headers={"Retry-After": "15"},
+            )
+        with _HEAVY_LOCK:
+            _HEAVY_ACTIVE["n"] += 1
+        try:
+            yield
+        finally:
+            with _HEAVY_LOCK:
+                _HEAVY_ACTIVE["n"] -= 1
+            _HEAVY_SEM.release()
+
+    return _ctx()
+
+
+def heavy_stats() -> Dict[str, int]:
+    """当前并发占用（诊断用，供 /health 或测试断言）。"""
+    with _HEAVY_LOCK:
+        return {"active": _HEAVY_ACTIVE["n"], "limit": _HEAVY_SEM_LIMIT}
