@@ -22,7 +22,6 @@
 
 import os
 import sys
-import tempfile
 
 import openpyxl
 
@@ -37,7 +36,20 @@ BAD_ROWS = [
     ("绪论课（教室自己申请）", "绪论"),
     ("大物实验B考试", "考试"),
 ]
-TMP = os.path.join(tempfile.gettempdir(), "intro_filter_list.xlsx")
+# 临时文件写在**项目内 .tmp/**（已 gitignore），不用系统 TEMP 根目录。
+#
+# R-122：原来写 `tempfile.gettempdir()`。实测该目录已有 48805 个顶层条目
+# （115032 个文件，遍历一遍 70.5 秒）—— 全是**其他程序**的残留，不是本项目的。
+# 而本机 agent 运行时给 `os.remove` 挂了一个 audit 钩子，删除前要做"保留扫描"，
+# 扫描走 socket 通信；在 11 万文件的目录上它必然超时，于是 openpyxl 清理自己
+# 的临时 xml 时收到 `PermissionError: CHAT_REFERENCE_PROTECTED`，
+# 表现为"满载验收 10 项里这项 FAIL"。
+#
+# 换个目录不是掩盖问题：项目自己的产物本来就不该散落在系统 TEMP 根目录
+# （也给别的程序添了 48805 → 更多）。放进 .tmp/ 后扫描规模只有几十个条目。
+_TMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp")
+os.makedirs(_TMP_DIR, exist_ok=True)
+TMP = os.path.join(_TMP_DIR, "intro_filter_list.xlsx")
 
 failures = []
 

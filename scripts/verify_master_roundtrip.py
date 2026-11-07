@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,7 +36,13 @@ import openpyxl
 
 SITE = "http://127.0.0.1:8023"
 API = f"{SITE}/api/reschedule"
-MARKER = os.path.join(tempfile.gettempdir(), "master_roundtrip_marker.json")
+# 同 verify_intro_filter（R-122）：项目产物不写系统 TEMP 根目录。
+# 那里实测 48805 个顶层条目 / 115032 个文件（全是别的程序的残留），
+# 而本机 agent 给 os.remove 挂的 audit 钩子要在删除前做"保留扫描"，
+# 规模一大就超时，抛 `PermissionError: CHAT_REFERENCE_PROTECTED`。
+_TMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tmp")
+os.makedirs(_TMP_DIR, exist_ok=True)
+MARKER = os.path.join(_TMP_DIR, "master_roundtrip_marker.json")
 ADMIN = {"username": "admin", "password": "admin123"}
 
 NEW_PROJECT = "台账往返核查项目（可删）"
@@ -153,7 +158,7 @@ def main() -> int:
     req = urllib.request.Request(f"{API}/export/master-workbook")
     with urllib.request.urlopen(req, timeout=120) as r:
         wb_bytes = r.read()
-    tmp = os.path.join(tempfile.gettempdir(), "master_roundtrip.xlsx")
+    tmp = os.path.join(_TMP_DIR, "master_roundtrip.xlsx")
     with open(tmp, "wb") as f:
         f.write(wb_bytes)
 

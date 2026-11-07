@@ -23,12 +23,31 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
 FRONTEND = os.path.join(REPO, "frontend")
+
+# 临时文件一律落在项目内 `.tmp/`，不写系统 TEMP 根目录（R-122）。
+#
+# 为什么（2026-11-07 实测）：本机 TEMP 已有 48805 个顶层条目 / 115032 个文件
+# （全是**其他程序**的残留，遍历一遍要 70.5 秒）。而本机 agent 运行时给
+# `os.remove` 挂了 audit 钩子，删除前要做"保留扫描"，扫描走 socket 通信 ——
+# 在这种规模下必然超时，于是 openpyxl 清理自己临时 xml 时收到
+# `PermissionError: CHAT_REFERENCE_PROTECTED`，表现为"满载验收 10 项里有 1-2 项 FAIL"。
+#
+# 关键点：openpyxl 内部用的是 `NamedTemporaryFile`（`worksheet/_writer.py`），
+# 它受 `tempfile.tempdir` 控制 —— 所以**只改业务代码里的 TMP 路径没用**，
+# 必须改这个全局。改完 `.tmp/` 下只有几十个条目，扫描秒回。
+_TMP_ROOT = os.path.join(REPO, ".tmp")
+os.makedirs(_TMP_ROOT, exist_ok=True)
+tempfile.tempdir = _TMP_ROOT
+# 子进程要继承：`tempfile.tempdir` 是进程内的，Python 认 `TMPDIR/TEMP/TMP`。
+for _k in ("TMPDIR", "TEMP", "TMP"):
+    os.environ[_k] = _TMP_ROOT
 
 SITE = "http://127.0.0.1:8023"
 
