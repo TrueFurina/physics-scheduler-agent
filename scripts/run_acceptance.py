@@ -168,13 +168,15 @@ def main():
     step("audit_async_blocking（事件循环阻塞审计）",
          [PY, "scripts/audit_async_blocking.py", "backend/app/api"])
 
-    # 2b) 首屏加载态探针（R-117）—— **必须在任何会加载数据的步骤之前**。
+    # 2b) 首屏加载态探针（R-117 / R-121）。
     #
-    # 它观察的是"数据还没进内存"那段窗口（内部用 CDP 把 /status 延迟 3s 制造）。
-    # 放在 UI 探针组里是错的：上面四个 `verify_*` 都会 `reset=True` → load-default，
-    # 等轮到它时 loaded 已是 true，探针会 SKIP 并 exit 3（判红）。
-    # 也不能放进 `if not args.skip_tests` 里 —— 它与单测无关，`--skip-tests`
-    # 时同样应当跑（那时更该跑：说明服务刚起、窗口正合适）。
+    # R-121 起它**自己造窗口**（CDP 把 /status 改写为 loaded:false、
+    # 把 /load-default 延迟 3s），不再依赖"服务刚启动、数据还没进内存"。
+    # 所以位置不再有硬约束 —— 之前那段"必须排在四个 verify_* 之前"的说明已作废：
+    # 实测在完整验收里它曾因前面加载过数据而 SKIP，导致整条链路 15/16。
+    # 现在放在这里只是"顺手靠前"，落在 UI 组里或更后面结果都一样。
+    #
+    # 仍不进 `if not args.skip_tests`：它与单测无关，`--skip-tests` 时也该跑。
     if not args.skip_ui:
         step("probe_first_paint（首屏加载态 4 项）",
              ["node", "../scripts/probe_first_paint_loading.cjs"],

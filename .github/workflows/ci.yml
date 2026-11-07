@@ -206,11 +206,14 @@ jobs:
           done
           echo "server 未起来，日志："; tail -40 /tmp/server.log; exit 1
 
-      # R-117：首屏加载态探针必须**在预热之前**跑。它观察的是"数据还没进内存"
-      # 那段窗口（内部用 CDP 把 /status 延迟 3s 来制造），一旦 load-default 跑过就没了。
-      # 探针自己也有预检：若 loaded=true 会 SKIP 并 exit 3（判红而非静默通过），
-      # 所以顺序错了会立刻在 CI 上暴露，不会悄悄退化成"永远绿"。
-      - name: Probe — 首屏加载态 4 项（必须在预热前）
+      # R-117 / R-121：首屏加载态探针。
+      #
+      # 它**自己造窗口**（CDP 把 /status 改写为 loaded:false、把 /load-default 延迟 3s），
+      # 因此不依赖"服务刚启动、数据还没进内存"。第一版是靠预检 /health 来实现的，
+      # 结果它只能在服务刚起时跑 —— 实测在完整验收里，因为前面已加载过数据而 SKIP，
+      # 整条链路 15/16。现在无论服务处于什么状态都能跑，也就不再需要"必须在预热前"。
+      # （仍放在预热前只是顺手，无害；顺序不再影响结论。）
+      - name: Probe — 首屏加载态 4 项
         working-directory: frontend
         env:
           SITE: http://127.0.0.1:8023/
