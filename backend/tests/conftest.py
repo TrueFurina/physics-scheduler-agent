@@ -36,6 +36,19 @@ os.environ.setdefault("SCHEDULE_WARMUP", "0")
 # 默认管理员口令只在演示模式有效（生产未配 ADMIN_PASS 时拒绝，见 security.py）。
 # 测试用演示口令登审批台，所以测试进程统一按演示模式跑。
 os.environ.setdefault("DEMO_MODE", "1")
+# ⚠️ R-123：ADMIN_PASS 必须在**模块级**设 —— 这是唯一先于所有测试模块执行的位置。
+#
+# `app/security.py` 在**导入时**读 ADMIN_PASS 并固化（未设则随机生成、且不打印）；
+# 而几十个测试文件在模块级 `from app... import`，其中只有 2 个自己 setdefault。
+# pytest 按文件名字母序收集，只要某个"不设口令"的文件先被导入，
+# security.ADMIN_PASS 就固化成随机值，之后 test_api_auth 用 admin123 登录 → 401。
+#
+# 本地有 `.env` 提供 ADMIN_PASS，所以从不暴露；**CI 干净检出没有 `.env`，
+# 这一条会随收集顺序随机挂**。实测干净树：2 failed / 810 passed / 31 skipped，
+# 而同一份代码本地全绿 —— 典型的"本地过、CI 挂"。
+os.environ.setdefault("ADMIN_PASS", "admin123")
+
+
 
 # 解析缓存写到系统临时目录：否则测试会把 schedule-*.json 落进仓库
 # `backend/app/data/cache/`（而该目录会随发布包上传）。
@@ -47,6 +60,59 @@ os.environ.setdefault(
 import pytest
 
 from app import master_store as _master_store
+
+
+# ⚠️ R-123：上面这些 `setdefault` **只在模块导入时生效一次**，不足以保证全程有效。
+#
+# 实测机制（2026-11-07，`_pytest.monkeypatch.MonkeyPatch().setenv(...).undo()`）：
+# 若变量**原本不存在**，`setenv` 还原时执行的是 `delenv` —— 于是"设过又还原"等于删掉。
+# 具体踩坑路径：
+#
+#   conftest 导入        setdefault("DEMO_MODE", "1")        → DEMO_MODE="1"
+#   test_admin_password_guard::test_default_password_allowed_in_demo
+#                        monkeypatch.setenv("DEMO_MODE","1")  → 记录"原本不存在"
+#     ...用例结束        monkeypatch 还原                    → **DEMO_MODE 被删除**
+#   之后的 test_api_auth::test_admin_login_issues_working_token
+#                        is_demo_mode() → False → admin123 被拒 → 401
+#
+# 本地有 `.env` 提供 DEMO_MODE，所以 `setdefault` 不是"原本不存在"，永远不触发；
+# **CI 的干净检出没有 `.env`，这一条必挂**。实测：干净树 `2 failed, 810 passed,
+# 31 skipped`，本地全绿 —— 典型的"本地过、CI 挂"。
+#
+# 修法不是改那一行 `setdefault`，而是每个用例前都兜一次：环境类前置条件
+# 应当 per-test 保证，不能依赖"导入时设过一次"。
+_BASELINE_ENV = {
+    # ⚠️ R-123：ADMIN_PASS 必须在这里设 —— 这是唯一"先于所有测试模块导入"的位置。
+    #
+    # `app/security.py` 在**导入时**读 ADMIN_PASS 并固化（未设则随机生成、且不打印）。
+    # 而几十个测试文件在模块级 `from app... import`，其中只有 2 个自己 setdefault。
+    # pytest 按文件名字母序收集 ⇒ 只要某个"不设口令"的文件先被导入，
+    # security.ADMIN_PASS 就固化成随机值，之后 test_api_auth 用 admin123 登录 → 401。
+    #
+    # 本地有 `.env` 提供 ADMIN_PASS，所以从不暴露；**CI 干净检出没有 `.env`，
+    # 这一条会随收集顺序随机挂**。实测干净树：2 failed / 810 passed / 31 skipped。
+    "ADMIN_PASS": "admin123",
+    "DEMO_MODE": "1",
+    "RATELIMIT_DISABLED": "1",
+    "LLM_DISABLED": "1",
+    "SCHEDULE_WARMUP": "0",
+    # 也纳入基线：它被 11 个用例 setenv/delenv 过。若某用例删掉它，
+    # 解析缓存会回落到默认目录 —— 那正是「测试把 schedule-*.json 写进
+    # backend/app/data/cache/ 并随发布包上传」的老问题。
+    "PARSE_CACHE_DIR": os.path.join(tempfile.gettempdir(), "physics-scheduler-test-cache"),
+}
+
+
+@pytest.fixture(autouse=True)
+def _baseline_env():
+    """每个用例前恢复基线环境变量。
+
+    只填**缺失的**，不覆盖用例显式设的值 —— 所以 `test_admin_password_guard`
+    里 `delenv("DEMO_MODE")` 的用例仍然照常工作（它在用例体内删，fixture 只负责
+    用例**开始**时是齐的）。
+    """
+    for k, v in _BASELINE_ENV.items():
+        os.environ.setdefault(k, v)
 
 
 @pytest.fixture(autouse=True)

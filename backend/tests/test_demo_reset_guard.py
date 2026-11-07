@@ -35,20 +35,33 @@ def test_demo_reset_forbidden_when_demo_mode_off(monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
 
-    # 只把 reschedule 模块读到的 DEMO_MODE 伪装成 "0"；auth 依赖走自己的 os，不受影响。
+    # ⚠️ R-123：必须先拿令牌、**再**伪装 DEMO_MODE，两步顺序不能反。
+    #
+    # 原写法（先伪装再 `_admin_token`）注释里说"auth 依赖走自己的 os，不受影响"——
+    # 那句是错的：`security.is_demo_mode()` 就是 `os.getenv("DEMO_MODE")`，
+    # 而 `R.os` 与 `security.os` 是**同一个模块对象**，`setattr(R.os, "getenv", ...)`
+    # 是全局替换。于是登录时 `is_demo_mode()` 读到 "0" ⇒ 默认口令被拒 ⇒ 403 ⇒
+    # `_admin_token` 的 `assert 200` 先炸，根本走不到要测的闸门。
+    #
+    # 它以前能过，是因为本机 `.env` 里 `ADMIN_PASS=Psa@2026`（**非默认值**），
+    # 此时 `admin_password_is_default()` 为 False，`DEMO_MODE` 是多少都不影响登录。
+    # 一旦测试进程统一用默认口令（conftest 的基线），这个隐含依赖就暴露了。
     real_getenv = os.getenv
-
-    def fake_getenv(key, default=None):
-        if key == "DEMO_MODE":
-            return "0"
-        return real_getenv(key, default)
-
-    monkeypatch.setattr(R.os, "getenv", fake_getenv)
 
     with TestClient(app) as client:
         token = _admin_token(client)  # 真实 DEMO_MODE=1 下拿到的合法令牌
-        resp = client.post("/api/reschedule/demo/reset",
-                           headers={"Authorization": f"Bearer {token}"})
+
+        def fake_getenv(key, default=None):
+            if key == "DEMO_MODE":
+                return "0"
+            return real_getenv(key, default)
+
+        monkeypatch.setattr(R.os, "getenv", fake_getenv)
+        try:
+            resp = client.post("/api/reschedule/demo/reset",
+                               headers={"Authorization": f"Bearer {token}"})
+        finally:
+            monkeypatch.undo()
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == _gate_detail(), resp.text
