@@ -281,3 +281,12 @@ database / LLM) are gated by exact server-side Origin matching — non-allowlist
 - [Technical Architecture V1.0 (Chinese)](docs/技术架构设计文档-V1.0.md)
 - [User Guide (Chinese)](docs/产品使用指南.md)
 - [Project Reflection (Chinese)](docs/项目总结与反思.md)
+
+### Deep-dive write-ups (portfolio material per direction)
+
+- **Core algorithm** — [Scheduling algorithm deep dive: CP-SAT for physics lab scheduling](docs/排产算法详解-CP-SAT.md) (Chinese)
+  Decision variables, four mutual-exclusion constraints, two-phase optimization (maximize count, then flatten), chunking strategy, and a 48-instance bug where a mis-indented constraint still returned OPTIMAL.
+- **Security** — [Security audit retrospective: public-link data exposure & missing auth](docs/安全审计复盘-20261015.md) (Chinese)
+  6 real vulnerabilities (zero-auth API, `.gitignore` doesn't protect production, `TRUNCATE` bypassing RLS, …) + 4 counter-intuitive lessons.
+- **AI product** — [LLM security audit retrospective: the concrete shape of defense-in-depth](docs/LLM安全审计复盘-20261107.md) (Chinese)
+  Three prompt-injection surfaces and why each was blocked; why prompt-hardening is the only defense that shares an interpretation layer with the attacker.
