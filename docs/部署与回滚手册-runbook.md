@@ -76,27 +76,42 @@
 ## 8. 验收 / 测试（冻结态复现闭环用）
 
 - 后端单测：
-  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **843 passed**。
-  - ⚠️ **本沙箱里跑全量会偶发"全绿但 1 个 failed"，且每次命中的测试不同。不是代码问题。**
-    2026-11-07 实测四次全量：`832 passed` / `1 failed(test_api_auth)` /
-    `1 failed(test_master_workbook)` / `1 failed(test_full_table_exports...)`。
-
-    完整调用链（从 pytest 的 traceback 里读出来的，不是推测）：
+  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **846 passed**。
+  - ✅ **本沙箱"偶发 1 failed"已于 R-122 修掉**（2026-11-07）。
+    症状是"全绿但 1 个 failed、每次命中的测试不同"，实测四次都撞上。
+    根因（从 traceback 读出，不是推测）：
 
         openpyxl/worksheet/_writer.py:389  in cleanup
-            os.remove(self.out)          ← openpyxl 删自己写的临时 xml
+            os.remove(self.out)          ← openpyxl 自己写的临时 xml
         <string>:56  in _audit           ← 本机 agent 运行时注入的 sys.addaudithook
             PermissionError: CHAT_REFERENCE_PROTECTED
 
-    openpyxl 每写一个 worksheet 都会"建临时文件 → 写 → 删"。钩子在做删除前的
-    "引用保留扫描"时走 socket 与运行时通信，**长时间跑（13 分钟以上）后该通信会超时**，
-    于是拒绝这次删除并把 PermissionError 抛进业务代码。所以：
-      · 触发点是**任意一个会写 xlsx 的测试**（导出/工作簿/导入预览…），与具体用例无关；
-      · 与 `PYTEST_DEBUG_TEMPROOT` **无关** —— 我一开始误判成 pytest 清理旧根目录，
-        换了 temproot 后仍复现（第 4 次就是换了之后跑出来的）。
-        `scripts/_pytest_temproot.py` 解决的是另一个真实问题（pytest 会话结束批量
-        删 `%TEMP%/pytest-of-*`，报 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`），
-        那个仍应继续用 `fresh_env()`。
+    openpyxl **每写一个 worksheet** 都建临时 xml 再删它，删除前的"引用保留扫描"
+    走 socket 与运行时通信，规模一大就超时。
+
+    修法：在 `scripts/run_acceptance.py` 里设 `tempfile.tempdir = <.tmp/>`（本进程）
+    + 把 `TMPDIR/TEMP/TMP` 灌进 env（子进程继承）。**两步缺一不可** ——
+    只改业务脚本自己的 TMP 常量没用，因为 openpyxl 用的是它内部的临时文件。
+    修后满载验收连跑两次 10/10。
+
+    > 排查时踩过的两个错归因（留档，免得重走）：
+    > ① 以为是 TEMP 目录膨胀（实测 48805 顶层条目 / 115032 文件 / 遍历 70.5s）——
+    >    于是改了两个 verify 脚本的临时路径，**仍 2/10 FAIL**；
+    > ② 以为是 CPU 负载 —— 28 个忙等进程下连跑 8 次 `openpyxl.save` **0 失败**，
+    >    空闲 40 次也 0 失败，负载与失败率无相关。
+
+    `scripts/_pytest_temproot.py` 仍要用于 pytest 自身（它解决的是另一个问题：
+    会话结束批量删 `%TEMP%/pytest-of-*`，报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`）。
+
+  - ⚠️ **本机依赖与 `requirements.txt` 不一致（R-124）**：`ortools` 声明 `9.11.4210`、
+    本机装的是 `9.15.6755`；`python-dotenv` 声明 `1.2.4`、本机 `1.2.1`。
+    `backend/tests/test_requirements_installed.py` 会因此**默认判红**（这是有意的，
+    它在如实报告环境漂移）。本机装不了包（pip 的 `shutil.rmtree` 必被删除守卫拒绝），
+    所以跑全量需要显式豁免：
+
+        PSA_ALLOW_VERSION_DRIFT=1 python -m pytest backend/tests -q
+
+    豁免时仍会打印漂移明细（不静默）。**CI 按 requirements 装，这条在那里默认就绿。**
 
     判定方法：**重跑一次全量**，若失败换了测试名、且 traceback 落在
     `openpyxl ... cleanup → os.remove`，即可判为环境问题。

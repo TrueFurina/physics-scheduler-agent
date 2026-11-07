@@ -4,7 +4,13 @@
 
 **`ortools==9.15.6755` 在 Python 3.12 上调用 `CpSolver.Solve()` 会直接段错误（SIGSEGV）。**
 
-这不是项目代码的问题，是 ortools 原生库与该 Python 版本组合的兼容缺陷。本项目 `requirements.txt` 当前锁定的是 `9.15.6755`，在 Python 3.12 环境下会导致：
+这不是项目代码的问题，是 ortools 原生库与该 Python 版本组合的兼容缺陷。
+
+> ⚠️ 2026-11-07 校订：本文写作时 `requirements.txt` 锁的是 `9.15.6755`；
+> **现已按方案 A 改为 `9.11.4210`**（见 §方案 A）。下文"当前锁定 9.15.6755"
+> 等表述属于当时状态，保留以记录推理过程，不要据此判断现状。
+
+若在 Python 3.12 环境下使用 `9.15.6755`，会导致：
 
 - 5 个测试文件整体崩溃（`test_apply_move` / `test_graybox` / `test_master_data` / `test_slot_alias` / `test_warmup`）
 - 段错误发生在 C++ 层，Python 的 `try/except` 无法捕获，pytest 直接中断
