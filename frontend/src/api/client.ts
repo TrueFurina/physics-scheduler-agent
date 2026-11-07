@@ -75,6 +75,14 @@ export interface ScheduleStatus {
   rooms: string[];
   teachers: string[];
   week_range: number[];
+  /**
+   * 学期起始日的来源（R-119）。未加载时为 null。
+   *
+   * `from_table=false` 表示安排表表头没有可识别的「第1周X月X日」，
+   * 后端回退到了硬编码默认值 —— 周次/星期/教室/教师都对，但界面上
+   * 那行小字日期可能错一年。此时**不应把日期当成事实展示**。
+   */
+  semester?: { date: string; from_table: boolean; note?: string } | null;
 }
 
 export interface AvailableSlot {

@@ -969,6 +969,10 @@ async def get_status():
             else "尚未加载（懒加载）：访问 /api/reschedule/teachers 等数据端点会自动加载默认排课表"
         ),
         "ai": parser.describe() if parser is not None else {"configured": False},
+        # R-119：学期起始日的来源。界面靠它判断"那行小字日期可不可信"。
+        # 解析失败时会回退到硬编码默认值（2025-02-24）—— 周次/星期/教室/教师
+        # 全都正确，只有日期会错，而且原来没有任何提示。
+        "semester": _agent.semester_start_state() if _db.loaded else None,
     }
 
 

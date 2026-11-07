@@ -76,7 +76,7 @@
 ## 8. 验收 / 测试（冻结态复现闭环用）
 
 - 后端单测：
-  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **832 passed**。
+  `OPENBLAS_NUM_THREADS=1 python -m pytest backend/tests -q -p no:cacheprovider` → **838 passed**。
   - ⚠️ **本沙箱里跑全量会偶发"全绿但 1 个 failed"，且每次命中的测试不同。不是代码问题。**
     2026-11-07 实测四次全量：`832 passed` / `1 failed(test_api_auth)` /
     `1 failed(test_master_workbook)` / `1 failed(test_full_table_exports...)`。

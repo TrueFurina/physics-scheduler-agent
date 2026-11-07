@@ -85,6 +85,55 @@ class RescheduleAgent:
                 self._semester_start_cache = SEMESTER_START
         return self._semester_start_cache
 
+    def _date_if_trustworthy(self, week: int, weekday: str) -> Optional[str]:
+        """只在**学期起始日来自表头**时才返回日期，否则返回 None（R-119）。
+
+        为什么不是"回退时也返回日期 + 前端标灰"：
+        前端有 4 处独立渲染 `slot.date`，让每处都记得判断是不可靠的约定
+        （`{s.date && ...}` 已经天然处理了 undefined，这是最省事且最不会漏的写法）。
+        而显示一个错一年的日期、旁边再加个小字说"可能不对"，教秘的注意力
+        反而被那行数字占住 —— 不显示比显示错的好。
+        """
+        try:
+            if self.db.get_semester_start_date() is None:
+                return None
+        except Exception:
+            return None
+        return week_to_date(week, weekday, self._get_semester_start())
+
+    def semester_start_state(self) -> dict:
+        """学期起始日的来源（R-119）。`/status` 用它告诉前端"日期可不可信"。
+
+        为什么需要单独一个方法：`_get_semester_start()` 无法区分两种情况 ——
+        解析成功、以及解析失败后回退到硬编码 `SEMESTER_START = 2025-02-24`。
+        两者返回同一个 `date` 对象，于是调用方**看不出**自己拿到的是不是默认值。
+
+        后果不是周次错（周次/星期/教室/教师全都从表里读，是对的），而是
+        **每个可用时段旁边那行小字日期错**：换一张没有「第1周X月X日」表头的表，
+        界面会显示 2025 年的日期，而且没有任何提示。教秘核对"是不是这周"时
+        唯一的视觉锚点就是那行小字 —— 错一整年比不显示更糟。
+
+        返回 `{"date": ISO, "from_table": bool}`：
+          · `from_table=True`  从表头解析出来的，可信
+          · `from_table=False` 用的硬编码默认值，**界面应当明示**或干脆不显示日期
+        """
+        raw = None
+        try:
+            raw = self.db.get_semester_start_date()
+        except Exception:
+            raw = None
+        if raw is not None:
+            return {"date": raw.isoformat(), "from_table": True}
+        return {
+            "date": SEMESTER_START.isoformat(),
+            "from_table": False,
+            # 给前端一句可直接显示的话，省得它自己拼
+            "note": (
+                f"安排表表头没有可识别的学期起始日，已按 {SEMESTER_START.isoformat()} 起算；"
+                "周次与星期不受影响，但日期可能不对，请核对"
+            ),
+        }
+
     def _cn_to_int(self, s: str) -> int:
         """中文数字转阿拉伯数字（一~二十）"""
         cn_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
@@ -338,7 +387,7 @@ class RescheduleAgent:
                                f"{_raw_slot_note(info)}")
                     excluded.append({
                         "weekday": wd, "time_slot": ts, "room": "",
-                        "date": week_to_date(target_week, wd, self._get_semester_start()),
+                        "date": self._date_if_trustworthy(target_week, wd),
                         "reason_type": "teacher_busy",
                         # 结构化字段与中文文案并列给出。**下游不要再用正则从 reason 里反解**：
                         # 文案是给人看的，改一个字（比如换个括号）就会静默解析失败。
@@ -360,7 +409,7 @@ class RescheduleAgent:
                                    f"{_raw_slot_note(info)}")
                         excluded.append({
                             "weekday": wd, "time_slot": ts, "room": rm,
-                            "date": week_to_date(target_week, wd, self._get_semester_start()),
+                            "date": self._date_if_trustworthy(target_week, wd),
                             "reason_type": "classroom_busy",
                             "class_name": info["class_name"],
                             "experiment": info["experiment"],
@@ -372,7 +421,7 @@ class RescheduleAgent:
                         "weekday": wd,
                         "time_slot": ts,
                         "room": rm,
-                        "date": week_to_date(target_week, wd, self._get_semester_start()),
+                        "date": self._date_if_trustworthy(target_week, wd),
                     })
 
         return {"available": available, "excluded": excluded}

@@ -298,3 +298,115 @@ def test_ai_plan_generation_degrades_on_llm_error(monkeypatch):
     r = agent.process_request("我是吴琳，把课调到第3周", with_ai=True)
     assert r["success"] is True
     assert isinstance(r["ai_plans"], list)
+
+
+# ---------------------------------------------------------------------------
+# R-119 · 学期起始日的**来源**必须可判别
+#
+# 背景：`_get_semester_start()` 无法区分"从表头解析成功"和"解析失败后回退到
+# 硬编码 SEMESTER_START = 2025-02-24" —— 两者返回同一个 date 对象。
+# 后果不是周次错（周次/星期/教室/教师全都从表里读），而是界面每个可用时段
+# 旁边那行小字日期错一整年而**毫无提示**。教秘核对"是不是这周"唯一的视觉
+# 锚点就是那行小字。
+# ---------------------------------------------------------------------------
+
+def test_semester_state_reports_from_table_when_parsed():
+    """表头解析成功时，必须明确说 from_table=True。"""
+    db = ScheduleDatabase()
+    db.loaded = True
+    db.entries = []
+    db.get_semester_start_date = lambda: ra.date(2026, 9, 7)
+
+    st = RescheduleAgent(db).semester_start_state()
+    assert st["from_table"] is True
+    assert st["date"] == "2026-09-07"
+    assert "note" not in st, "解析成功时不该出现警告文案"
+
+
+def test_semester_state_flags_fallback():
+    """← 核心：解析失败时必须自曝 from_table=False 并给出可显示的原因。
+
+    这条守的是"静默降级"。若哪天有人把 fallback 改成静默返回默认日期，
+    界面又会把 2025 年的日期当成真的显示出来。
+    """
+    db = ScheduleDatabase()
+    db.loaded = True
+    db.entries = []
+    db.get_semester_start_date = lambda: None
+
+    st = RescheduleAgent(db).semester_start_state()
+    assert st["from_table"] is False, f"回退到默认值却仍声称来自表头：{st}"
+    assert st["date"] == ra.SEMESTER_START.isoformat()
+    assert st.get("note"), "回退时必须有可显示的原因"
+    assert "可能不对" in st["note"], f"提示要说清后果：{st['note']}"
+
+
+def test_semester_state_survives_exception():
+    """解析抛异常时同样要降级 + 自曝，不能让异常漏到 /status。"""
+    db = ScheduleDatabase()
+    db.loaded = True
+    db.entries = []
+
+    def _boom():
+        raise RuntimeError("表头读不出来")
+
+    db.get_semester_start_date = _boom
+    st = RescheduleAgent(db).semester_start_state()
+    assert st["from_table"] is False
+    assert "note" in st
+
+
+def test_status_exposes_semester_state():
+    """`/status` 必须带上 semester 字段（供界面判断日期可不可信）。"""
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    body = TestClient(app).get("/api/reschedule/status").json()
+    assert "semester" in body, f"/status 缺少 semester 字段：{list(body)}"
+    # 未加载时为 None（没有表就没有起始日可言），加载后应是 dict
+    assert body["semester"] is None or set(body["semester"]) & {"date", "from_table"}
+
+
+def test_slots_omit_date_when_semester_start_untrusted():
+    """← 起始日不可信时，时段**不带 date 字段**（而不是带一个错日期）。
+
+    前端 4 处独立渲染 `slot.date`，靠 `{s.date && ...}` 天然跳过 undefined。
+    这是最省事也最不会漏的约定：不需要每个渲染点都记得判断可信度。
+    """
+    db = ScheduleDatabase()
+    db.loaded = True
+    db.entries = [_entry(2, "周四", "567", "C", "1组", "E1", "A410", "吴琳")]
+    db.get_semester_start_date = lambda: None
+    agent = RescheduleAgent(db)
+
+    got = agent.find_slots_with_reasons(3)
+    slots = got["available"] + got["excluded"]
+    assert slots, "夹具应当能产出至少一个时段（否则这条测试测不到东西）"
+    for s in slots:
+        assert s.get("date") is None, (
+            f"起始日不可信却仍给了日期 {s.get('date')!r} —— 界面会显示错一年的日期"
+        )
+
+
+def test_slots_include_date_when_semester_start_trusted():
+    """反向证明：起始日可信时**必须**有日期，别把功能一起关掉。"""
+    db = ScheduleDatabase()
+    db.loaded = True
+    db.entries = [_entry(2, "周四", "567", "C", "1组", "E1", "A410", "吴琳")]
+    db.get_semester_start_date = lambda: ra.date(2026, 9, 7)
+    agent = RescheduleAgent(db)
+
+    slots = agent.find_slots_with_reasons(3)
+    all_slots = slots["available"] + slots["excluded"]
+    dated = [s for s in all_slots if s.get("date")]
+    assert dated, "起始日可信时应当带上日期"
+
+    # ⚠️ 不能断言 `dated[0]`：`find_slots_with_reasons` 返回的是**全部七个星期**
+    # 的时段（周一→周日），第一条是周一而不是夹具里那条周四的课。
+    # 第一版就是这么写的，得到 09月21日（周一）然后以为公式错了。
+    thu = [s for s in all_slots if s.get("weekday") == "周四" and s.get("date")]
+    assert thu, f"没有周四的时段：{[(s.get('weekday'), s.get('date')) for s in all_slots[:5]]}"
+    # 第 3 周周四 = 2026-09-07（周一）+ 14 天 + 3 天 = 2026-09-24
+    assert thu[0]["date"] == "09月24日", (
+        f"第3周周四是 09月24日，实际 {thu[0]['date']}"
+    )
