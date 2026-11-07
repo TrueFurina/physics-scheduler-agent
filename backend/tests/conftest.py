@@ -61,3 +61,38 @@ def _isolate_master_store(tmp_path, monkeypatch):
     monkeypatch.setattr(
         _master_store, "STORE_PATH", str(tmp_path / "master_store.json")
     )
+
+
+# ---------------------------------------------------------------------------
+# 关于「全量跑偶发 1 failed」—— 不是代码问题，不要为它改测试
+# ---------------------------------------------------------------------------
+# 2026-11-07 实测四次全量（同一份代码）：
+#
+#     832 passed
+#     1 failed  test_api_auth::test_upload_keeps_old_data_when_parse_fails
+#     1 failed  test_master_workbook::test_blank_cells_do_not_overwrite_existing_values
+#     1 failed  test_api_auth::test_full_table_exports_stay_open_by_default[...]
+#
+# 三个不同的测试、同一个根因。traceback 落在：
+#
+#     openpyxl/worksheet/_writer.py:389  in cleanup
+#         os.remove(self.out)          ← openpyxl 删自己写的临时 xml
+#     <string>:56  in _audit           ← 本机 agent 运行时注入的 sys.addaudithook
+#         PermissionError: CHAT_REFERENCE_PROTECTED
+#
+# openpyxl 每写一个 worksheet 都"建临时文件 → 写 → 删"。钩子在删除前做
+# "引用保留扫描"（走 socket 与运行时通信），**长时间跑（13 分钟以上）后该通信超时**，
+# 于是拒绝删除并把 PermissionError 抛进业务代码。
+#
+# 所以：**触发点是"任意一个会写 xlsx 的测试"，与具体用例无关**，也与
+# `PYTEST_DEBUG_TEMPROOT` 无关（换过 temproot 仍复现）。CI 上不存在该钩子。
+#
+# 判定方法：重跑一次全量，若失败换了测试名且 traceback 在
+# `openpyxl ... cleanup → os.remove`，即为环境问题。
+#
+# 已完成的反证：逐个跑所有写 xlsx 的测试文件（test_api_auth / test_master_workbook /
+# test_export_empty / test_auto_schedule_all / test_course_bridge / test_import_wizard），
+# **153 项全绿**——包括三次全量里各自失败的那几个。
+#
+# 不要为此加 `pytest.mark.flaky` 或 try/except：那会把真正的 openpyxl 写入错误
+# 一起吞掉，而"导出写坏文件"是本项目最该被看见的故障之一。
