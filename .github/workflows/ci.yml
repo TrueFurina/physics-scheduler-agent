@@ -63,9 +63,14 @@ jobs:
         # 判据分三档（脚本内注释有完整理由）：
         #   · suspicious（重活在事件循环上）**必须为 0**，除非在 KNOWN_BLOCKING 里
         #     且带实测数字（当前只有 `/upload`，附 343ms + 44ms 空窗的说明）；
-        #   · 零 await 的轻查询（13 个，1–5ms）与基线快照比对，**只拦新增**；
+        #   · 零 await 的轻查询（当前 **8** 个，1–5ms）与基线快照比对，**只拦新增**；
         #   · 基线变化需 `--update-baseline` 显式更新并提交，评审能看见。
-        run: python scripts/audit_async_blocking.py backend/app/api/reschedule.py
+        #
+        # R-112：目标从**单个文件**改成**目录**。原先是 `.../api/reschedule.py`，
+        # 而 53 个端点都在那一个文件里；一旦拆分（3382 行，已是第二大文件的 3 倍），
+        # 这道门只会扫到一份，其余模块的重活完全逃检且不报错。脚本现在支持目录，
+        # 并带"路由总数不得低于下限"的守卫（扫不全直接失败）。
+        run: python scripts/audit_async_blocking.py backend/app/api
 
       - name: Pytest
         working-directory: backend
@@ -200,6 +205,16 @@ jobs:
             sleep 1
           done
           echo "server 未起来，日志："; tail -40 /tmp/server.log; exit 1
+
+      # R-117：首屏加载态探针必须**在预热之前**跑。它观察的是"数据还没进内存"
+      # 那段窗口（内部用 CDP 把 /status 延迟 3s 来制造），一旦 load-default 跑过就没了。
+      # 探针自己也有预检：若 loaded=true 会 SKIP 并 exit 3（判红而非静默通过），
+      # 所以顺序错了会立刻在 CI 上暴露，不会悄悄退化成"永远绿"。
+      - name: Probe — 首屏加载态 4 项（必须在预热前）
+        working-directory: frontend
+        env:
+          SITE: http://127.0.0.1:8023/
+        run: node ../scripts/probe_first_paint_loading.cjs
 
       - name: Warm up (load default table)
         run: |

@@ -160,8 +160,13 @@ def main():
     # 「重活跑在事件循环上」时建立的判据，但一直**只靠人手工跑**。本轮把它改成可进门的形态
     # （`suspicious` 必须为 0；零 await 轻查询与基线比对、只拦新增），并接进来。
     # 这类"我建了判据却没人跑"是最典型的自欺：脚本在、结论对，但永远不会变红。
+    #
+    # R-112：目标从单文件改成**目录**。此处原先写的是
+    # `backend/app/api/reschedule.py`，与 CI 里同一处错误；上一轮只改了 CI、
+    # 漏了这里 —— 而"真实交付的回归入口"恰恰是更常被跑的那一个。
+    # 只改一处等于没修：验收脚本仍会扫不全并给出绿色结论。
     step("audit_async_blocking（事件循环阻塞审计）",
-         [PY, "scripts/audit_async_blocking.py", "backend/app/api/reschedule.py"])
+         [PY, "scripts/audit_async_blocking.py", "backend/app/api"])
 
     step("verify_intro_filter（绪论/考试不进求解器）",
          [PY, "scripts/verify_intro_filter.py"], reset=True)
@@ -174,6 +179,13 @@ def main():
 
     # 3) UI 探针
     if not args.skip_ui:
+        # 首屏加载态探针**必须第一个跑、且不能 reset**（R-117）：
+        # 它要观察的是"数据还没加载"的那段窗口（用 CDP 延迟 /status 来制造），
+        # 而 `reset=True` 会先 load-default 把数据装进来，窗口就没了。
+        # 放在最前面可以确保此时服务刚起、内存里还没有表。
+        step("probe_first_paint（首屏加载态 4 项）",
+             ["node", "../scripts/probe_first_paint_loading.cjs"],
+             cwd=FRONTEND, timeout=300, env=probe_env)
         for name, script in [
             ("probe_ui_flow（主流程 16 项）", "probe_ui_flow.cjs"),
             ("probe_reschedule_flow（调课 11 项）", "probe_reschedule_flow.cjs"),

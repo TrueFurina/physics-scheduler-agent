@@ -42,8 +42,41 @@ from pathlib import Path
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 update_baseline = "--update-baseline" in sys.argv[1:]
-path = args[0] if args else "backend/app/api/reschedule.py"
-tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+# 默认值也必须是**目录**。原先写 `backend/app/api/reschedule.py`：
+# 未来的某次重构拆了文件，而某人（或某个新脚本）不带参数直接跑，
+# 就会静默退回"只扫一份"的老行为 —— 默认值是最容易被遗忘的调用入口。
+target = args[0] if args else "backend/app/api"
+
+# 支持**目录**（R-112）。原先只收单个文件，而 CI 传的是
+# `backend/app/api/reschedule.py` —— 一旦把这一个文件拆成多个模块，
+# 审计只会扫到其中一份，另外几份的重活**完全逃检**，且不会报错：
+# 实测把 3 个端点切到另一文件后，原文件那份仍 exit=0 通过，
+# 输出里还写着"有 5 个零 await 路由被消除（基线可变好）"——
+# 把"没扫到"当成了"已修好"。那是比不检查更坏的状态。
+#
+# 所以 target 允许是目录：递归收集 **/*.py，每个文件独立解析、独立建函数表。
+# 跨文件的调用闭包不展开（`sync_fns` 按文件隔离），这只会**少报**不会误报；
+# 而下面的"路由总数守卫"保证不会因为少扫文件而静默变绿。
+_root = Path(target)
+if _root.is_dir():
+    _files = sorted(p for p in _root.rglob("*.py") if "__pycache__" not in p.parts)
+else:
+    _files = [Path(target)]
+if not _files:
+    print(f"❌ 审计目标没有任何 .py 文件：{target}")
+    sys.exit(1)
+
+_trees = []
+for _f in _files:
+    try:
+        _trees.append((_f, ast.parse(_f.read_text(encoding="utf-8"))))
+    except (OSError, SyntaxError) as exc:
+        print(f"❌ 无法解析 {_f}：{exc}")
+        sys.exit(1)
+
+# 路由总数守卫：拆分文件后，扫到的路由数**不应下降**。
+# 这条防的正是"漏扫"，而且它不依赖人记得更新任何东西。
+EXPECTED_MIN_ROUTES = 45
 
 ROUTE_DECOS = {"get", "post", "put", "delete", "patch"}
 
@@ -163,10 +196,19 @@ def threaded_calls(fn):
 # 而内嵌函数不在模块顶层 ⇒ 递归展开时看不到"它已被下沉"，于是把
 # `_load_default_schedule` 记到端点头上，判成"重活在事件循环上"。
 # 这是**误报**，而一条会误报的门同样没人看（R-25 的反面）。
+#
+# R-112：改成**按文件构建**。拆成多个模块后，同名辅助函数会互相覆盖 ——
+# 比如两个文件都有 `_persist()`，共用一个 dict 时后者的函数体会被用来展开
+# 前者的调用点，结论就是错的（可能漏报也可能误报）。
 sync_fns = {}
-for n in ast.walk(tree):
-    if isinstance(n, ast.FunctionDef):
-        sync_fns.setdefault(n.name, []).append(n)
+
+
+def _build_sync_fns(tree):
+    table = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef):
+            table.setdefault(n.name, []).append(n)
+    return table
 
 
 def blocking_in_closure(fn, depth=0, seen=None):
@@ -198,24 +240,30 @@ def blocking_in_closure(fn, depth=0, seen=None):
 
 
 rows = []
-for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-    decos = [d for d in fn.decorator_list if is_route(d)]
-    if not decos:
-        continue
-    is_async = isinstance(fn, ast.AsyncFunctionDef)
-    # 只看端点**自己**在事件循环上调了什么（内嵌函数另算）
-    linear = sorted(set(calls_in(fn, shallow=True)) & HEAVY)
-    deep, walked = blocking_in_closure(fn) if is_async else (set(), set())
-    # 闭包里命中的、且**不在**本函数直接调用清单里的，才算"藏在辅助函数里"
-    hidden = sorted(deep - set(linear))
-    rows.append((fn.lineno, route_path(decos[0]), fn.name, is_async, has_await(fn),
-                 linear, hidden, sorted(walked)))
+for _file, _tree in _trees:
+    # 原地替换内容（不重新绑定名字）：`blocking_in_closure` 闭包读的是这个 dict 对象，
+    # 在模块顶层写 `global` 是非法的，重新赋值又会让闭包看到旧对象。
+    sync_fns.clear()
+    sync_fns.update(_build_sync_fns(_tree))
+    for fn in [n for n in ast.walk(_tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        decos = [d for d in fn.decorator_list if is_route(d)]
+        if not decos:
+            continue
+        is_async = isinstance(fn, ast.AsyncFunctionDef)
+        # 只看端点**自己**在事件循环上调了什么（内嵌函数另算）
+        linear = sorted(set(calls_in(fn, shallow=True)) & HEAVY)
+        deep, walked = blocking_in_closure(fn) if is_async else (set(), set())
+        # 闭包里命中的、且**不在**本函数直接调用清单里的，才算"藏在辅助函数里"
+        hidden = sorted(deep - set(linear))
+        rows.append((fn.lineno, route_path(decos[0]), fn.name, is_async, has_await(fn),
+                     linear, hidden, sorted(walked), str(_file)))
 
 rows.sort()
 print(f"{'line':>5s}  {'path':34s} {'handler':30s} {'async':5s} {'await':5s}  heavy / 闭包内隐藏")
 print("-" * 132)
 zero_await, suspicious = [], []
-for lineno, p, name, is_async, aw, linear, hidden, walked in rows:
+for lineno, p, name, is_async, aw, linear, hidden, walked, _srcfile in rows:
     flag = ""
     if is_async and not aw:
         flag = "  ← 零 await（纯阻塞）"
@@ -242,6 +290,19 @@ for lineno, p, name, heavy in zero_await:
 for lineno, p, name, hidden, walked in suspicious:
     print(f"  L{lineno:<5d} {p:34s} {name:26s} 隐藏: {','.join(hidden)}")
     print(f"         展开路径: {' → '.join(walked)}")
+
+# 路由总数守卫（R-112）：扫到的路由数不得低于下限。
+# 为什么需要它：上面所有判据都是"扫到的东西有没有问题"，没有一条管"有没有扫全"。
+# 拆分文件后若只扫到一部分，脚本会输出"XX 个路由被消除（基线可变好）"并 exit=0 ——
+# 把漏扫包装成改进，这是最坏的一种失效。
+if len(rows) < EXPECTED_MIN_ROUTES:
+    print()
+    print(f"❌ 只扫到 {len(rows)} 个路由，低于下限 {EXPECTED_MIN_ROUTES} 个 —— 疑似漏扫文件。")
+    print(f"   审计目标：{target}（共 {len(_files)} 个 .py）")
+    print("   若是正常删除了端点，请同步下调 EXPECTED_MIN_ROUTES 并说明原因。")
+    failed_scan = True
+else:
+    failed_scan = False
 
 # ---------------------------------------------------------------------------
 # 退出码：区分"必须为 0"和"允许存在但没有恶化"
@@ -339,12 +400,21 @@ else:
             print(f"   + {a}")
         failed = True
     if removed:
-        print()
-        print(f"✅ 有 {len(removed)} 个零 await 路由被消除（基线可变好）：")
+        if failed_scan:
+            # 漏扫时 removed 的含义被污染了：它不是"这些端点被消除"，
+            # 而是"这些端点不在我扫到的文件里"。此时报"✅ 改进"是撒谎。
+            print()
+            print(f"⚠️ 有 {len(removed)} 条基线路由未在本次扫描中出现 —— "
+                  f"但本次扫描不完整，**不能**据此认为它们被消除：")
+        else:
+            print()
+            print(f"✅ 有 {len(removed)} 个零 await 路由被消除（基线可变好）：")
         for r in removed:
             print(f"   - {r}")
     if not added:
         print()
         print(f"✅ 零 await 轻查询与基线一致（{len(current)} 个，不允许增加）")
 
-sys.exit(1 if failed else 0)
+# failed_scan 独立于 failed：它表示"这次没扫全"，与"扫到的有问题"是两回事，
+# 但两者都必须让 CI 红 —— 扫不全时的"通过"没有意义。
+sys.exit(1 if (failed or failed_scan) else 0)
