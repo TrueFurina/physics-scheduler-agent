@@ -159,6 +159,8 @@ FILES = {
     "M116": ["tests/test_master_restore_warning.py"],
     "M117": ["tests/test_master_restore_warning.py"],
     "M118": ["tests/test_master_restore_warning.py"],
+    "M119": ["tests/test_chat_llm_error_signal.py"],
+    "M120": ["tests/test_chat_llm_error_signal.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -425,11 +427,17 @@ MUTANTS = [
         # R49：锚点补上后来新增的 `ai_plans_source` —— 少了这一行锚点就整段失配，
         # 变异体被静默 SKIP（`mutation_check.py` 的退出码不看 SKIP），
         # 于是"追问分支少返回契约字段"这条一直在报"全检出"，其实什么都没验。
+        # R94：_need_info 返回体又新增 `llm_error` / `llm_error_detail` 两键
+        # （且方法签名参数化），旧锚点再次整段失配 → 同步补上这两行，
+        # 保留"追问分支退回旧版 8 键"的变异语义（删掉 R31/R32/R94 全部补键）。
         """            "course_name": parsed.get("course_name"),
             "course_unrecognized": not parsed.get("course_name"),
             "ai_plans": [],
             "ai_plans_source": "none",
             "total": 0,
+            # R94：五个分支键集必须一致（含 LLM 失败信号）
+            "llm_error": llm_error,
+            "llm_error_detail": llm_error_detail,
         }""",
         """        }  # MUTANT: 追问分支退回到 8 键""",
         "identical_keys or contract_keys",
@@ -1180,6 +1188,36 @@ MUTANTS = [
         '                f"落盘为旧版本格式（v{_vm} ≠ v{master_store.SCHEMA_VERSION}），已作废")',
         '                "落盘文件损坏，已丢弃")  # MUTANT: 谎称损坏',
         "test_version_mismatch_store_surfaces_warning",
+    ),
+    # R94：聊天族 LLM 候选生成失败 —— 原实现把 error dict / 异常静默吞掉，
+    # 降级成规则推荐还报 "rule"，调用方无从得知 LLM 失败过。
+    (
+        "M119", "LLM 返回 error dict 却被吞掉信号",
+        "app/agent/reschedule_agent.py",
+        '                    if plans_result.get("error"):\n'
+        '                        llm_error = True\n'
+        '                        llm_error_detail = plans_result["error"]\n'
+        '                    else:',
+        '                    if plans_result.get("error"):\n'
+        '                        pass  # MUTANT: 吞掉 LLM 错误信号\n'
+        '                    else:',
+        "test_llm_error_dict_is_surfaced",
+    ),
+    (
+        "M120", "LLM 抛异常却谎称无故障",
+        "app/agent/reschedule_agent.py",
+        '                except Exception as e:\n'
+        '                    # R94：任何漏网的异常也如实报，不再 `ai_plans = []` 一吞了之。\n'
+        '                    # 降级到规则推荐仍会发生（下面），但必须带着故障信号，\n'
+        '                    # 让前端能区分"系统推荐的备用方案"和"LLM 亲自给的方案"。\n'
+        '                    llm_error = True\n'
+        '                    llm_error_detail = f"LLM 调用异常：{e!s}"\n'
+        '                    ai_plans = []',
+        '                except Exception as e:  # MUTANT: 不记录异常信号\n'
+        '                    llm_error = False\n'
+        '                    llm_error_detail = None\n'
+        '                    ai_plans = []',
+        "test_llm_exception_is_surfaced",
     ),
 ]
 

@@ -433,8 +433,15 @@ class RescheduleAgent:
             questions.append("请问要把课调到第几周？（例如：第5周、下周、下下周）")
         return questions
 
-    def _need_info(self, parsed: dict, llm_questions: List[str]) -> dict:
-        """信息不足 → 追问。槽位驱动优先；槽位都齐了才退回 LLM 的问题。"""
+    def _need_info(self, parsed: dict, llm_questions: List[str],
+                   llm_error: bool = False,
+                   llm_error_detail: Optional[str] = None) -> dict:
+        """信息不足 → 追问。槽位驱动优先；槽位都齐了才退回 LLM 的问题。
+
+        llm_error / llm_error_detail 透传结构化信号（R94）：追问分支在 LLM
+        候选生成之前就返回，此时还没尝试过 LLM，故默认 False/None；但参数化
+        以便将来若追问前也接入 LLM 解析失败信号时无需改调用点。
+        """
         questions = self._missing_slot_questions(parsed)
         if not questions:
             questions = [q for q in llm_questions if q][:2] or ["请补充调课信息"]
@@ -456,6 +463,9 @@ class RescheduleAgent:
             "ai_plans": [],
             "ai_plans_source": "none",
             "total": 0,
+            # R94：五个分支键集必须一致（含 LLM 失败信号）
+            "llm_error": llm_error,
+            "llm_error_detail": llm_error_detail,
         }
 
     def process_request(self, text: str, with_ai: bool = True,
@@ -468,6 +478,14 @@ class RescheduleAgent:
         with_ai=False 时跳过 LLM 候选方案生成（fast 模式，秒回）。
         """
         parsed = self.parse_request(text)
+
+        # R94：LLM 候选生成失败的结构化信号（不再静默降级）。
+        #   llm_error=False / llm_error_detail=None  ⇒ 未尝试、或成功、或未配置（离线常态）。
+        #   llm_error=True  / 非空                  ⇒ LLM 已配置且真正调用失败（异常 或 返回 error dict）。
+        # 注意：with_ai=False（fast 模式）或 LLM 未配置都不算失败 —— 那是正常路径，
+        # 不能污染信号，否则前端会拿"离线"当"故障"误报警。
+        llm_error = False
+        llm_error_detail = None
 
         # 槽位合并（B2）：本轮没解析出来的，沿用上一轮已确认的。
         # 没有这一步，"多轮追问"是假的 —— 每一轮都从零开始解析，教秘按提示
@@ -537,6 +555,9 @@ class RescheduleAgent:
                     "course_unrecognized": not parsed.get("course_name"),
                     "ai_plans": [],
                     "ai_plans_source": "none",
+                    # R94：五个分支键集必须一致（含 LLM 失败信号）
+                    "llm_error": llm_error,
+                    "llm_error_detail": llm_error_detail,
                 }
 
         # 教师是**必需槽位**，不是可选装饰：`find_slots_with_reasons` 的"检查0"
@@ -573,6 +594,9 @@ class RescheduleAgent:
                 # R32：补上另两个键 —— 五个分支键集必须一致
                 "need_info": False,
                 "followup_questions": [],
+                # R94：五个分支键集必须一致（含 LLM 失败信号）
+                "llm_error": llm_error,
+                "llm_error_detail": llm_error_detail,
             }
 
         result = self.find_slots_with_reasons(parsed["target_week"], teacher_name=parsed.get("teacher_name"))
@@ -600,6 +624,9 @@ class RescheduleAgent:
                 "total": 0,
                 "need_info": False,
                 "followup_questions": [],
+                # R94：五个分支键集必须一致（含 LLM 失败信号）
+                "llm_error": llm_error,
+                "llm_error_detail": llm_error_detail,
             }
 
         # 按星期几分组展示
@@ -635,11 +662,25 @@ class RescheduleAgent:
                         target_week=parsed["target_week"],
                         available_slots=slots,
                     )
-                    ai_plans = plans_result.get("plans", [])
-                    for __p in ai_plans:
-                        __p.setdefault("source", "llm")
-                except Exception:
-                    ai_plans = []  # LLM 异常时降级
+                    # R94：suggest_plans 已诚实返回 {"error": ...}（HTTP 非 200 /
+                    # 空内容 / 未解析出方案 / 网络异常），但此前这里只 .get("plans", [])
+                    # 把 error 整个丢掉 —— LLM 挂了却静默降级成规则推荐，
+                    # ai_plans_source 还报 "rule"，调用方完全不知道 LLM 失败过。
+                    # 现在把失败如实记进结构化信号。
+                    if plans_result.get("error"):
+                        llm_error = True
+                        llm_error_detail = plans_result["error"]
+                    else:
+                        ai_plans = plans_result.get("plans", [])
+                        for __p in ai_plans:
+                            __p.setdefault("source", "llm")
+                except Exception as e:
+                    # R94：任何漏网的异常也如实报，不再 `ai_plans = []` 一吞了之。
+                    # 降级到规则推荐仍会发生（下面），但必须带着故障信号，
+                    # 让前端能区分"系统推荐的备用方案"和"LLM 亲自给的方案"。
+                    llm_error = True
+                    llm_error_detail = f"LLM 调用异常：{e!s}"
+                    ai_plans = []
 
             # LLM 候选为空（服务不稳定）→ 规则降级：按星期去重挑 3 个候选
             if not ai_plans:
@@ -705,4 +746,9 @@ class RescheduleAgent:
             # 正常结果里它不存在，和 False 不是一回事。
             "need_info": False,
             "followup_questions": [],
+            # R94：五个分支键集必须一致（含 LLM 失败信号）。
+            # 即便本次 LLM 成功（llm_error=False），这个键也必须存在，
+            # 否则下游 `r.get("llm_error")` 拿 None，与"未尝试"无法区分。
+            "llm_error": llm_error,
+            "llm_error_detail": llm_error_detail,
         }

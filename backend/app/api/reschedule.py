@@ -609,6 +609,11 @@ async def reschedule_chat(req: ChatRequest):
             # 是被 R31 的部署新鲜度探测（比对返回体字段）抓出来的。
             "course_name": result.get("course_name"),
             "course_unrecognized": result.get("course_unrecognized", False),
+            # R94：LLM 候选生成失败信号。离线（未配置）或 fast 模式为 False/None，
+            # 只有 LLM 已配置且真正调用失败才置位 —— 前端据此把"规则备用方案"
+            # 和"LLM 亲自给的方案"区分开，而不是把降级产物显示成「🤖 AI 推荐」。
+            "llm_error": result.get("llm_error", False),
+            "llm_error_detail": result.get("llm_error_detail"),
         },
     )
 

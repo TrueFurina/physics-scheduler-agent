@@ -41,6 +41,8 @@ CONTRACT_KEYS = {
     "available_slots", "excluded_slots", "need_info",
     "followup_questions", "course_name", "course_unrecognized",
     "ai_plans", "total",
+    # R94：LLM 失败信号也必须进入契约 —— 五个分支缺任何一个都不行
+    "llm_error", "llm_error_detail",
 }
 
 
