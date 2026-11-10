@@ -179,3 +179,28 @@ describe('RescheduleView · 学期起始日降级就地提示（R98）', () => {
     expect(document.body.textContent || '').not.toContain('学期起始日读取失败');
   });
 });
+
+// ---------------------------------------------------------------------------
+// R99：影响分析页的冲突明细里 date 也是按兜底学期算的（实测差 7 天），
+// 但 R98 只给沙盘接了横幅。这里专测 DOM：available/excluded 全空，
+// 只有 conflict_slots 带信号 —— 警告必须仍出现在冲突明细块里。
+// ---------------------------------------------------------------------------
+describe('RescheduleView · 影响分析明细的日期降级提示（R99）', () => {
+  it('conflict_slots 带 date_degraded 时，冲突明细块内必须出现警告', () => {
+    const degraded = {
+      ...impact,
+      date_degraded: true,
+      conflict_slots: impact.conflict_slots.map((c) => ({ ...c, date_degraded: true })),
+    };
+    render(<RescheduleView {...base} impact={degraded as never} />);
+    const text = document.body.textContent || '';
+    expect(text).toContain('📋 冲突明细');
+    expect(text).toContain('学期起始日读取失败');
+    expect(text.indexOf('学期起始日读取失败')).toBeGreaterThan(text.indexOf('📋 冲突明细'));
+  });
+
+  it('没有降级信号时保持安静（不许制造狼来了）', () => {
+    render(<RescheduleView {...base} impact={impact as never} />);
+    expect(document.body.textContent || '').not.toContain('学期起始日读取失败');
+  });
+});

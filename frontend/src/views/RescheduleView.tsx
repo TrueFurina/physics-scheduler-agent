@@ -53,6 +53,9 @@ export default function RescheduleView({
 }: Props) {
   // R98：两类 slot 合并判一次即可；信号随 slot 原样透传，不经 App.tsx。
   const dateWarning = dateDegradedWarningOf([...available, ...excluded]);
+  // R99：影响分析页的 conflict_slots 是后端重新构造的 dict，曾把
+  // date_degraded 丢在复制路上；这里同样就地提示，不绕经 App.tsx。
+  const impactDateWarning = dateDegradedWarningOf(impact?.conflict_slots ?? []);
   const courseLabel = selectedCourse ? selectedCourse.course_name : '未指定课程';
   return (
     <div>
@@ -331,6 +334,11 @@ export default function RescheduleView({
                     ? `，共 ${impact.conflict_count} 处，仅显示前 ${impact.conflict_slots!.length} 条`
                     : ''}）
                 </div>
+                {impactDateWarning && (
+                  <div className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                    {impactDateWarning}
+                  </div>
+                )}
                 <div className="text-xs text-gray-600 space-y-1 max-h-56 overflow-y-auto">
                   {impact.conflict_slots!.map((c, i) => (
                     <div key={i} className="leading-relaxed">

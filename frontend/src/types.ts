@@ -122,6 +122,9 @@ export interface ImpactResult {
   affected_rooms: string[];
   /** 占着那些教室的教师（真实姓名）。不是"被调课教师"——那个人在 self_busy_slots 里。 */
   affected_teachers: string[];
+  /** R99：起始日读失败时，下面每条 date 都按兜底学期算，可能差一整周。 */
+  date_degraded?: boolean;
+  date_degraded_detail?: string | null;
   /** 调课教师**本人**在该时段已有课（自身冲突），语义上不是"别人受影响"，故单列。 */
   self_busy_count?: number;
   self_busy_slots?: Array<{
@@ -145,6 +148,8 @@ export interface ImpactResult {
     date: string;
     reason_type: string;
     reason: string;
+    /** R99：与 date 并列，前端据此在明细块内就地提示。 */
+    date_degraded?: boolean;
   }>;
 }
 

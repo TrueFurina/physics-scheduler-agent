@@ -330,6 +330,11 @@ async def impact_analysis(req: _api.ChatRequest):
     # 冲突筛选（含原因）
     result = _api._agent.find_slots_with_reasons(target_week, teacher_name=teacher_name)
     excluded = result["excluded"]
+    # R99：学期起始日读失败的降级信号必须跟着冲突明细一起走。
+    # 判据沿用 R98 —— 只认 detail（真读失败才有值）；表里没写起始日返回
+    # None 是设计回退，老形状 result 不带顶层字段时同样安静，不误报。
+    date_degraded_detail = result.get("date_degraded_detail") or None
+    date_degraded = date_degraded_detail is not None
 
     # 聚合影响范围
     #
@@ -349,6 +354,7 @@ async def impact_analysis(req: _api.ChatRequest):
             "weekday": e["weekday"], "time_slot": e["time_slot"],
             "room": e.get("room", ""), "date": e.get("date", ""),
             "reason_type": reason_type, "reason": e["reason"],
+            "date_degraded": e.get("date_degraded", False) is True,
         })
         if reason_type == "classroom_busy":
             affected_rooms.add(e.get("room", ""))
@@ -375,5 +381,7 @@ async def impact_analysis(req: _api.ChatRequest):
             "self_busy_count": len(self_busy),
             "self_busy_slots": self_busy[:5],
             "conflict_slots": conflict_slots[:10],
+            "date_degraded": date_degraded,
+            "date_degraded_detail": date_degraded_detail,
         },
     }

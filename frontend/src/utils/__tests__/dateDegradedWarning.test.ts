@@ -108,3 +108,52 @@ describe('接线守卫：helper 写了还得有人用（规则 27）', () => {
     expect(viewSource()).toContain('{aiPlansWarning}');
   });
 });
+
+// ---------------------------------------------------------------------------
+// R99：/impact-analysis 的 conflict_slots 是**重新构造**的 dict，R98 的
+// date_degraded 在复制路上被丢掉了。后端补回后，前端必须真的接上：
+// 类型别名 + 返回类型 + 横幅渲染，三处都钉死（规则 27）。
+// ---------------------------------------------------------------------------
+describe('接线守卫：影响分析页也要显示降级横幅（R99）', () => {
+  const typesSource = () => fs.readFileSync(path.resolve(SRC, 'types.ts'), 'utf8');
+
+  it('types.ts 的 ImpactResult 必须声明顶层与每条明细的 date_degraded', () => {
+    const t = typesSource();
+    const body = t.slice(t.indexOf('export interface ImpactResult'));
+    expect(body).toContain('date_degraded?: boolean');
+    expect(body).toContain('date_degraded_detail?: string | null');
+    const slots = body.slice(body.indexOf('conflict_slots:'));
+    expect(slots).toContain('date_degraded?: boolean');
+  });
+
+  it('client.ts 的 impactAnalysis 返回类型不许再是 any[]', () => {
+    const c = clientSource();
+    const seg = c.slice(c.indexOf('impactAnalysis:'), c.indexOf('parallelOverview:'));
+    expect(seg).toContain('date_degraded?: boolean');
+    expect(seg).not.toContain('conflict_slots: any[]');
+  });
+
+  it('RescheduleView 必须把 impact 明细交给 helper 并渲染横幅', () => {
+    const src = viewSource();
+    expect(src).toMatch(/dateDegradedWarningOf\(impact/);
+    expect(src).toMatch(/\{impactDateWarning && \(/);
+    expect(src).toContain('{impactDateWarning}');
+  });
+
+  it('横幅必须落在冲突明细块内，不能被沙盘横幅冒充', () => {
+    const src = viewSource();
+    const detail = src.indexOf('📋 冲突明细');
+    const banner = src.indexOf('{impactDateWarning && (');
+    expect(detail).toBeGreaterThan(-1);
+    expect(banner).toBeGreaterThan(detail);
+    expect(banner).toBeLessThan(src.indexOf('impact.conflict_slots!.map'));
+  });
+
+  it('不许动 App.tsx（体量守卫仍压线，信号不得绕经它）', () => {
+    const s = appSource();
+    expect(s.split('\n').length).toBeLessThanOrEqual(1500);
+    expect((s.match(/useState/g) ?? []).length).toBeLessThanOrEqual(70);
+    expect((s.match(/as any/g) ?? []).length).toBeLessThanOrEqual(20);
+    expect(s).not.toContain('impactDateWarning');
+  });
+});

@@ -171,6 +171,10 @@ FILES = {
     "M128": ["tests/test_semester_start_degraded.py"],
     "M129": ["tests/test_semester_start_degraded.py"],
     "M130": ["tests/test_semester_start_degraded.py"],
+    "M131": ["tests/test_impact_date_degraded.py"],
+    "M132": ["tests/test_impact_date_degraded.py"],
+    "M133": ["tests/test_impact_date_degraded.py"],
+    "M134": ["tests/test_impact_date_degraded.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1325,6 +1329,36 @@ MUTANTS = [
         '                    "date_degraded": False, "date_degraded_detail": None}',
         '            return {"available": [], "excluded": []}  # MUTANT: 未加载时信号消失',
         "test_unloaded_db_keeps_quiet_and_keeps_the_keys",
+    ),
+    (
+        "M131", "复制冲突明细时丢掉 date_degraded",
+        "app/api/insights.py",
+        '            "date_degraded": e.get("date_degraded", False) is True,\n',
+        '            # MUTANT: 复制冲突明细时丢掉 date_degraded\n',
+        "test_broken_semester_start_marks_every_conflict_slot or test_impact_analysis_http_exposes_date_degraded",
+    ),
+    (
+        "M132", "影响分析顶层丢掉结构化信号",
+        "app/api/insights.py",
+        '            "conflict_slots": conflict_slots[:10],\n'
+        '            "date_degraded": date_degraded,\n'
+        '            "date_degraded_detail": date_degraded_detail,\n',
+        '            "conflict_slots": conflict_slots[:10],  # MUTANT: 顶层丢掉降级信号\n',
+        "test_broken_semester_start_marks_top_level or test_impact_analysis_http_exposes_date_degraded",
+    ),
+    (
+        "M133", "冲突明细判据放宽成 truthy",
+        "app/api/insights.py",
+        '            "date_degraded": e.get("date_degraded", False) is True,\n',
+        '            "date_degraded": bool(e.get("date_degraded", False)),  # MUTANT: 判据放宽成 truthy\n',
+        "test_legacy_excluded_without_the_flag_stays_quiet",
+    ),
+    (
+        "M134", "顶层降级信号永远消失",
+        "app/api/insights.py",
+        '    date_degraded_detail = result.get("date_degraded_detail") or None\n',
+        '    date_degraded_detail = None  # MUTANT: 顶层降级信号永远消失\n',
+        "test_broken_semester_start_marks_top_level or test_normal_semester_start_is_quiet",
     ),
 ]
 

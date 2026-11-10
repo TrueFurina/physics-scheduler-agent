@@ -307,7 +307,17 @@ export const rescheduleApi = {
       affected_classes: string[];
       affected_rooms: string[];
       affected_teachers: string[];
-      conflict_slots: any[];
+      date_degraded?: boolean;
+      date_degraded_detail?: string | null;
+      conflict_slots: Array<{
+        weekday: string;
+        time_slot: string;
+        room: string;
+        date: string;
+        reason_type: string;
+        reason: string;
+        date_degraded?: boolean;
+      }>;
     } }>('/reschedule/impact-analysis', { message }),
 
   // 并行排课：课程总览（实验项目×分组）
