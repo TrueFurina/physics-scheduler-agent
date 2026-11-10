@@ -11,7 +11,7 @@ import {
 } from './cloudApi';
 import { withRetry, whenIdle } from './utils/async';
 import { describeApiError } from './utils/apiError';
-import { clearStaleLoadBanner, loadWarningOf } from './utils/msg';
+import { clearStaleLoadBanner, loadWarningOf, chatLlmWarningOf } from './utils/msg';
 import { downloadBlob } from './utils/download';
 import { EXPORT_KINDS } from './utils/exportKinds';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -122,6 +122,7 @@ function App() {
   const [aiPlans, setAiPlans] = useState<AiPlan[]>([]);
   // R64：候选来源。规则降级产物不能冒充 AI 产物。
   const [aiPlansSource, setAiPlansSource] = useState<'llm' | 'rule' | 'none'>('none');
+  const [aiPlansWarning, setAiPlansWarning] = useState('');  // R96：LLM 失败⇒卡片内就地说明，不弹顶部红字
   const [plansLoading, setPlansLoading] = useState(false);
   const plansSeqRef = useRef(0);      // 请求序号：旧响应晚到就丢弃，避免切周次后串台
   const plansTimerRef = useRef<number | null>(null);  // 切周次的防抖（连点只发最后一次）
@@ -702,10 +703,10 @@ function App() {
         false,
       );
       if (seq !== plansSeqRef.current) return;  // 已被更晚的选择取代
-      setAiPlans(r.data.data.ai_plans || []);
-      setAiPlansSource((r.data.data as any).ai_plans_source || 'none');
+      setAiPlans(r.data.data.ai_plans || []); setAiPlansSource((r.data.data as any).ai_plans_source || 'none');
+      setAiPlansWarning(chatLlmWarningOf(r.data.data));
     } catch {
-      if (seq === plansSeqRef.current) setAiPlans([]);
+      if (seq === plansSeqRef.current) { setAiPlans([]); setAiPlansWarning(''); }
     } finally {
       if (seq === plansSeqRef.current) setPlansLoading(false);
     }
@@ -715,7 +716,7 @@ function App() {
     if (plansTimerRef.current !== null) window.clearTimeout(plansTimerRef.current);
     const seq = ++plansSeqRef.current;
     // 切周次时先清空：上一周的候选留在屏幕上，比没有更糟（会被当成这一周的答案）
-    setAiPlans([]);
+    setAiPlans([]); setAiPlansWarning('');
     setPlansLoading(true);
     plansTimerRef.current = window.setTimeout(() => {
       plansTimerRef.current = null;
@@ -1383,7 +1384,7 @@ function App() {
               requestStatus={requestStatus}
               loading={loading}
               aiPlans={aiPlans}
-              aiPlansSource={aiPlansSource}
+              aiPlansSource={aiPlansSource} aiPlansWarning={aiPlansWarning}
               planLoading={plansLoading}
               onBack={() => setView('courses')}
               onTargetWeekChange={handleTargetWeekChange}

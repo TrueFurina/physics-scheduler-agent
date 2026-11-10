@@ -32,6 +32,8 @@ interface Props {
    * 但**不能显示成「🤖 AI 推荐」**，否则教秘以为这是分析过的结果。
    */
   aiPlansSource?: 'llm' | 'rule' | 'none';
+  /** R96：LLM 真的调用失败时的就地警告；空串 = 无故障，不渲染。 */
+  aiPlansWarning?: string;
   planLoading?: boolean;
   onBack: () => void;
   onTargetWeekChange: (week: number) => void;
@@ -45,7 +47,7 @@ export default function RescheduleView({
   selectedCourse, courseOptions = [], onSelectCourse,
   currentTeacher, targetWeek, available, excluded, showAllAvail,
   impact, impactLoading, requestStatus, loading, aiPlans = [], planLoading = false,
-  aiPlansSource = 'none',
+  aiPlansSource = 'none', aiPlansWarning = '',
   onBack, onTargetWeekChange, onToggleShowAll, onImpactAnalysis, onSubmit,
 }: Props) {
   const courseLabel = selectedCourse ? selectedCourse.course_name : '未指定课程';
@@ -197,11 +199,17 @@ export default function RescheduleView({
       </div>
 
       {/* AI 候选方案（F9）—— 后台加载，通常晚于沙盘 5 秒以上，故有独立占位 */}
-      {(planLoading || aiPlans.length > 0) && (
+      {(planLoading || aiPlans.length > 0 || aiPlansWarning) && (
         <div className="bg-white rounded-xl border border-indigo-200 p-5 mb-6">
           <h3 className="font-medium text-indigo-800 mb-1">
             {aiPlansSource === 'rule' ? '📋 系统推荐候选（AI 暂不可用）' : '🤖 AI 推荐候选方案'}
           </h3>
+          {/* R96：降级信号不能被「恰好没有候选」这个显示条件吞掉，故上面也进 || */}
+          {aiPlansWarning && (
+            <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg">
+              {aiPlansWarning}
+            </div>
+          )}
           <p className="text-xs text-gray-400 mb-3">
             从 {available.length} 个可用时段里挑几个更合适的 —— 只是建议，上面所有可用时段都能选
           </p>

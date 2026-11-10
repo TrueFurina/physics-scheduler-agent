@@ -108,6 +108,13 @@ export interface ChatResponse {
     course_name?: string | null;
     /** true = 没认出是哪门课/哪个实验，需要教秘在沙盘页补选 */
     course_unrecognized?: boolean;
+    /**
+     * R94 后端已返回、R96 前端才补上类型：LLM 已配置但候选生成真的失败。
+     * 离线未配置 / fast 模式是 false 或缺失，属常态而非故障。
+     * 之前类型里没有 ⇒ 前端只能 `as any` 硬转，具体失败原因永久丢失。
+     */
+    llm_error?: boolean;
+    llm_error_detail?: string | null;
   };
 }
 

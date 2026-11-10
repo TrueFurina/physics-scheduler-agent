@@ -91,3 +91,32 @@ export function masterRestoreWarningOf(data?: MasterRestoreResult): string {
   }
   return '';
 }
+
+/**
+ * `/reschedule/chat` 的 LLM 候选生成失败信号（R94 后端产出，R96 前端接线）。
+ * 字段可选：老后端 / fast 模式 / 离线未配置都不会给，不许当成故障。
+ */
+export interface ChatLlmDegraded {
+  llm_error?: boolean;
+  llm_error_detail?: string | null;
+}
+
+/**
+ * LLM 失败 → AI 候选卡片**内部**的就地提示文案；正常响应返回空串。
+ *
+ * 判据必须是 `=== true`：fast 模式与离线未配置时后端给 false / undefined，
+ * 那是常态，否则每次打开沙盘都会「狼来了」（R86/R87/R88 同款口径）。
+ * 文案以 ⚠️ 开头，与另外三个降级 helper 保持同一语气档。
+ *
+ * 为什么不是顶部横幅：AI 候选是加分项且后台加载（App.tsx 的 fetchAiPlans
+ * 注释明确「不该在教秘面前弹红字」，沙盘与提交仍然可用）。所以只在这张
+ * 卡片里就地说明失败原因，不打断主流程；`aiPlansSource === 'rule'` 只说
+ * "AI 暂不可用"，具体是没配置还是调用失败、失败在哪，得靠这个信号补齐。
+ */
+export function chatLlmWarningOf(data?: ChatLlmDegraded): string {
+  if (data?.llm_error !== true) return '';
+  const detail = (data.llm_error_detail || '').trim();
+  return detail
+    ? `⚠️ AI 候选生成失败，已改用系统规则推荐：${detail}`
+    : '⚠️ AI 候选生成失败，已改用系统规则推荐';
+}

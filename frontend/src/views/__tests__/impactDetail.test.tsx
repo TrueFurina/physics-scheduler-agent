@@ -136,3 +136,27 @@ describe('RescheduleView · 候选来源标注（R64）', () => {
     expect(document.body.textContent || '').toContain('AI 推荐候选方案');
   });
 });
+
+// ---------------------------------------------------------------------------
+// R96：LLM 失败信号必须真的出现在 DOM 里，而不是只接在源码里。
+//
+// 源码守卫只能证明"调用了 helper / 传了 prop"，证明不了用户看得见。
+// 这里专测最容易被吞的一种：候选方案恰好为空（planLoading=false），
+// 卡片原本的显示条件是 (planLoading || aiPlans.length > 0) ——
+// 若不把 warning 也放进条件，故障提示会静默消失。
+// ---------------------------------------------------------------------------
+describe('RescheduleView · LLM 失败就地提示（R96）', () => {
+  const warning = '⚠️ AI 候选生成失败，已改用系统规则推荐：upstream timeout';
+
+  it('无候选且未加载时，警告仍要上屏（不能被显示条件吞掉）', () => {
+    render(<RescheduleView {...base} impact={null} aiPlans={[]} planLoading={false} aiPlansWarning={warning} />);
+    const text = document.body.textContent || '';
+    expect(text).toContain('AI 候选生成失败');
+    expect(text).toContain('upstream timeout');
+  });
+
+  it('没有降级信号时保持安静（不许制造狼来了）', () => {
+    render(<RescheduleView {...base} impact={null} aiPlans={[]} planLoading={false} />);
+    expect(document.body.textContent || '').not.toContain('AI 候选生成失败');
+  });
+});
