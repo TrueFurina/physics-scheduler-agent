@@ -161,6 +161,9 @@ FILES = {
     "M118": ["tests/test_master_restore_warning.py"],
     "M119": ["tests/test_chat_llm_error_signal.py"],
     "M120": ["tests/test_chat_llm_error_signal.py"],
+    "M121": ["tests/test_experiment_tutor_degraded.py"],
+    "M122": ["tests/test_experiment_tutor_degraded.py"],
+    "M123": ["tests/test_experiment_tutor_degraded.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1218,6 +1221,32 @@ MUTANTS = [
         '                    llm_error_detail = None\n'
         '                    ai_plans = []',
         "test_llm_exception_is_surfaced",
+    ),
+    # R95：/experiment-tutor 知识源为空（未加载 / loaded=True 但 0 条目的空壳）
+    # 时仍报 success=True + data={}，与有本校数据逐字节相同 —— 用户看不出
+    # 模型是"凭通用规范作答"。判据必须看结构化事实，不能只判 `if not context`。
+    (
+        "M121", "压根不判知识源是否为空",
+        "app/api/reschedule.py",
+        '    knowledge_empty = _knowledge_source_is_empty()',
+        '    knowledge_empty = False  # MUTANT: 不判知识源，静默降级照旧',
+        "test_empty_knowledge_source_is_structurally_degraded or test_zero_entry_shell_is_not_missed",
+    ),
+    (
+        "M122", "只看 loaded，漏掉 0 条目的非空空壳",
+        "app/api/reschedule.py",
+        '    return not any(bool(e.experiment) for e in _db.entries)',
+        '    return False  # MUTANT: 漏报 R27 兜底后的空壳知识源',
+        "test_zero_entry_shell_is_not_missed or test_fake_context_text_cannot_whitewash",
+    ),
+    (
+        "M123", "知识源为空却谎报无降级",
+        "app/api/reschedule.py",
+        '                "degraded": True,\n'
+        '                "knowledge_context_empty": True,',
+        '                "degraded": False,  # MUTANT: 谎报无降级\n'
+        '                "knowledge_context_empty": False,',
+        "test_empty_knowledge_source_is_structurally_degraded or test_zero_entry_shell_is_not_missed",
     ),
 ]
 
