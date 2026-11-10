@@ -282,5 +282,19 @@ export async function askCloudLlm(
       onDelta(answer);
     }
   }
+  // R101：零 delta 的「空流」此前直接 return ''，App.tsx 的 handleConsult
+  // 既不进 catch（没抛错）、也不写云端历史（if (session && answer) 为假），
+  // ConsultView 的 `answer && (...)` 同样不渲染，finally 还把问题清空了 ——
+  // 教秘点完「提问」只看到一片空白，连「没查到」都没说出口（R35 同族）。
+  // 云端 HTTP 200 但一个有效 chunk 都不给是可达的：模型拒答、内容审核静默
+  // 拦截、网关吞流。后端 llm_intent_parser.consult() 早已把空内容转成
+  // `{"error": ...}`，这里补上流式路径的另一半。
+  // 抛出去交给**既有** catch 用 describeCloudError 显示原因，因此 App.tsx
+  // 零改动（它压在 1500 行 / 70 个 useState 的体量守卫上）。
+  // 两个边界：判据用 trim（全空白 delta 一样算没内容）；用户主动停止
+  // （signal.aborted）保留「不报错」的既有语义，不把中止说成故障。
+  if (!answer.trim() && !signal?.aborted) {
+    throw new Error('云端大模型本次未返回任何内容，请稍后重试或换个问法');
+  }
   return answer;
 }
