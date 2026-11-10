@@ -256,8 +256,18 @@ export const rescheduleApi = {
   }>('/reschedule/apply-move', data),
 
   // 实验规范查询（端点保留、面向排课人员/教师）
+  // R100：后端 R95/R100 会在 data 里回降级信号（知识源全空 / 部分维度为空），
+  // 类型里不声明就等于没有 —— 调用方拿不到，也不可能被接线（规则 34）。
   experimentTutor: (question: string) =>
-    api.post<{ success: boolean; message: string; reply: string }>('/reschedule/experiment-tutor', { question }),
+    api.post<{
+      success: boolean; message: string; reply: string;
+      data?: {
+        degraded?: boolean;
+        knowledge_context_empty?: boolean;
+        knowledge_gaps?: string[];
+        warnings?: string[];
+      };
+    }>('/reschedule/experiment-tutor', { question }),
 
   // 排课自动生成（P1）
   //

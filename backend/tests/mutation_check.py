@@ -175,6 +175,11 @@ FILES = {
     "M132": ["tests/test_impact_date_degraded.py"],
     "M133": ["tests/test_impact_date_degraded.py"],
     "M134": ["tests/test_impact_date_degraded.py"],
+    "M135": ["tests/test_experiment_tutor_partial_gaps.py"],
+    "M136": ["tests/test_experiment_tutor_partial_gaps.py"],
+    "M137": ["tests/test_experiment_tutor_partial_gaps.py"],
+    "M138": ["tests/test_experiment_tutor_partial_gaps.py"],
+    "M139": ["tests/test_experiment_tutor_partial_gaps.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1359,6 +1364,51 @@ MUTANTS = [
         '    date_degraded_detail = result.get("date_degraded_detail") or None\n',
         '    date_degraded_detail = None  # MUTANT: 顶层降级信号永远消失\n',
         "test_broken_semester_start_marks_top_level or test_normal_semester_start_is_quiet",
+    ),
+    # R100：/experiment-tutor 知识源「部分为空」。R95 只判实验项目一维，
+    # 而提示词还写着「实验室（0间）/ 实验教师（0位）」—— 三维残缺时
+    # 响应与齐全时逐字节相同。五条分别守「两个维度都真的扫」「不谎报
+    # 无降级」「齐全时不狼来了」「全空仍归 R95、gaps 不抢戏」。
+    (
+        "M135", "不判实验室维度",
+        "app/api/reschedule.py",
+        '    if not any(bool(getattr(e, "room", "")) for e in _db.entries):\n'
+        '        gaps.append("实验室")\n',
+        '    # MUTANT: 不判实验室维度\n',
+        "test_partial_gaps_are_structurally_reported or test_single_gap_is_not_blown_up",
+    ),
+    (
+        "M136", "不判实验教师维度",
+        "app/api/reschedule.py",
+        '    if not any(bool(getattr(e, "teacher", "")) for e in _db.entries):\n'
+        '        gaps.append("实验教师")\n',
+        '    # MUTANT: 不判实验教师维度\n',
+        "test_partial_gaps_are_structurally_reported or test_fake_context_text_cannot_whitewash_gaps",
+    ),
+    (
+        "M137", "部分缺口却谎报无降级",
+        "app/api/reschedule.py",
+        '                "degraded": True,\n'
+        '                "knowledge_context_empty": False,\n'
+        '                "knowledge_gaps": gaps,\n',
+        '                "degraded": False,  # MUTANT: 部分缺口谎报无降级\n'
+        '                "knowledge_context_empty": False,\n'
+        '                "knowledge_gaps": gaps,\n',
+        "test_partial_gaps_are_structurally_reported or test_partial_gaps_http_exposes_data",
+    ),
+    (
+        "M138", "三维齐全也报警（狼来了）",
+        "app/api/reschedule.py",
+        '    if gaps:\n',
+        '    if True:  # MUTANT: 三维齐全也报警\n',
+        "test_healthy_source_is_byte_identical",
+    ),
+    (
+        "M139", "知识源全空时 gaps 抢戏",
+        "app/api/reschedule.py",
+        '                "knowledge_gaps": [],\n',
+        '                "knowledge_gaps": ["实验室"],  # MUTANT: 全空却谎报部分缺口\n',
+        "test_empty_source_keeps_the_R95_signal or test_zero_entry_shell_keeps_the_R95_signal",
     ),
 ]
 

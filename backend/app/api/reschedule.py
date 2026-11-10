@@ -1232,6 +1232,31 @@ def _knowledge_source_is_empty() -> bool:
     return not any(bool(e.experiment) for e in _db.entries)
 
 
+def _knowledge_source_gaps() -> list:
+    """R100：知识源三个维度里哪些是空的（只看结构化事实，不猜 context 文案）。
+
+    `_build_knowledge_context()` 收集实验项目 / 实验室 / 实验教师三维，
+    R95 的 `_knowledge_source_is_empty()` 只判第一维。表里有实验名、
+    但场地或教师整列为空时，提示词里会明写「实验室（0间）」「实验教师（0位）」，
+    模型据此泛化作答，而响应与三维齐全时逐字节相同 —— 教秘看到的是一份
+    「查过本校数据」的回答，实际那两维根本没查到。同 R35：没查到必须说出口。
+
+    判据只看每条记录的属性，不看 `_build_knowledge_context()` 的中文字串：
+    改个措辞、或把 context 伪装成三维齐全，都不许把守卫洗白。
+    未加载 / 实验项目全空由 R95 分支负责，这里返回空列表，不抢戏、不重复报。
+    """
+    if not _db.loaded:
+        return []
+    if not any(bool(getattr(e, "experiment", "")) for e in _db.entries):
+        return []
+    gaps = []
+    if not any(bool(getattr(e, "room", "")) for e in _db.entries):
+        gaps.append("实验室")
+    if not any(bool(getattr(e, "teacher", "")) for e in _db.entries):
+        gaps.append("实验教师")
+    return gaps
+
+
 @router.post("/experiment-tutor", response_model=ConsultResponse, summary="实验规范查询（面向排课人员/教师）",
              dependencies=[Depends(rate_limit("experiment-tutor"))])
 async def experiment_tutor_consult(req: ConsultRequest):
@@ -1249,6 +1274,11 @@ async def experiment_tutor_consult(req: ConsultRequest):
     # 实验规范查询基于实验知识源上下文
     context = _build_knowledge_context()
     knowledge_empty = _knowledge_source_is_empty()
+    # R100：知识源「部分为空」同样要结构化。R95 只判实验项目一维，
+    # 而 _build_knowledge_context() 会把「实验室（0间）」「实验教师（0位）」
+    # 一并写进提示词 —— 模型拿到的是明写 0 的残知识源，回答据此泛化，
+    # 响应却与三维齐全时逐字节相同（同 R35：没查到必须说出口）。
+    gaps = _knowledge_source_gaps()
     result = await run_in_threadpool(_agent.llm_parser.consult, req.question,
                                      context=context, role="experiment_tutor")
 
@@ -1266,8 +1296,26 @@ async def experiment_tutor_consult(req: ConsultRequest):
             data={
                 "degraded": True,
                 "knowledge_context_empty": True,
+                "knowledge_gaps": [],
                 "warnings": [
                     "本校实验安排表知识源为空，回答未引用本校实验项目/实验室/教师数据"
+                ],
+            },
+        )
+    if gaps:
+        # R100：只补结构化信号，success 不翻转（R86 家族约定）；回答已经
+        # 拿到，不许丢。人话 message 里也说明一句 ——「message 里没说」
+        # 等于用户没看到（规则 24）。
+        return ConsultResponse(
+            success=True,
+            message=f"实验规范查询完成（本校知识源缺少{'、'.join(gaps)}，相关回答仅依据通用规范）",
+            reply=result.get("reply", ""),
+            data={
+                "degraded": True,
+                "knowledge_context_empty": False,
+                "knowledge_gaps": gaps,
+                "warnings": [
+                    f"本校实验安排表知识源缺少{'、'.join(gaps)}信息，回答中相关部分未引用本校数据"
                 ],
             },
         )

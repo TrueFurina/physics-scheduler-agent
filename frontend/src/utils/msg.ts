@@ -142,3 +142,38 @@ export function dateDegradedWarningOf(slots?: DateDegradedSlot[]): string {
   if (!Array.isArray(slots) || !slots.some((s) => s?.date_degraded === true)) return '';
   return '⚠️ 学期起始日读取失败，页面日期按默认学期推算，可能与实际相差一周，请勿直接照此安排';
 }
+
+/**
+ * `/experiment-tutor` 的知识源降级信号（R95 全空 / R100 部分维度为空）。
+ * 字段全部可选：老后端 / 正常响应根本不给 `data`，不许当成故障。
+ */
+export interface ExperimentTutorDegraded {
+  degraded?: boolean;
+  knowledge_context_empty?: boolean;
+  knowledge_gaps?: string[];
+  warnings?: string[];
+}
+
+/**
+ * 知识源降级 → 就地提示文案；正常响应返回空串。
+ *
+ * 判据必须是 `=== true`：老后端 / 三维齐全时 `degraded` 是 undefined 或
+ * false，那是常态，否则每次查询都弹「狼来了」（R86–R99 同款口径）。
+ * 优先用后端的 warnings 原文（它最贴近具体缺了什么），缺失时用 gaps
+ * 或「知识源为空」兜底 —— 不许什么都不显示。
+ *
+ * 诚实边界：该端点在 UI 上尚未被调用（实验规范查询页走云端流式问答），
+ * 所以信号止于 API 面与这个可复用 helper；接入 UI 需先拆 App.tsx。
+ */
+export function experimentTutorWarningOf(data?: ExperimentTutorDegraded): string {
+  if (data?.degraded !== true) return '';
+  const list = Array.isArray(data.warnings)
+    ? data.warnings.filter((w): w is string => typeof w === 'string' && w.trim() !== '')
+    : [];
+  if (list.length) return `⚠️ ${list.join('；')}`;
+  const gaps = Array.isArray(data.knowledge_gaps)
+    ? data.knowledge_gaps.filter((g): g is string => typeof g === 'string' && g.trim() !== '')
+    : [];
+  if (gaps.length) return `⚠️ 本校知识源缺少${gaps.join('、')}，相关回答仅依据通用规范`;
+  return '⚠️ 本校实验安排表知识源为空，回答仅依据通用规范';
+}
