@@ -160,3 +160,22 @@ describe('RescheduleView · LLM 失败就地提示（R96）', () => {
     expect(document.body.textContent || '').not.toContain('AI 候选生成失败');
   });
 });
+
+// ---------------------------------------------------------------------------
+// R98：学期起始日读失败时，沙盘日期是按兜底常量算的（实测差 7 天）。
+// 源码守卫证明不了用户看得见，这里专测 DOM：一条 slot 带 date_degraded
+// 就必须在沙盘里出现警告；没有信号时保持安静。
+// ---------------------------------------------------------------------------
+describe('RescheduleView · 学期起始日降级就地提示（R98）', () => {
+  const slot = { weekday: '周一', time_slot: '567', room: 'A410', date: '03月10日' };
+
+  it('slot 带 date_degraded 时，沙盘上必须出现警告', () => {
+    render(<RescheduleView {...base} impact={null} available={[{ ...slot, date_degraded: true }] as never} />);
+    expect(document.body.textContent || '').toContain('学期起始日读取失败');
+  });
+
+  it('没有降级信号时保持安静（不许制造狼来了）', () => {
+    render(<RescheduleView {...base} impact={null} available={[slot] as never} />);
+    expect(document.body.textContent || '').not.toContain('学期起始日读取失败');
+  });
+});

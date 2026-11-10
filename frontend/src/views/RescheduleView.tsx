@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import type { AvailableSlot, ExcludedSlot, TeacherCourse } from '../api/client';
 import type { ImpactResult, AiPlan } from '../types';
 import { GRID_TIME_SLOTS, WEEKDAYS_ALL, timeSlotLabels, weekdayLabels } from '../constants/labels';
+import { dateDegradedWarningOf } from '../utils/msg';
 
 interface Props {
   /**
@@ -50,6 +51,8 @@ export default function RescheduleView({
   aiPlansSource = 'none', aiPlansWarning = '',
   onBack, onTargetWeekChange, onToggleShowAll, onImpactAnalysis, onSubmit,
 }: Props) {
+  // R98：两类 slot 合并判一次即可；信号随 slot 原样透传，不经 App.tsx。
+  const dateWarning = dateDegradedWarningOf([...available, ...excluded]);
   const courseLabel = selectedCourse ? selectedCourse.course_name : '未指定课程';
   return (
     <div>
@@ -112,6 +115,12 @@ export default function RescheduleView({
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-6">
         <h3 className="font-medium text-gray-900 mb-1">🗓️ 周课表沙盘（第{targetWeek}周）</h3>
         <p className="text-xs text-gray-400 mb-4">绿=可用时段 ｜ 红=被排除时段（含原因）</p>
+        {/* R98：日期不可靠时必须在沙盘内部就地说明，不能塞进候选卡片被显示条件吞掉 */}
+        {dateWarning && (
+          <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg">
+            {dateWarning}
+          </div>
+        )}
         <div className="grid" style={{ gridTemplateColumns: '70px repeat(7, 1fr)', gap: '6px' }}>
           <div />
           {WEEKDAYS_ALL.map((wd) => (

@@ -120,3 +120,25 @@ export function chatLlmWarningOf(data?: ChatLlmDegraded): string {
     ? `⚠️ AI 候选生成失败，已改用系统规则推荐：${detail}`
     : '⚠️ AI 候选生成失败，已改用系统规则推荐';
 }
+
+/**
+ * 学期起始日读取失败的就地提示（R98 后端产出，本轮前端接线）。
+ *
+ * 后端 `find_slots_with_reasons` 在真实校历读失败时会回退硬编码常量，
+ * 实测真实起始日 2025-02-17 与兜底 2025-02-24 差 7 天 —— 沙盘上每一条
+ * `date` 都会整整偏一周，而 `RescheduleView` 又真的把日期渲染上屏。
+ * 所以标记与 `date` 并列放在**每条 slot** 里，随 `available_slots`
+ * 原样透传（App.tsx 不挑字段），只在这里聚合出一条沙盘内的警告。
+ *
+ * 判据必须是 `=== true`：老后端 / 正常响应 / 表里本来就没写校历都给
+ * false 或 undefined，那是常态，不许弹「狼来了」（R86–R96 同款口径）。
+ * 不弹顶部红字：沙盘仍可用，只是日期不能照抄，就地说明即可。
+ */
+export interface DateDegradedSlot {
+  date_degraded?: boolean;
+}
+
+export function dateDegradedWarningOf(slots?: DateDegradedSlot[]): string {
+  if (!Array.isArray(slots) || !slots.some((s) => s?.date_degraded === true)) return '';
+  return '⚠️ 学期起始日读取失败，页面日期按默认学期推算，可能与实际相差一周，请勿直接照此安排';
+}

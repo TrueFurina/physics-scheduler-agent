@@ -82,6 +82,8 @@ export interface AvailableSlot {
   time_slot: string;
   room: string;
   date?: string;
+  /** R98：true 表示这条例外的 date 是按兜底学期算的，不是本校真实校历。 */
+  date_degraded?: boolean;
 }
 
 export interface ChatResponse {
@@ -156,6 +158,8 @@ export interface ExcludedSlot {
   time_slot: string;
   room: string;
   date?: string;
+  /** R98：与 AvailableSlot 同义；两类时段共用一套可靠性标记。 */
+  date_degraded?: boolean;
   reason_type: string;
   reason: string;
 }

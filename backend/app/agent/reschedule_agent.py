@@ -75,14 +75,24 @@ class RescheduleAgent:
         self.llm_parser = llm_parser or LLMIntentParser()
         # 学期起始日：缓存一次解析结果，避免每次筛选都重新打开 Excel（慢）
         self._semester_start_cache = None
+        # R98：读失败时记下原因。与缓存同生命周期 —— 缓存里是兜底常量，
+        # 后续每次算日期都得继续带着信号，不能第一次报完就抹掉（规则 29）。
+        self._semester_start_degraded = None
 
     def _get_semester_start(self):
         """动态获取学期起始日（缓存解析结果，避免重复打开 Excel）"""
         if self._semester_start_cache is None:
             try:
                 self._semester_start_cache = self.db.get_semester_start_date() or SEMESTER_START
-            except Exception:
+            except Exception as e:
+                # R98：真实起始日读失败 ⇒ 回退常量会让所有 date 整体偏移
+                # （实测真实 2025-02-17 与兜底 2025-02-24 差 7 天），而前端
+                # 会把 availSlot.date 直接渲染上屏。旧实现只静静换一套日期，
+                # 教秘照着错的日期去调课却看不出任何差别。
+                # 只在**真的抛异常**时置位：表里没写起始日（返回 None）是
+                # 设计回退（无基准可用），不能每次都狼来了（同 R94/R97 判据）。
                 self._semester_start_cache = SEMESTER_START
+                self._semester_start_degraded = f"{type(e).__name__}: {e}"
         return self._semester_start_cache
 
     def _cn_to_int(self, s: str) -> int:
@@ -277,11 +287,20 @@ class RescheduleAgent:
         """
         查找可用时段 + 被排除时段（含原因标注）—— F4 信息透传
 
-        返回: {"available": [...], "excluded": [...]}
-        excluded 每项含 reason_type / reason
+        返回: {"available": [...], "excluded": [...],
+               "date_degraded": bool, "date_degraded_detail": str | None}
+        excluded 每项含 reason_type / reason；两类 slot 都带 date_degraded（R98）。
         """
         if not self.db.loaded:
-            return {"available": [], "excluded": []}
+            # R98：早返回也要给同形字段，否则下游拿到 None（"没算出"与"没故障"混同）。
+            return {"available": [], "excluded": [],
+                    "date_degraded": False, "date_degraded_detail": None}
+
+        # R98：先算一次，让降级事实在返回前就已定；并复用给下面所有 slot。
+        # 原来每个 slot 都调一次 _get_semester_start()（缓存命中也要走函数）。
+        semester_start = self._get_semester_start()
+        detail = self._semester_start_degraded or None
+        date_degraded = detail is not None
 
         weekdays = list(WEEKDAYS_ALL)
         time_slots = ["567", "678", "91011"]
@@ -363,7 +382,8 @@ class RescheduleAgent:
                                f"{_raw_slot_note(info)}")
                     excluded.append({
                         "weekday": wd, "time_slot": ts, "room": "",
-                        "date": week_to_date(target_week, wd, self._get_semester_start()),
+                        "date": week_to_date(target_week, wd, semester_start),
+                        "date_degraded": date_degraded,
                         "reason_type": "teacher_busy",
                         # 结构化字段与中文文案并列给出。**下游不要再用正则从 reason 里反解**：
                         # 文案是给人看的，改一个字（比如换个括号）就会静默解析失败。
@@ -385,8 +405,9 @@ class RescheduleAgent:
                                    f"{_raw_slot_note(info)}")
                         excluded.append({
                             "weekday": wd, "time_slot": ts, "room": rm,
-                            "date": week_to_date(target_week, wd, self._get_semester_start()),
-                            "reason_type": "classroom_busy",
+                        "date": week_to_date(target_week, wd, semester_start),
+                        "date_degraded": date_degraded,
+                        "reason_type": "classroom_busy",
                             "class_name": info["class_name"],
                             "experiment": info["experiment"],
                             "teacher": info["teacher"],
@@ -397,10 +418,17 @@ class RescheduleAgent:
                         "weekday": wd,
                         "time_slot": ts,
                         "room": rm,
-                        "date": week_to_date(target_week, wd, self._get_semester_start()),
+                        "date": week_to_date(target_week, wd, semester_start),
+                        "date_degraded": date_degraded,
                     })
 
-        return {"available": available, "excluded": excluded}
+        return {
+            "available": available, "excluded": excluded,
+            # R98：顶层聚合信号（供影响分析等直接调用方读）；每条 slot 里的
+            # 标记则随 available_slots 原样透传到前端沙盘，与日期并列展示。
+            "date_degraded": date_degraded,
+            "date_degraded_detail": detail,
+        }
 
     def _slot_context(self, parsed: dict) -> Dict:
         """把本轮"已确认的槽位"抽出来回传给前端，供下一轮合并（B2 多轮追问）。

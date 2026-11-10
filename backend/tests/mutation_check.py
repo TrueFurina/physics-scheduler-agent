@@ -167,6 +167,10 @@ FILES = {
     "M124": ["tests/test_chat_parse_error_signal.py"],
     "M125": ["tests/test_chat_parse_error_signal.py"],
     "M126": ["tests/test_chat_parse_error_signal.py"],
+    "M127": ["tests/test_semester_start_degraded.py"],
+    "M128": ["tests/test_semester_start_degraded.py"],
+    "M129": ["tests/test_semester_start_degraded.py"],
+    "M130": ["tests/test_semester_start_degraded.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1283,6 +1287,44 @@ MUTANTS = [
         '            return self._need_info(parsed, [], llm_error, llm_error_detail)',
         '            return self._need_info(parsed, [])  # MUTANT: 信号在追问分支蒸发',
         "test_followup_branch_preserves_signal or test_parse_error_dict_is_surfaced",
+    ),
+    # R98：真实学期起始日读失败 ⇒ 回退常量让每条 date 整体偏移 7 天，
+    # 前端又真的把 availSlot.date 渲染上屏。四条分别守「异常置位」「判据不放宽」
+    # 「标记随每条 slot 回去」「早返回也保持同形字段」。
+    (
+        "M127", "学期起始日读失败伪装成正常",
+        "app/agent/reschedule_agent.py",
+        '                self._semester_start_cache = SEMESTER_START\n'
+        '                self._semester_start_degraded = f"{type(e).__name__}: {e}"',
+        '                self._semester_start_cache = SEMESTER_START\n'
+        '                pass  # MUTANT: 读失败也当没事',
+        "test_broken_semester_start_is_structurally_reported or test_exception_never_bubbles_but_is_not_swallowed",
+    ),
+    (
+        "M128", "有降级详情却谎报无降级",
+        "app/agent/reschedule_agent.py",
+        '        date_degraded = detail is not None',
+        '        date_degraded = False  # MUTANT: 明明降级了还报正常',
+        "test_broken_semester_start_is_structurally_reported or test_empty_detail_must_not_be_reported_as_degraded",
+    ),
+    (
+        "M129", "可用时段不带降级标记",
+        "app/agent/reschedule_agent.py",
+        '                        "date": week_to_date(target_week, wd, semester_start),\n'
+        '                        "date_degraded": date_degraded,\n'
+        '                    })',
+        '                        "date": week_to_date(target_week, wd, semester_start),\n'
+        '                        # MUTANT: 可用时段不带降级标记\n'
+        '                    })',
+        "test_broken_semester_start_is_structurally_reported or test_chat_http_exposes_date_degraded",
+    ),
+    (
+        "M130", "未加载早返回丢掉结构化字段",
+        "app/agent/reschedule_agent.py",
+        '            return {"available": [], "excluded": [],\n'
+        '                    "date_degraded": False, "date_degraded_detail": None}',
+        '            return {"available": [], "excluded": []}  # MUTANT: 未加载时信号消失',
+        "test_unloaded_db_keeps_quiet_and_keeps_the_keys",
     ),
 ]
 
