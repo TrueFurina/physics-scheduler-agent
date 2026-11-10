@@ -439,8 +439,8 @@ class RescheduleAgent:
         """信息不足 → 追问。槽位驱动优先；槽位都齐了才退回 LLM 的问题。
 
         llm_error / llm_error_detail 透传结构化信号（R94）：追问分支在 LLM
-        候选生成之前就返回，此时还没尝试过 LLM，故默认 False/None；但参数化
-        以便将来若追问前也接入 LLM 解析失败信号时无需改调用点。
+        候选生成之前就返回，故默认 False/None。R97 起追问前的意图解析（parse）
+        失败也会带信号进来，调用点必须显式传入，否则信号会在这里蒸发。
         """
         questions = self._missing_slot_questions(parsed)
         if not questions:
@@ -496,7 +496,20 @@ class RescheduleAgent:
 
         # 规则解析失败 → 尝试 LLM 解析（B1）
         if not parsed["target_week"] and self.llm_parser:
-            llm_result = self.llm_parser.parse(text)
+            # R97：意图解析（parse）失败也必须结构化。R94 只覆盖了 suggest_plans，
+            # 但 parse 失败恰恰让 target_week 为空 ⇒ 根本走不到候选生成那一步，
+            # 那条信号永远没机会置位；用户只看到「规则没解析出来」，前端也收不到
+            # llm_error。判据沿用 R94：仅 LLM **已配置**且真正失败才算故障，
+            # 未配置（离线常态）返回的 error 是预期，不能污染信号。
+            # 异常也一并兜住：原实现没有 try/except，parse 一抛异常 /chat 直接 500，
+            # 连优雅降级都没有。
+            try:
+                llm_result = self.llm_parser.parse(text)
+            except Exception as e:
+                llm_result = {"error": f"LLM 意图解析异常：{e!s}"}
+            if llm_result.get("error") and getattr(self.llm_parser, "configured", False):
+                llm_error = True
+                llm_error_detail = f"意图解析失败：{llm_result['error']}"
             if not llm_result.get("error"):
                 # 先把 LLM 解析到的槽位并进来，再判断要不要追问：
                 # 原来是一看到 needs_followup 就立刻返回，于是 LLM 同时给出的
@@ -570,7 +583,8 @@ class RescheduleAgent:
         # 教秘以为系统懂了，实际它对"要调哪门课"一无所知。
         # 一份"看起来全可用"的沙盘比报错更危险。
         if not parsed["target_week"] or not parsed.get("teacher_name"):
-            return self._need_info(parsed, [])
+            # R97：追问发生在 parse 之后，此时信号可能已置位；不传参等于在这里丢掉。
+            return self._need_info(parsed, [], llm_error, llm_error_detail)
         # 课程名**不阻断**：`find_slots_with_reasons` 只用 (周次, 教师) 计算
         # "这一周这个人哪些时段空着"，与具体哪门课无关。硬性追问会让
         # "第2轮回答第3周就办完"这条多轮流程失效（实测 4 个测试变红）。

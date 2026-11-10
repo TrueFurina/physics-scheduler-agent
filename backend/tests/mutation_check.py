@@ -164,6 +164,9 @@ FILES = {
     "M121": ["tests/test_experiment_tutor_degraded.py"],
     "M122": ["tests/test_experiment_tutor_degraded.py"],
     "M123": ["tests/test_experiment_tutor_degraded.py"],
+    "M124": ["tests/test_chat_parse_error_signal.py"],
+    "M125": ["tests/test_chat_parse_error_signal.py"],
+    "M126": ["tests/test_chat_parse_error_signal.py"],
 }
 
 # (编号, 说明, 文件, 原文, 变异后, pytest -k 表达式)
@@ -1247,6 +1250,39 @@ MUTANTS = [
         '                "degraded": False,  # MUTANT: 谎报无降级\n'
         '                "knowledge_context_empty": False,',
         "test_empty_knowledge_source_is_structurally_degraded or test_zero_entry_shell_is_not_missed",
+    ),
+    # R97：聊天族 LLM 意图解析（parse）失败 —— R94 只守了 suggest_plans，
+    # 而 parse 失败让 target_week 为空 ⇒ 根本走不到候选生成，信号永远没机会置位；
+    # 抛异常时更是直接冒泡 500。三条分别守「置位」「异常兜底」「追问分支透传」。
+    (
+        "M124", "parse 返回 error dict 却吞掉信号",
+        "app/agent/reschedule_agent.py",
+        '            if llm_result.get("error") and getattr(self.llm_parser, "configured", False):\n'
+        '                llm_error = True\n'
+        "                llm_error_detail = f\"意图解析失败：{llm_result['error']}\"",
+        '            if llm_result.get("error") and getattr(self.llm_parser, "configured", False):\n'
+        '                pass  # MUTANT: 吞掉意图解析失败信号',
+        "test_parse_error_dict_is_surfaced or test_followup_branch_preserves_signal",
+    ),
+    (
+        "M125", "parse 抛异常时伪装成空结果",
+        "app/agent/reschedule_agent.py",
+        '            try:\n'
+        '                llm_result = self.llm_parser.parse(text)\n'
+        '            except Exception as e:\n'
+        '                llm_result = {"error": f"LLM 意图解析异常：{e!s}"}',
+        '            try:  # MUTANT: 异常被伪装成「解析成功但没结果」\n'
+        '                llm_result = self.llm_parser.parse(text)\n'
+        '            except Exception:\n'
+        '                llm_result = {}',
+        "test_parse_exception_is_surfaced_not_raised",
+    ),
+    (
+        "M126", "追问分支置位后又被丢掉",
+        "app/agent/reschedule_agent.py",
+        '            return self._need_info(parsed, [], llm_error, llm_error_detail)',
+        '            return self._need_info(parsed, [])  # MUTANT: 信号在追问分支蒸发',
+        "test_followup_branch_preserves_signal or test_parse_error_dict_is_surfaced",
     ),
 ]
 
